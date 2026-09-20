@@ -18,6 +18,7 @@ class ScopedTessellationBlocks {
 public:
     explicit ScopedTessellationBlocks(
         ExpectedBlockMap const&      blocks,
+        ExpectedLiquidMap const&     liquids,
         ExpectedBlockActorMap const& blockActors
     );
     ~ScopedTessellationBlocks();
@@ -27,6 +28,7 @@ public:
 
 private:
     ExpectedBlockMap const*      mPreviousBlocks{};
+    ExpectedLiquidMap const*     mPreviousLiquids{};
     ExpectedBlockActorMap const* mPreviousBlockActors{};
 };
 
@@ -50,6 +52,7 @@ private:
 bool regionWritesSuppressed();
 
 Block const*      findTessellationBlock(BlockPos const& position);
+Block const*      findTessellationLiquid(BlockPos const& position);
 BlockActor const* findTessellationBlockActor(BlockPos const& position);
 
 } // namespace lholo::projection::detail

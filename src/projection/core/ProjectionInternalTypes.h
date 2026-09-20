@@ -32,6 +32,7 @@ struct ProjectedBlockActor {
 };
 
 using ExpectedBlockMap      = std::map<SubChunkKey, Block const*>;
+using ExpectedLiquidMap     = std::map<SubChunkKey, Block const*>;
 using ExpectedBlockActorMap = std::map<SubChunkKey, std::shared_ptr<BlockActor>>;
 using ExpectedBlockIndexMap = std::map<SubChunkKey, std::size_t>;
 

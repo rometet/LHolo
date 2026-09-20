@@ -17,6 +17,7 @@ namespace lholo::projection::detail {
 namespace {
 
 thread_local ExpectedBlockMap const*      gTessellationBlocks{};
+thread_local ExpectedLiquidMap const*     gTessellationLiquids{};
 thread_local ExpectedBlockActorMap const* gTessellationBlockActors{};
 thread_local bool                         gSuppressRegionWrites{};
 
@@ -35,13 +36,16 @@ bool regionWritesSuppressed() {
 
 ScopedTessellationBlocks::ScopedTessellationBlocks(
     ExpectedBlockMap const&      blocks,
+    ExpectedLiquidMap const&     liquids,
     ExpectedBlockActorMap const& blockActors
 )
 : mPreviousBlocks(std::exchange(gTessellationBlocks, &blocks)),
+  mPreviousLiquids(std::exchange(gTessellationLiquids, &liquids)),
   mPreviousBlockActors(std::exchange(gTessellationBlockActors, &blockActors)) {}
 
 ScopedTessellationBlocks::~ScopedTessellationBlocks() {
     gTessellationBlocks      = mPreviousBlocks;
+    gTessellationLiquids     = mPreviousLiquids;
     gTessellationBlockActors = mPreviousBlockActors;
 }
 
@@ -51,6 +55,14 @@ Block const* findTessellationBlock(BlockPos const& position) {
         std::tuple{position.x, position.y, position.z}
     );
     return found == gTessellationBlocks->end() ? nullptr : found->second;
+}
+
+Block const* findTessellationLiquid(BlockPos const& position) {
+    if (!gTessellationLiquids) return nullptr;
+    auto const found = gTessellationLiquids->find(
+        std::tuple{position.x, position.y, position.z}
+    );
+    return found == gTessellationLiquids->end() ? nullptr : found->second;
 }
 
 BlockActor const* findTessellationBlockActor(BlockPos const& position) {

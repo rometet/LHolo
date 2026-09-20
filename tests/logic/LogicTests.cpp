@@ -137,6 +137,15 @@ void testLayoutRules() {
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerAlphatestSingleSide) == RenderBucket::AlphaOneSided);
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerAlphatest) == RenderBucket::Alpha);
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerDoubleSided) == RenderBucket::Alpha);
+
+    // Praxis appearance contract: preserve native RGB/AO, multiply native
+    // alpha, and leave alpha zero transparent.
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 0.5f) == 0x7F563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0x80563412U, 0.5f) == 0x40563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0x00563412U, 0.5f) == 0x00563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 0.0f) == 0x00563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 1.0f) == 0xFF563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF804020U, 1.0f, 1.0f) == 0xFF803618U);
 }
 
 void testProgress() {

@@ -84,8 +84,22 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     if (layer == 0) {
         if (auto const* block = findTessellationBlock(position)) return *block;
+    } else if (layer == 1) {
+        if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
     }
     return origin(position, layer);
+}
+
+LL_TYPE_INSTANCE_HOOK(
+    BlockSourceGetLiquidBlockHook,
+    ll::memory::HookPriority::Normal,
+    BlockSource,
+    &BlockSource::$getLiquidBlock,
+    Block const&,
+    BlockPos const& position
+) {
+    if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+    return origin(position);
 }
 
 LL_TYPE_INSTANCE_HOOK(
@@ -179,7 +193,14 @@ bool installProjectionGameHooks() {
         BlockSourceGetBlockHook::unhook();
         return false;
     }
+    if (BlockSourceGetLiquidBlockHook::hook() < 0) {
+        BlockSourceGetBlockEntityHook::unhook();
+        BlockSourceGetBlockLayerHook::unhook();
+        BlockSourceGetBlockHook::unhook();
+        return false;
+    }
     if (BlockSourceSetBlockHook::hook() < 0) {
+        BlockSourceGetLiquidBlockHook::unhook();
         BlockSourceGetBlockEntityHook::unhook();
         BlockSourceGetBlockLayerHook::unhook();
         BlockSourceGetBlockHook::unhook();
@@ -187,6 +208,7 @@ bool installProjectionGameHooks() {
     }
     if (BlockSourceSetBlockWithActorHook::hook() < 0) {
         BlockSourceSetBlockHook::unhook();
+        BlockSourceGetLiquidBlockHook::unhook();
         BlockSourceGetBlockEntityHook::unhook();
         BlockSourceGetBlockLayerHook::unhook();
         BlockSourceGetBlockHook::unhook();
@@ -195,6 +217,7 @@ bool installProjectionGameHooks() {
     if (LoopbackPacketSenderSendToServerHook::hook() < 0) {
         BlockSourceSetBlockWithActorHook::unhook();
         BlockSourceSetBlockHook::unhook();
+        BlockSourceGetLiquidBlockHook::unhook();
         BlockSourceGetBlockEntityHook::unhook();
         BlockSourceGetBlockLayerHook::unhook();
         BlockSourceGetBlockHook::unhook();
@@ -204,6 +227,7 @@ bool installProjectionGameHooks() {
         LoopbackPacketSenderSendToServerHook::unhook();
         BlockSourceSetBlockWithActorHook::unhook();
         BlockSourceSetBlockHook::unhook();
+        BlockSourceGetLiquidBlockHook::unhook();
         BlockSourceGetBlockEntityHook::unhook();
         BlockSourceGetBlockLayerHook::unhook();
         BlockSourceGetBlockHook::unhook();
@@ -217,6 +241,7 @@ void uninstallProjectionGameHooks() {
     LoopbackPacketSenderSendToServerHook::unhook();
     BlockSourceSetBlockWithActorHook::unhook();
     BlockSourceSetBlockHook::unhook();
+    BlockSourceGetLiquidBlockHook::unhook();
     BlockSourceGetBlockEntityHook::unhook();
     BlockSourceGetBlockLayerHook::unhook();
     BlockSourceGetBlockHook::unhook();

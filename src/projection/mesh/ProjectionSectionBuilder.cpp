@@ -168,7 +168,7 @@ void buildProjectionSection(
     // (block-entity blocks such as chests and signs) get a placeholder.
     std::vector<std::size_t> failedTessellationIndices;
     std::vector<LayeredBlock> layeredBlocks;
-    layeredBlocks.reserve(state.sectionBlockIndices[section].size());
+    layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const correctionState = state.correctionStates[index];
         // Never draw a projected block model on top of an existing
@@ -195,13 +195,45 @@ void buildProjectionSection(
                 || typeName == VanillaBlockTypeIds::StickyPistonArmCollision().getString()) {
                 return;
             }
-            auto const* graphics = BlockGraphics::getForBlock(*transformedBlock);
-            auto const layer = graphics
+            auto* graphics = BlockGraphics::getForBlock(*transformedBlock);
+            auto const primaryLayer = graphics
                 ? graphics->getRenderLayer(region, position)
                 : (transformedBlock->getBlockType().mIsOpaqueFullBlock
                     ? BlockRenderLayer::RenderlayerOpaque
                     : BlockRenderLayer::RenderlayerAlphatest);
-            layeredBlocks.push_back({transformedBlock, position, layer, renderBucketFor(layer), index});
+            std::uint32_t appendedLayerMask{};
+            auto const appendLayer = [&](BlockRenderLayer layer) {
+                auto const value = static_cast<unsigned int>(layer);
+                if (value >= 32 || (appendedLayerMask & (1U << value)) != 0) return;
+                appendedLayerMask |= 1U << value;
+                layeredBlocks.push_back({
+                    transformedBlock,
+                    position,
+                    layer,
+                    renderBucketFor(layer),
+                    index
+                });
+            };
+            appendLayer(primaryLayer);
+            if (graphics) {
+                // This is Minecraft's current BlockGraphics classification,
+                // not an LHolo family guess. A block may request more than
+                // one of the 22 native RenderChunk layers.
+                auto const extraMask = static_cast<std::uint32_t>(
+                    // Fake Headers exposes this native virtual as non-const
+                    // even though getForBlock returns the shared graphics
+                    // object as const. The query is the engine's classifier;
+                    // no LHolo-owned state is written here.
+                    const_cast<BlockGraphics*>(graphics)->getExtraRenderLayers()
+                );
+                auto const layerCount = static_cast<unsigned int>(
+                    BlockRenderLayer::RenderlayerCount
+                );
+                for (unsigned int value = 0; value < layerCount; ++value) {
+                    if ((extraMask & (1U << value)) == 0) continue;
+                    appendLayer(static_cast<BlockRenderLayer>(value));
+                }
+            }
         };
         appendBlock(entry.block);
     }
@@ -219,6 +251,7 @@ void buildProjectionSection(
         };
     ScopedTessellationBlocks tessellationBlocksScope(
         *state.expectedWorldBlocks,
+        *state.expectedWorldLiquids,
         *state.expectedWorldBlockActors
     );
     for (std::size_t bucketIndex = 0;
@@ -280,16 +313,15 @@ void buildProjectionSection(
                 continue;
             }
             auto& colors = tessellator.mMeshData->mColors.get();
-            auto const alpha = static_cast<uint>(std::lround(
-                std::clamp(structureOpacity, 0.05f, 1.0f) * 255.0f
-            ));
             if (foliageTint) {
                 for (std::size_t colorIndex = firstColor; colorIndex < colors.size(); ++colorIndex) {
                     colors[colorIndex] = modulateAbgr(colors[colorIndex], *foliageTint);
                 }
             }
             for (std::size_t colorIndex = firstColor; colorIndex < colors.size(); ++colorIndex) {
-                colors[colorIndex] = (colors[colorIndex] & 0x00FFFFFFU) | (alpha << 24U);
+                colors[colorIndex] = applyGhostAppearanceAbgr(
+                    colors[colorIndex], structureOpacity
+                );
             }
             bucketTessellated = true;
         }
@@ -314,6 +346,12 @@ void buildProjectionSection(
             SupplementaryFieldAutoGenerationMode{1}
         ));
     }
+
+    std::sort(failedTessellationIndices.begin(), failedTessellationIndices.end());
+    failedTessellationIndices.erase(
+        std::unique(failedTessellationIndices.begin(), failedTessellationIndices.end()),
+        failedTessellationIndices.end()
+    );
 
     detail::buildLiquidProxySectionMesh(
         state, tessellator, section, uploadMode, sectionBuildSettings

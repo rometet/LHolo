@@ -103,6 +103,7 @@ void submitProjectedBlockActorPass(
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
     ScopedTessellationBlocks blockActorWorldScope(
         *state.expectedWorldBlocks,
+        *state.expectedWorldLiquids,
         *state.expectedWorldBlockActors
     );
     for (auto const& projected : state.projectedBlockActors) {

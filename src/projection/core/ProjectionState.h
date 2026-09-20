@@ -133,6 +133,10 @@ struct ProjectionState {
     std::uint64_t                           meshWorkerPeakBuildMicros{};
     std::uint64_t                           meshWorkerPeakUploadMicros{};
     std::shared_ptr<ExpectedBlockMap>        expectedWorldBlocks{std::make_shared<ExpectedBlockMap>()};
+    // Bedrock stores the solid/body layer and liquid layer independently.
+    // Keeping a separate immutable map preserves waterlogged cells instead of
+    // forcing one layer to overwrite the other at the same world coordinate.
+    std::shared_ptr<ExpectedLiquidMap>       expectedWorldLiquids{std::make_shared<ExpectedLiquidMap>()};
     std::shared_ptr<ExpectedBlockActorMap>   expectedWorldBlockActors{
         std::make_shared<ExpectedBlockActorMap>()
     };

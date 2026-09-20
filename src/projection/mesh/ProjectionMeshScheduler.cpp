@@ -212,6 +212,7 @@ void scheduleProjectionMeshBuild(
         snapshot->extraBlockPositions.insert(positions.begin(), positions.end());
     }
     snapshot->expectedWorldBlocks = state.expectedWorldBlocks;
+    snapshot->expectedWorldLiquids = state.expectedWorldLiquids;
     snapshot->expectedWorldBlockActors = state.expectedWorldBlockActors;
     snapshot->expectedWorldBlockIndices = state.expectedWorldBlockIndices;
     snapshot->sections.resize(1);
