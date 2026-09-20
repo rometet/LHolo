@@ -245,6 +245,20 @@ void loadFonts() {
         io.Fonts->AddFontDefault();
     }
 
+    // Merge Windows' Japanese glyphs so kana and Japanese kanji use native
+    // forms instead of falling back to the Simplified Chinese atlas.
+    auto const japaneseFont = "C:\\Windows\\Fonts\\meiryo.ttc";
+    if (std::filesystem::exists(japaneseFont)) {
+        ImFontConfig japaneseConfig = config;
+        japaneseConfig.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF(
+            japaneseFont,
+            36.0f,
+            &japaneseConfig,
+            io.Fonts->GetGlyphRangesJapanese()
+        );
+    }
+
     // Chinese glyph ranges do not include the warning sign used by the
     // experimental-feature notice. Merge that single glyph from Windows'
     // symbol font so the original label is rendered instead of as '?'.

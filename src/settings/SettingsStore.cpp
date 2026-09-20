@@ -15,6 +15,7 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("无法打开配置文件");
     auto const json = nlohmann::json::parse(input, nullptr, true, true);
+    auto const schemaVersion = json.value("version", 0);
 
     out.lastStructurePath = json.value("lastStructurePath", out.lastStructurePath);
     if (auto const language = json.find("language");
@@ -23,7 +24,7 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     } else {
         // Language preferences intentionally have no old integer migration:
         // missing or malformed values use the default locale.
-        out.language = "zh_CN";
+        out.language = "ja_JP";
     }
     out.uiScale = json.value("uiScale", out.uiScale);
     out.opacity = json.value("opacity", out.opacity);
@@ -55,6 +56,17 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     out.hudPosition = json.value("hudPosition", out.hudPosition);
     out.guiHotkey = json.value("guiHotkey", out.guiHotkey);
     out.guiHotkeyModifiers = json.value("guiHotkeyModifiers", out.guiHotkeyModifiers);
+    // Upstream schema 12 used Simplified Chinese and Alt+M as defaults. On the
+    // first launch of this Japanese fork, migrate only those exact defaults;
+    // custom languages and key bindings remain untouched. Schema 13 prevents
+    // the migration from running again after the user changes a preference.
+    if (schemaVersion <= 12) {
+        if (out.language == "zh_CN") out.language = "ja_JP";
+        if (out.guiHotkey == 'M' && out.guiHotkeyModifiers == 2) {
+            out.guiHotkey = 0x2D; // VK_INSERT
+            out.guiHotkeyModifiers = 0;
+        }
+    }
     out.layerIncreaseHotkey = json.value("layerIncreaseHotkey", out.layerIncreaseHotkey);
     out.layerDecreaseHotkey = json.value("layerDecreaseHotkey", out.layerDecreaseHotkey);
     out.layerIncreaseHotkeyModifiers
@@ -139,7 +151,7 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
     if (error) throw std::runtime_error(error.message());
 
     nlohmann::ordered_json const json{
-        {"version", 12},
+        {"version", 13},
         {"lastStructurePath", settings.lastStructurePath},
         {"language", settings.language},
         {"uiScale", settings.uiScale},

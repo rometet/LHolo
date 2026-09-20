@@ -1,5 +1,17 @@
 # Changelog
 
+## [26.51.1-ja.1] - 2026-09-21
+
+### Added
+
+- Added a complete Japanese interface and Windows Japanese font fallback; Japanese is the default on fresh installs.
+- Added a centered, rounded, purple-accented panel layout inspired by Praxis Client, with a clearer sidebar and card-based settings sections.
+- Added a Japanese usage guide at `docs/README_JA.md`.
+
+### Changed
+
+- Changed the fresh-install and reset default menu hotkey from `Alt + M` to `Insert`. Upstream defaults migrate once; custom user bindings remain untouched.
+
 ## [26.51.1] - 2026-09-20
 
 ### Added

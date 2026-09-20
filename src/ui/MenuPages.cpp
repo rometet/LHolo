@@ -1022,7 +1022,7 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
             drawList->AddRectFilled(
                 min,
                 max,
-                selected ? IM_COL32(51, 51, 54, 255) : IM_COL32(43, 43, 46, 255),
+                ImGui::GetColorU32(selected ? ImGuiCol_HeaderActive : ImGuiCol_HeaderHovered),
                 metrics.rounding * 0.8f
             );
         }
@@ -1042,7 +1042,7 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
         ImGui::PopID();
     }
 
-    // Animate only the blue selection strip.  The selected page itself is
+    // Animate only the accent selection strip. The selected page itself is
     // updated immediately, so input and configuration changes never wait for
     // the visual transition.  Exponential interpolation is frame-rate
     // independent and also behaves well when UI scale changes at runtime.
@@ -1064,7 +1064,7 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
         ImGui::GetWindowDrawList()->AddRectFilled(
             ImVec2(indicatorMin.x + stripInset, stripTop),
             ImVec2(indicatorMin.x + stripInset + stripWidth, stripBottom),
-            IM_COL32(0, 120, 212, 255),
+            ImGui::GetColorU32(ImGuiCol_CheckMark),
             stripWidth * 0.5f
         );
     }

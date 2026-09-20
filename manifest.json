@@ -4,6 +4,6 @@
   "version": "${modVersion}",
   "type": "native",
   "platform": "${modPlatform}",
-  "description": "适用于 Minecraft Bedrock Windows 的客户端投影模组 / Client-side projection mod for Minecraft Bedrock Windows",
+  "description": "Minecraft Bedrock Windows 向け日本語対応クライアント投影 Mod / Japanese client-side projection mod",
   "author": "Cat66"
 }

@@ -26,7 +26,7 @@ struct DefaultHotkey {
 };
 
 constexpr std::array<DefaultHotkey, input::kHotkeyCount> kDefaultHotkeys{{
-    {'M',     lholo::ui::kHotkeyModifierAlt},
+    {VK_INSERT, 0},
     {VK_LEFT, lholo::ui::kHotkeyModifierControl},
     {VK_RIGHT,lholo::ui::kHotkeyModifierControl},
     {VK_UP,   lholo::ui::kHotkeyModifierControl},

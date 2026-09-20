@@ -186,6 +186,9 @@ void testSettingsStore() {
     std::filesystem::remove(path, error);
 
     lholo::settings::Settings settings;
+    LHOLO_CHECK(settings.language == "ja_JP");
+    LHOLO_CHECK(settings.guiHotkey == VK_INSERT);
+    LHOLO_CHECK(settings.guiHotkeyModifiers == 0);
     settings.language = "en_US";
     settings.uiScale = 1.25f;
     settings.guiHotkey = 'L';
@@ -206,7 +209,7 @@ void testSettingsStore() {
         std::ifstream saved(path);
         std::ostringstream contents;
         contents << saved.rdbuf();
-        LHOLO_CHECK(contents.str().find("\"version\": 12") != std::string::npos);
+        LHOLO_CHECK(contents.str().find("\"version\": 13") != std::string::npos);
         LHOLO_CHECK(contents.str().find("\"language\": \"en_US\"") != std::string::npos);
         LHOLO_CHECK(contents.str().find("\"altWheelOffsetEnabled\": false") != std::string::npos);
         LHOLO_CHECK(contents.str().find("\"moveUpHotkey\": 87") != std::string::npos);
@@ -241,7 +244,7 @@ void testSettingsStore() {
     // block-entity label migrates to the projected-block label.
     {
         std::ofstream legacy(path, std::ios::trunc);
-        legacy << R"({"hudShowBlockEntity":false,"toggleManualHotkey":82,"toggleEasyHotkey":70,"toggleRangeHotkey":89,"moveXMinusHotkey":65,"moveXMinusHotkeyModifiers":2,"moveYPlusHotkey":87})";
+        legacy << R"({"version":12,"language":"zh_CN","guiHotkey":77,"guiHotkeyModifiers":2,"hudShowBlockEntity":false,"toggleManualHotkey":82,"toggleEasyHotkey":70,"toggleRangeHotkey":89,"moveXMinusHotkey":65,"moveXMinusHotkeyModifiers":2,"moveYPlusHotkey":87})";
     }
     lholo::settings::Settings migrated;
     LHOLO_CHECK(lholo::settings::loadSettingsFile(path, migrated));
@@ -251,8 +254,10 @@ void testSettingsStore() {
     LHOLO_CHECK(!migrated.correctionSeeThrough);
     LHOLO_CHECK(!migrated.materialHudEnabled);
     LHOLO_CHECK(migrated.materialHudPosition == 3);
-    // A config without a valid language field uses the Chinese default.
-    LHOLO_CHECK(migrated.language == "zh_CN");
+    // The upstream schema-12 defaults migrate to this fork's Japanese/Insert defaults.
+    LHOLO_CHECK(migrated.language == "ja_JP");
+    LHOLO_CHECK(migrated.guiHotkey == VK_INSERT);
+    LHOLO_CHECK(migrated.guiHotkeyModifiers == 0);
     // Likewise, a config written before the Alt+wheel switch existed keeps the
     // gesture enabled, so upgrading never silently changes input behavior.
     LHOLO_CHECK(migrated.altWheelOffsetEnabled);
@@ -268,7 +273,7 @@ void testSettingsStore() {
     }
     lholo::settings::Settings invalid;
     LHOLO_CHECK(lholo::settings::loadSettingsFile(path, invalid));
-    LHOLO_CHECK(invalid.language == "zh_CN");
+    LHOLO_CHECK(invalid.language == "ja_JP");
 
     lholo::settings::Settings missing;
     std::filesystem::remove(path, error);
@@ -514,8 +519,8 @@ void testStructureUiState() {
     auto const layerIncreaseSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::LayerIncrease);
     auto const loadProjectionSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::LoadProjection);
     auto const closeProjectionSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::CloseProjection);
-    LHOLO_CHECK(state.hotkey(guiSlot).key == 'M');
-    LHOLO_CHECK(state.hotkey(guiSlot).modifiers == lholo::ui::kHotkeyModifierAlt);
+    LHOLO_CHECK(state.hotkey(guiSlot).key == VK_INSERT);
+    LHOLO_CHECK(state.hotkey(guiSlot).modifiers == 0);
     LHOLO_CHECK(state.hotkey(moveLeftSlot).key == VK_LEFT);
     LHOLO_CHECK(state.hotkey(layerIncreaseSlot).key == VK_UP);
     LHOLO_CHECK(state.hotkey(loadProjectionSlot).key == 0);
@@ -541,9 +546,9 @@ void testStructureUiState() {
     state.resetHotkeys();
     LHOLO_CHECK(state.tryPressHotkey(guiSlot));
     LHOLO_CHECK(!state.tryPressHotkey(guiSlot));
-    LHOLO_CHECK(state.releaseHotkeysForKey('M', 100));
-    LHOLO_CHECK(state.releaseHotkeysForKey('M', 150));
-    LHOLO_CHECK(!state.releaseHotkeysForKey('M', 201));
+    LHOLO_CHECK(state.releaseHotkeysForKey(VK_INSERT, 100));
+    LHOLO_CHECK(state.releaseHotkeysForKey(VK_INSERT, 150));
+    LHOLO_CHECK(!state.releaseHotkeysForKey(VK_INSERT, 201));
 
     // The state only accumulates a delta now; which world direction a move
     // hotkey produces is resolved in ViewMoveBasis from the player's facing.
@@ -811,10 +816,12 @@ void testI18n() {
     LHOLO_CHECK(available.size() >= 2);
 
     auto const chinese = languageFromCode("zh_CN");
+    auto const japanese = languageFromCode("ja_JP");
     auto const english = languageFromCode("en_US");
     LHOLO_CHECK(chinese != kInvalidLanguage);
+    LHOLO_CHECK(japanese != kInvalidLanguage);
     LHOLO_CHECK(english != kInvalidLanguage);
-    LHOLO_CHECK(defaultLanguage() == chinese);
+    LHOLO_CHECK(defaultLanguage() == japanese);
     LHOLO_CHECK(languageFromCode("missing_LOCALE") == kInvalidLanguage);
 
     for (std::size_t index = 0; index < available.size(); ++index) {
@@ -875,7 +882,7 @@ void testI18n() {
     };
     for (std::size_t index = 0; index < kTextKeyCount; ++index) {
         auto const key = static_cast<TextKey>(index);
-        auto const expected = placeholders(tr(key, chinese));
+        auto const expected = placeholders(tr(key, japanese));
         for (std::size_t languageIndex = 0; languageIndex < available.size(); ++languageIndex) {
             LHOLO_CHECK(
                 placeholders(tr(key, static_cast<Language>(languageIndex))) == expected
@@ -884,7 +891,9 @@ void testI18n() {
     }
 
     // Switching the active language by index or stable code changes lookups and
-    // is reversible. An unknown code falls back to Simplified Chinese.
+    // is reversible. An unknown code falls back to Japanese in this fork.
+    setLanguage(japanese);
+    auto const japaneseClose = std::string{tr(TextKey::MenuClose)};
     setLanguage(chinese);
     auto const chineseClose = std::string{tr(TextKey::MenuClose)};
     setLanguage(english);
@@ -895,12 +904,13 @@ void testI18n() {
     LHOLO_CHECK(setLanguageByCode("en_US"));
     LHOLO_CHECK(language() == english);
     LHOLO_CHECK(!setLanguageByCode("missing_LOCALE"));
-    LHOLO_CHECK(language() == chinese);
-    LHOLO_CHECK(std::string{tr(TextKey::MenuClose)} == chineseClose);
+    LHOLO_CHECK(language() == japanese);
+    LHOLO_CHECK(std::string{tr(TextKey::MenuClose)} == japaneseClose);
 
     // Language names are shown in their own language, never translated.
     LHOLO_CHECK(std::string{languageName(english)} == available[english].displayName);
     LHOLO_CHECK(std::string{languageName(chinese)} == available[chinese].displayName);
+    LHOLO_CHECK(std::string{languageName(japanese)} == available[japanese].displayName);
 
     // Messages keep their arguments and follow the active language.
     setLanguage(english);

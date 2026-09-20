@@ -2,6 +2,7 @@
 .xmake/
 build/
 bin/
+dist/
 
 # IDE and compiler artifacts
 .vs/

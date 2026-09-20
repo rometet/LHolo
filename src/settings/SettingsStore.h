@@ -16,9 +16,9 @@ namespace lholo::settings {
 
 struct Settings {
     std::string lastStructurePath;
-    // Interface language locale code, for example "zh_CN" or "en_US".
+    // Interface language locale code, for example "ja_JP" or "en_US".
     // Runtime language indices are never persisted.
-    std::string language{"zh_CN"};
+    std::string language{"ja_JP"};
     float uiScale{2.0f};
     float opacity{1.0f};
     float correctionFillOpacity{0.15f};
@@ -41,8 +41,8 @@ struct Settings {
     bool hudShowExtraBlocks{true};
     bool hudShowProjectedBlockName{true};
     int hudPosition{1};
-    int guiHotkey{'M'};
-    int guiHotkeyModifiers{2};
+    int guiHotkey{0x2D}; // VK_INSERT
+    int guiHotkeyModifiers{0};
     int layerIncreaseHotkey{0x26}; // VK_UP
     int layerDecreaseHotkey{0x28}; // VK_DOWN
     int layerIncreaseHotkeyModifiers{2};

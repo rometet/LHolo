@@ -71,7 +71,7 @@ rule("lholo.i18n.resources")
             if not language_code:match("^[%a][%w]*_[%a][%w]*$") then
                 raise("invalid language filename (expected xx_YY.json): " .. language_file)
             end
-            if language_code == "zh_CN" then
+            if language_code == "ja_JP" then
                 has_default_language = true
             end
 
@@ -90,7 +90,7 @@ rule("lholo.i18n.resources")
             )
         end
         if not has_default_language then
-            raise("default language file is missing: src/i18n/lang/zh_CN.json")
+            raise("default language file is missing: src/i18n/lang/ja_JP.json")
         end
         table.insert(lines, "")
         table.insert(registry_lines, "}};")
@@ -117,7 +117,7 @@ rule_end()
 target("LHolo")
     add_rules("lholo.i18n.resources")
     add_rules("@levibuildscript/linkrule")
-    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.1"})
+    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.1-ja.1"})
     add_shflags("/DELAYLOAD:bedrock_runtime.dll", {force = true})
     add_cxflags(
         "/utf-8",

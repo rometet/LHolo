@@ -1,6 +1,8 @@
 # LHolo
 
-[简体中文](../README.md)
+[日本語](README_JA.md) | [简体中文](../README.md)
+
+> This fork defaults to Japanese, uses `Insert` for the menu, and provides a centered Praxis-inspired interface.
 
 `LHolo` is a client-side structure projection mod for [LeviLamina](https://github.com/LiteLDev/LeviLamina)
 
@@ -13,7 +15,7 @@ Example version: `v26.51.2`
 
 ## Quick Start
 
-1. After installing the mod, type `LHolo` in the chat, or press `Alt + M` to open the mod menu
+1. After installing the mod, type `LHolo` in the chat, or press `Insert` to open the mod menu
 2. The mod is operated through a GUI and hotkeys (for the full hotkey list, just check the mod menu)
 3. Please disable Vibrant Visuals while using this mod
 
@@ -48,8 +50,11 @@ Example version: `v26.51.2`
 
 **Language**
 
+- 日本語 (Japanese, default in this fork)
 - 简体中文 (Simplified Chinese)
+- 繁體中文 (Traditional Chinese)
 - English
+- Русский (Russian)
 
 ## Showcase
 

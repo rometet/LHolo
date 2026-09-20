@@ -28,16 +28,29 @@ char const* materialDisplayName(
 
 template <typename Body>
 void renderSection(char const* id, char const* title, UiMetrics const& metrics, Body&& body) {
-    // Function groups deliberately share the page canvas.  A child window
-    // here would add a card border and its own scrollbar, which makes the
-    // menu feel fragmented and fights the single, unobtrusive page scroll.
-    ImGui::PushID(id);
-    ImGui::TextUnformatted(title);
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
-    body();
-    ImGui::Dummy(ImVec2(0.0f, metrics.gap * 1.1f));
-    ImGui::PopID();
+    // A single page owns scrolling; each section auto-sizes vertically and
+    // acts only as a visual card, so nested scrollbars never appear.
+    auto cardColor = ImGui::GetStyleColorVec4(ImGuiCol_TableRowBgAlt);
+    cardColor.w = 0.96f;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, cardColor);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(metrics.sectionPadding, metrics.sectionPadding));
+    if (ImGui::BeginChild(
+            id,
+            ImVec2(0.0f, 0.0f),
+            ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysAutoResize,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings
+        )) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        ImGui::TextUnformatted(title);
+        ImGui::PopStyleColor();
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
+        body();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.45f));
 }
 
 template <typename Control>

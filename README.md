@@ -1,6 +1,8 @@
 # LHolo
 
-[English](docs/README_EN.md)
+[日本語](docs/README_JA.md) | [English](docs/README_EN.md)
+
+> 此分支为日语/Praxis 风格界面分支。默认语言为日语，默认菜单键为 `Insert`。
 
 `LHolo` 是一个 [LeviLamina](https://github.com/LiteLDev/LeviLamina) 客户端投影模组
 
@@ -15,7 +17,7 @@
 
 [安装教程](https://www.bilibili.com/opus/1239631121935761412)
 
-1. 安装本模组以后,聊天栏输入 `LHolo`,或按 `Alt + M` 打开模组菜单
+1. 安装本模组以后,聊天栏输入 `LHolo`,或按 `Insert` 打开模组菜单
 2. 本模组交互为GUI与快捷键(具体快捷键直接看模组菜单)
 3. 使用本模组时,请关闭灵动视效
 
@@ -50,8 +52,11 @@
 
 **多语言支持**
 
+- 日本語（此分支默认）
 - 简体中文
+- 繁體中文
 - English
+- Русский
 
 ## 模组演示
 
