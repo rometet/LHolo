@@ -38,6 +38,11 @@ struct NativeLiquidTelemetry {
     std::uint64_t nativeLiquidUvAtlasResolvedCells{};
     std::uint64_t nativeLiquidUvRemappedVertices{};
     std::uint64_t nativeLiquidUvRemapFailures{};
+    std::uint64_t nativeLiquidVerticesBeforeCull{};
+    std::uint64_t nativeLiquidVerticesCulled{};
+    std::uint64_t nativeLiquidVerticesAfterCull{};
+    std::uint64_t nativeLiquidFacePairsCulled{};
+    std::uint64_t nativeLiquidCullSkipped{};
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};

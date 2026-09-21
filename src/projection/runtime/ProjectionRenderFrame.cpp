@@ -301,7 +301,7 @@ void renderProjection(
             state.meshPreflightDone = true;
             auto const& telemetry = state.nativeLiquidTelemetry;
             logger().info(
-                "PHASE3B_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} uvAtlasResolvedCells={} uvRemappedVertices={} uvRemapFailures={} colors={} alphaModified={} virtualLiquidHits={} signTextResolved={} signTextDraws={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
+                "PHASE3C_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} uvAtlasResolvedCells={} uvRemappedVertices={} uvRemapFailures={} verticesBeforeCull={} verticesCulled={} verticesAfterCull={} facePairsCulled={} cullSkipped={} colors={} alphaModified={} virtualLiquidHits={} signTextResolved={} signTextDraws={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
                 telemetry.nativeLiquidCellsAttempted,
                 telemetry.nativeLiquidTessellationPositive,
                 telemetry.nativeLiquidTessellationZero,
@@ -311,6 +311,11 @@ void renderProjection(
                 telemetry.nativeLiquidUvAtlasResolvedCells,
                 telemetry.nativeLiquidUvRemappedVertices,
                 telemetry.nativeLiquidUvRemapFailures,
+                telemetry.nativeLiquidVerticesBeforeCull,
+                telemetry.nativeLiquidVerticesCulled,
+                telemetry.nativeLiquidVerticesAfterCull,
+                telemetry.nativeLiquidFacePairsCulled,
+                telemetry.nativeLiquidCullSkipped,
                 telemetry.nativeLiquidColorVertices,
                 telemetry.nativeLiquidAlphaModifiedVertices,
                 telemetry.virtualLiquidQueryHits,

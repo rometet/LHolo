@@ -1,6 +1,7 @@
 // LHolo logic tests: pure projection rules and progress publication.
 // Run with: xmake r LHoloLogicTests
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -10,12 +11,14 @@
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 #include "block/BlockPlacementRules.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/runtime/ProjectionProgress.h"
@@ -52,6 +55,12 @@ bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
 struct TestUv {
     float x{};
     float y{};
+};
+
+struct TestPosition {
+    float x{};
+    float y{};
+    float z{};
 };
 
 bool nearlyEqual(float lhs, float rhs) {
@@ -107,6 +116,129 @@ void testNativeLiquidUvRemap() {
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{nonFinite}, atlas));
     std::array<TestUv, 3> incompleteQuad{{{0, 0}, {1, 0}, {1, 1}}};
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
+}
+
+void testNativeLiquidInternalFaceCull() {
+    using Quad = std::array<TestPosition, 4>;
+    auto const append = [](std::vector<TestPosition>& positions, Quad const& quad) {
+        positions.insert(positions.end(), quad.begin(), quad.end());
+    };
+    auto const positiveX = Quad{{
+        {1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}
+    }};
+    auto const negativeX = Quad{{
+        {1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}
+    }};
+
+    // 1. A unique pair on the same plane with opposite winding is removed.
+    std::vector<TestPosition> opposite;
+    append(opposite, positiveX);
+    append(opposite, negativeX);
+    auto result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{opposite}
+    );
+    LHOLO_CHECK(result.valid);
+    LHOLO_CHECK(result.facePairs == 1U);
+    LHOLO_CHECK(result.removedVertices() == 8U);
+    LHOLO_CHECK(result.removeQuads[0] == 1U && result.removeQuads[1] == 1U);
+
+    // 2. Same-facing duplicates may be intentional overlays and remain.
+    std::vector<TestPosition> sameFacing;
+    append(sameFacing, positiveX);
+    append(sameFacing, positiveX);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{sameFacing});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 3. A single exposed face remains. Add a non-candidate so the aggregate
+    // still satisfies the minimum two-quad contract.
+    auto const partialX = Quad{{
+        {1, 0, 0}, {1, 0.5F, 0}, {1, 0.5F, 1}, {1, 0, 1}
+    }};
+    std::vector<TestPosition> exposed;
+    append(exposed, positiveX);
+    append(exposed, partialX);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{exposed});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 4. Partial-height liquid sides are never unit full-face candidates.
+    std::vector<TestPosition> partial;
+    append(partial, partialX);
+    auto reversedPartial = partialX;
+    std::reverse(reversedPartial.begin(), reversedPartial.end());
+    append(partial, reversedPartial);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{partial});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 5. Sloped liquid geometry is not axis-aligned and remains.
+    auto const sloped = Quad{{
+        {1, 0, 0}, {1.1F, 1, 0}, {1.1F, 1, 1}, {1, 0, 1}
+    }};
+    std::vector<TestPosition> slopes;
+    append(slopes, sloped);
+    auto reversedSlope = sloped;
+    std::reverse(reversedSlope.begin(), reversedSlope.end());
+    append(slopes, reversedSlope);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{slopes});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 6. Matching unit faces emitted by adjacent cells are removed on another
+    // axis and at a non-origin block boundary.
+    auto const positiveZ = Quad{{
+        {3, 4, 7}, {4, 4, 7}, {4, 5, 7}, {3, 5, 7}
+    }};
+    auto const negativeZ = Quad{{
+        {3, 4, 7}, {3, 5, 7}, {4, 5, 7}, {4, 4, 7}
+    }};
+    std::vector<TestPosition> adjacent;
+    append(adjacent, positiveZ);
+    append(adjacent, negativeZ);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{adjacent});
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
+    // 7. Normal tessellation noise inside the Praxis tolerance still pairs.
+    auto withinPositive = positiveX;
+    auto withinNegative = negativeX;
+    for (auto& vertex : withinPositive) {
+        vertex.x += 0.001F;
+        vertex.y -= 0.001F;
+        vertex.z += 0.001F;
+    }
+    for (auto& vertex : withinNegative) {
+        vertex.x += 0.001F;
+        vertex.y -= 0.001F;
+        vertex.z += 0.001F;
+    }
+    std::vector<TestPosition> withinTolerance;
+    append(withinTolerance, withinPositive);
+    append(withinTolerance, withinNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{withinTolerance}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
+    // 8. A plane beyond tolerance from an integer boundary is retained.
+    auto outsidePositive = positiveX;
+    auto outsideNegative = negativeX;
+    for (auto& vertex : outsidePositive) vertex.x += 0.004F;
+    for (auto& vertex : outsideNegative) vertex.x += 0.004F;
+    std::vector<TestPosition> outsideTolerance;
+    append(outsideTolerance, outsidePositive);
+    append(outsideTolerance, outsideNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{outsideTolerance}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 9. A malformed non-quad stream fails closed.
+    std::array<TestPosition, 7> malformed{};
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{malformed});
+    LHOLO_CHECK(!result.valid && result.removeQuads.empty());
+
+    // 10. Every enabled typed stream must match the position vertex count.
+    std::array<std::size_t, 5> matchingFields{8U, 8U, 0U, 8U, 0U};
+    std::array<std::size_t, 5> mismatchedFields{8U, 8U, 7U, 8U, 0U};
+    LHOLO_CHECK(nativeLiquidPerVertexFieldCountsMatch(8U, matchingFields));
+    LHOLO_CHECK(!nativeLiquidPerVertexFieldCountsMatch(8U, mismatchedFields));
 }
 
 void testLayoutRules() {
@@ -1007,6 +1139,7 @@ void testI18n() {
 
 int main() {
     testNativeLiquidUvRemap();
+    testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();
     testSettingsStore();

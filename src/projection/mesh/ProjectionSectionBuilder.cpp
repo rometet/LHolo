@@ -9,6 +9,7 @@
 #include "projection/mesh/ProjectionSectionBuilder.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
@@ -60,6 +61,8 @@ auto& logger() {
 std::atomic_bool gNativeLiquidPositiveLogged{};
 std::atomic_bool gNativeLiquidUvRemapLogged{};
 std::atomic_bool gNativeLiquidUvFailureLogged{};
+std::atomic_bool gNativeLiquidCullLogged{};
+std::atomic_bool gNativeLiquidCullSkipLogged{};
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -196,6 +199,152 @@ int correctionPriority(CorrectionState state) {
         : state == CorrectionState::WrongState ? 3
         : state == CorrectionState::Missing ? 1
         : 0;
+}
+
+template <class Value>
+void compactPerVertexField(
+    std::vector<Value>&               field,
+    std::span<std::uint8_t const>     removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write{};
+    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
+        if (removeQuads[quad] != 0U) continue;
+        for (std::size_t corner = 0; corner < 4U; ++corner) {
+            auto const read = quad * 4U + corner;
+            if (write != read) field[write] = std::move(field[read]);
+            ++write;
+        }
+    }
+    field.resize(write);
+}
+
+template <class Value>
+void compactPerQuadField(
+    std::vector<Value>&               field,
+    std::span<std::uint8_t const>     removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write{};
+    for (std::size_t read = 0; read < removeQuads.size(); ++read) {
+        if (removeQuads[read] != 0U) continue;
+        if (write != read) field[write] = std::move(field[read]);
+        ++write;
+    }
+    field.resize(write);
+}
+
+struct NativeLiquidCullOutcome {
+    bool        processed{};
+    char const* skipReason{"unknown"};
+    std::size_t before{};
+    std::size_t culled{};
+    std::size_t after{};
+    std::size_t pairs{};
+    std::size_t indices{};
+    std::size_t quadInfo{};
+};
+
+NativeLiquidCullOutcome cullNativeLiquidInternalFaces(Tessellator& tessellator) {
+    NativeLiquidCullOutcome outcome{};
+    auto& data = tessellator.mMeshData.get();
+    auto& positions = data.mPositions.get();
+    auto& quadInfo = tessellator.mQuadInfoList.get();
+    outcome.before = positions.size();
+    outcome.after = positions.size();
+    outcome.indices = data.mIndices.get().size();
+    outcome.quadInfo = quadInfo.size();
+
+    if (!data.mIndices.get().empty()) {
+        outcome.skipReason = "indices_nonempty";
+        return outcome;
+    }
+    if (positions.size() < 8U || positions.size() % 4U != 0U) {
+        outcome.skipReason = "malformed_positions";
+        return outcome;
+    }
+
+    std::array<std::size_t, 10> const fieldCounts{
+        data.mNormals.get().size(),
+        data.mTangents.get().size(),
+        data.mColors.get().size(),
+        data.mBoneId0s.get().size(),
+        data.mTextureUVs[0].get().size(),
+        data.mTextureUVs[1].get().size(),
+        data.mTextureUVs[2].get().size(),
+        data.mPBRTextureIndices.get().size(),
+        data.mMERS.get().size(),
+        data.mGeoType.get().size()
+    };
+    if (!nativeLiquidPerVertexFieldCountsMatch(positions.size(), fieldCounts)) {
+        outcome.skipReason = "vertex_field_count_mismatch";
+        return outcome;
+    }
+
+    auto const quadCount = positions.size() / 4U;
+    if (!quadInfo.empty() && quadInfo.size() != quadCount) {
+        outcome.skipReason = "quad_info_count_mismatch";
+        return outcome;
+    }
+
+    auto const mask = buildNativeLiquidInternalFaceCullMask(
+        std::span<glm::vec3 const>{positions.data(), positions.size()}
+    );
+    if (!mask.valid) {
+        outcome.skipReason = "geometry_contract_invalid";
+        return outcome;
+    }
+    outcome.culled = mask.removedVertices();
+    outcome.pairs = mask.facePairs;
+    if (outcome.culled >= outcome.before && outcome.culled != 0U) {
+        // Do not turn an otherwise successful section into an empty retained
+        // mesh. A real liquid body should always retain exposed geometry.
+        outcome.culled = 0U;
+        outcome.pairs = 0U;
+        outcome.skipReason = "all_vertices_would_be_removed";
+        return outcome;
+    }
+
+    if (outcome.culled != 0U) {
+        compactPerVertexField(positions, mask.removeQuads);
+        compactPerVertexField(data.mNormals.get(), mask.removeQuads);
+        compactPerVertexField(data.mTangents.get(), mask.removeQuads);
+        compactPerVertexField(data.mColors.get(), mask.removeQuads);
+        compactPerVertexField(data.mBoneId0s.get(), mask.removeQuads);
+        for (std::size_t uv = 0; uv < 3U; ++uv) {
+            compactPerVertexField(data.mTextureUVs[uv].get(), mask.removeQuads);
+        }
+        compactPerVertexField(data.mPBRTextureIndices.get(), mask.removeQuads);
+        compactPerVertexField(data.mMERS.get(), mask.removeQuads);
+        compactPerVertexField(data.mGeoType.get(), mask.removeQuads);
+        compactPerQuadField(quadInfo, mask.removeQuads);
+
+        auto minimum = positions.front();
+        auto maximum = positions.front();
+        for (auto const& position : positions) {
+            minimum = glm::min(minimum, position);
+            maximum = glm::max(maximum, position);
+        }
+        data.mAABB.get() = {minimum, maximum};
+        auto const& uv0 = data.mTextureUVs[0].get();
+        if (!uv0.empty()) {
+            auto uvMinimum = uv0.front();
+            auto uvMaximum = uv0.front();
+            for (auto const& uv : uv0) {
+                uvMinimum = glm::min(uvMinimum, uv);
+                uvMaximum = glm::max(uvMaximum, uv);
+            }
+            data.mUVAABB.get() = {uvMinimum, uvMaximum};
+        }
+        // mCount is a typed/public Fake Headers field consumed by end(). No
+        // terminal-state bytes or private renderer offsets are modified.
+        tessellator.mCount = static_cast<unsigned int>(positions.size());
+    }
+
+    outcome.processed = true;
+    outcome.skipReason = "none";
+    outcome.after = positions.size();
+    return outcome;
 }
 
 } // namespace
@@ -810,6 +959,35 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
         );
         state.nativeLiquidSectionMeshes[section].reset();
         return succeeded;
+    }
+    auto const cull = cullNativeLiquidInternalFaces(tessellator);
+    state.nativeLiquidTelemetry.nativeLiquidVerticesBeforeCull += cull.before;
+    state.nativeLiquidTelemetry.nativeLiquidVerticesAfterCull += cull.after;
+    if (cull.processed) {
+        state.nativeLiquidTelemetry.nativeLiquidVerticesCulled += cull.culled;
+        state.nativeLiquidTelemetry.nativeLiquidFacePairsCulled += cull.pairs;
+        if (!gNativeLiquidCullLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().info(
+                "NATIVE_LIQUID_INTERNAL_FACE_CULL before={} culled={} after={} pairs={} indices={} quadInfo={}",
+                cull.before,
+                cull.culled,
+                cull.after,
+                cull.pairs,
+                cull.indices,
+                cull.quadInfo
+            );
+        }
+    } else {
+        ++state.nativeLiquidTelemetry.nativeLiquidCullSkipped;
+        if (!gNativeLiquidCullSkipLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().warn(
+                "NATIVE_LIQUID_INTERNAL_FACE_CULL_SKIPPED reason={} vertices={} indices={} quadInfo={}",
+                cull.skipReason,
+                cull.before,
+                cull.indices,
+                cull.quadInfo
+            );
+        }
     }
     for (auto& vertex : tessellator.mMeshData->mPositions.get()) {
         vertex.x -= static_cast<float>(origin.x);

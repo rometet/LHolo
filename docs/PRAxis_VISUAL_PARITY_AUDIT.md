@@ -184,7 +184,7 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 ## 検証記録
 
-- `LHoloLogicTests`: 3721 checks、0 failures（Phase 3B UV remap casesを含む）
+- `LHoloLogicTests`: 3735 checks、0 failures（Phase 3B UV remapとPhase 3C face-cull casesを含む）
 - Release DLL build: success
 - Minecraft runtime telemetry: PASS（2026-09-21 14:39、正常終了）
 - GPU capture: NOT PERFORMED
@@ -330,3 +330,88 @@ NATIVE_LIQUID_UV_REMAP
 NATIVE_LIQUID_UV_REMAP_FAILURE
 PHASE3B_NATIVE_LIQUID_TELEMETRY
 ```
+
+2026-09-21 23:45の同一fixture実機結果:
+
+```text
+PHASE3B_UV_CONTRACT = PASS
+PHASE3B_VISUAL_PARITY = NOT_ACCEPTED
+PHASE3C_INTERNAL_FACE_CULL_REQUIRED = YES
+
+attempted=2972
+positive=2972
+zero=0
+failure=0
+vertices=59440
+uv0=59440
+uvAtlasResolvedCells=2972
+uvRemappedVertices=59440
+uvRemapFailures=0
+signTextResolved=1
+signTextDraws=1089
+terrainBlendDraws=0
+legacyMaterialDraws=0
+proxyFallbackCells=0
+nativeMeshes=20
+```
+
+UV authorityとremapはruntime PASSしたが、`59440 / 2972 = 20` vertices/cellで、連続する
+poolでも各cellが5 quads相当を保持している。画面では正しいatlas tileへ移行後もpoolが
+黒/灰色に濃く見えたため、Phase 3Bのvisual parityは承認していない。
+
+## Phase 3C: typed aggregate internal-face cull
+
+Phase 3Cはsection内の全native liquid cellのtessellationとPhase 3B UV remapが終わった後、
+world origin subtractionと`Tessellator::end()`より前に、完成したtyped `mce::MeshData`へ
+1回だけ適用する。変更する視覚変数はgeometry cullingだけである。
+
+削除候補はtolerance `0.0025`以内で、1軸がflat、残り2軸がunit span、planeと2D開始点が
+整数境界にあるQuadList faceに限定する。同じface keyに正負windingがそれぞれ一意に1枚
+だけ存在する場合に限り両quadを削除する。exposed face、same-facing duplicate、partial-height、
+slope、non-unit faceは保持する。
+
+同一remove maskで以下の公開typed streamだけをstable compactする。
+
+```text
+mPositions
+mNormals
+mTangents
+mColors
+mBoneId0s
+mTextureUVs[0..2]
+mPBRTextureIndices
+mMERS
+mGeoType
+mQuadInfoList (emptyまたはquad count一致時のみ)
+```
+
+per-vertex streamがemptyでもvertex count一致でもない場合、`mIndices`が非emptyの場合、
+または`mQuadInfoList`の要素数がquad countと一致しない場合はsection全体をfail-closedで
+cullしない。private field、raw terminal state、raw offsetは使用しない。`mCount`はFake
+Headersの公開typed fieldとしてcompact後のposition数へ同期し、AABB/UVAABBも残存typed
+streamから再計算する。
+
+Phase 3Cで変更しない契約:
+
+```text
+sign_text material                  unchanged
+terrain atlas TextureVariant        unchanged
+Phase 3B UV remap                    unchanged
+Tessellator::begin fifth flag        false
+tessellateInWorld final bool         true
+mRenderingLayer                      unchanged
+vertex RGB / alpha / opacity         unchanged
+render pass / sorting / upload       unchanged
+virtual world / proxy / correction   unchanged
+```
+
+Phase 3C runtime marker:
+
+```text
+NATIVE_LIQUID_INTERNAL_FACE_CULL
+NATIVE_LIQUID_INTERNAL_FACE_CULL_SKIPPED
+PHASE3C_NATIVE_LIQUID_TELEMETRY
+```
+
+実装・logic test・Release buildはPASS。Minecraft runtimeと視覚判定は未実施であり、
+`PHASE3C_INTERNAL_FACE_CAUSALITY`はユーザーの同一fixture確認まで未判定とする。
