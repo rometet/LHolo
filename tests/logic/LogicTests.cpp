@@ -249,6 +249,22 @@ void testNativeLiquidInternalFaceCull() {
     result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{adjacent});
     LHOLO_CHECK(result.valid && result.facePairs == 1U);
 
+    // The same typed matcher operates after aggregate assembly, so a pair on
+    // the canonical 16-block section boundary is eligible as one global pair.
+    auto const sectionBoundaryPositive = Quad{{
+        {16, 2, 3}, {16, 3, 3}, {16, 3, 4}, {16, 2, 4}
+    }};
+    auto const sectionBoundaryNegative = Quad{{
+        {16, 2, 3}, {16, 2, 4}, {16, 3, 4}, {16, 3, 3}
+    }};
+    std::vector<TestPosition> sectionBoundary;
+    append(sectionBoundary, sectionBoundaryPositive);
+    append(sectionBoundary, sectionBoundaryNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{sectionBoundary}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
     // 7. Normal tessellation noise inside the Praxis tolerance still pairs.
     auto withinPositive = positiveX;
     auto withinNegative = negativeX;

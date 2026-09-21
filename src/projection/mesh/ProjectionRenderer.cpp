@@ -5,6 +5,7 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -268,8 +270,163 @@ void refreshPraxisExactReplayBounds(PraxisCompatLiquidSectionData& data) {
     meshData.mUVAABB.get() = {uvMinimum, uvMaximum};
 }
 
+template <class Value>
+void compactPraxisAggregatePerVertexField(
+    std::vector<Value>&                 field,
+    std::span<std::uint8_t const>       removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write = 0;
+    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
+        if (removeQuads[quad] != 0U) continue;
+        auto const read = quad * 4U;
+        for (std::size_t corner = 0; corner < 4U; ++corner) {
+            if (write != read + corner) {
+                field[write] = std::move(field[read + corner]);
+            }
+            ++write;
+        }
+    }
+    field.resize(write);
+}
+
+template <class Value>
+void compactPraxisAggregatePerQuadField(
+    std::vector<Value>&                 field,
+    std::span<std::uint8_t const>       removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write = 0;
+    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
+        if (removeQuads[quad] != 0U) continue;
+        if (write != quad) field[write] = std::move(field[quad]);
+        ++write;
+    }
+    field.resize(write);
+}
+
+std::unique_ptr<PraxisCompatLiquidSectionData> clonePraxisExactReplayData(
+    PraxisCompatLiquidSectionData const& source
+) {
+    if (!source.nativeStream) return {};
+    auto clone = std::make_unique<PraxisCompatLiquidSectionData>();
+    clone->nativeStream = std::make_unique<mce::MeshData>(*source.nativeStream);
+    clone->derivedColors = source.derivedColors;
+    clone->liquidKinds = source.liquidKinds;
+    clone->tessellatorState = source.tessellatorState;
+    return clone;
+}
+
+struct PraxisAggregateBoundaryCullResult {
+    bool        valid{};
+    std::size_t verticesBefore{};
+    std::size_t verticesCulled{};
+    std::size_t verticesAfter{};
+    std::size_t facePairsCulled{};
+};
+
+PraxisAggregateBoundaryCullResult cullPraxisAggregateBoundaryFaces(
+    PraxisCompatLiquidSectionData& data
+) {
+    PraxisAggregateBoundaryCullResult result{};
+    if (!data.ready()) return result;
+
+    auto& meshData = *data.nativeStream;
+    auto& positions = meshData.mPositions.get();
+    result.verticesBefore = positions.size();
+    result.verticesAfter = result.verticesBefore;
+    if (!meshData.mIndices.get().empty()) return result;
+
+    std::array<std::size_t, 10> const fieldCounts{
+        meshData.mNormals.get().size(),
+        meshData.mTangents.get().size(),
+        meshData.mColors.get().size(),
+        meshData.mBoneId0s.get().size(),
+        meshData.mTextureUVs[0].get().size(),
+        meshData.mTextureUVs[1].get().size(),
+        meshData.mTextureUVs[2].get().size(),
+        meshData.mPBRTextureIndices.get().size(),
+        meshData.mMERS.get().size(),
+        meshData.mGeoType.get().size()
+    };
+    auto const vertexCount = positions.size();
+    auto const quadCount = vertexCount / 4U;
+    if (!nativeLiquidPerVertexFieldCountsMatch(vertexCount, fieldCounts)
+        || data.derivedColors.size() != vertexCount
+        || data.liquidKinds.size() != vertexCount
+        || (!data.tessellatorState.quadInfo.empty()
+            && data.tessellatorState.quadInfo.size() != quadCount)) {
+        return result;
+    }
+
+    auto const cullMask = buildNativeLiquidInternalFaceCullMask(
+        std::span<glm::vec3 const>{positions.data(), positions.size()}
+    );
+    if (!cullMask.valid || cullMask.removeQuads.size() != quadCount
+        || cullMask.removedVertices() >= vertexCount) {
+        return result;
+    }
+
+    compactPraxisAggregatePerVertexField(positions, cullMask.removeQuads);
+    compactPraxisAggregatePerVertexField(
+        meshData.mNormals.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mTangents.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mColors.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mBoneId0s.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mTextureUVs[0].get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mTextureUVs[1].get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mTextureUVs[2].get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mPBRTextureIndices.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mMERS.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        meshData.mGeoType.get(), cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        data.derivedColors, cullMask.removeQuads
+    );
+    compactPraxisAggregatePerVertexField(
+        data.liquidKinds, cullMask.removeQuads
+    );
+    compactPraxisAggregatePerQuadField(
+        data.tessellatorState.quadInfo, cullMask.removeQuads
+    );
+
+    auto const finalVertexCount = positions.size();
+    if (finalVertexCount > std::numeric_limits<std::uint32_t>::max()) {
+        return result;
+    }
+    data.tessellatorState.count = static_cast<std::uint32_t>(finalVertexCount);
+    data.tessellatorState.maxVertexCount =
+        static_cast<std::uint32_t>(finalVertexCount);
+    refreshPraxisExactReplayBounds(data);
+    if (!data.ready()) return result;
+
+    result.valid = true;
+    result.verticesCulled = cullMask.removedVertices();
+    result.verticesAfter = finalVertexCount;
+    result.facePairsCulled = cullMask.facePairs;
+    return result;
+}
+
 std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
-    ProjectionState const&             state,
+    ProjectionState&                   state,
     std::span<std::size_t const>       sections
 ) {
     std::unique_ptr<PraxisCompatLiquidSectionData> result;
@@ -290,7 +447,42 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
         }
     }
     if (!result || !result->ready()) return {};
-    refreshPraxisExactReplayBounds(*result);
+
+    auto candidate = clonePraxisExactReplayData(*result);
+    auto const boundaryCull = candidate
+        ? cullPraxisAggregateBoundaryFaces(*candidate)
+        : PraxisAggregateBoundaryCullResult{};
+    auto& telemetry = state.nativeLiquidTelemetry;
+    telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull =
+        result->nativeStream->mPositions.get().size();
+    if (boundaryCull.valid && candidate && candidate->ready()) {
+        telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull =
+            boundaryCull.verticesBefore;
+        telemetry.praxisCompatAggregateVerticesBoundaryCulled =
+            boundaryCull.verticesCulled;
+        telemetry.praxisCompatAggregateVerticesAfterBoundaryCull =
+            boundaryCull.verticesAfter;
+        telemetry.praxisCompatAggregateBoundaryFacePairsCulled =
+            boundaryCull.facePairsCulled;
+        telemetry.praxisCompatAggregateBoundaryCullSkipped = 0U;
+        result = std::move(candidate);
+    } else {
+        telemetry.praxisCompatAggregateVerticesBoundaryCulled = 0U;
+        telemetry.praxisCompatAggregateVerticesAfterBoundaryCull =
+            telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull;
+        telemetry.praxisCompatAggregateBoundaryFacePairsCulled = 0U;
+        telemetry.praxisCompatAggregateBoundaryCullSkipped = 1U;
+        refreshPraxisExactReplayBounds(*result);
+    }
+    logger().info(
+        "PRAXIS_LIQUID_BOUNDARY_CULL before={} culled={} after={} pairs={} sections={} skipped={}",
+        telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull,
+        telemetry.praxisCompatAggregateVerticesBoundaryCulled,
+        telemetry.praxisCompatAggregateVerticesAfterBoundaryCull,
+        telemetry.praxisCompatAggregateBoundaryFacePairsCulled,
+        sections.size(),
+        telemetry.praxisCompatAggregateBoundaryCullSkipped
+    );
     return result;
 }
 

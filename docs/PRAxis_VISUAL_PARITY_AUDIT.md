@@ -654,5 +654,40 @@ PRAXIS_SUBMERGED_PLANT
 PRAXIS_SUBMERGED_BODY_TELEMETRY
 ```
 
-Phase 4Dのlogic testとRelease buildはPASS。水の透過度と水中植物の最終判定はユーザーの
-同一fixture runtime確認まで未判定とする。
+Phase 4D runtimeでは`PRAXIS_SUBMERGED_PLANT body=minecraft:kelp
+liquid=minecraft:water verticesAdded=16`を確認した。したがってStrawberry Houseのkelpはloader、
+mapping、body tessellationへ到達しており、植物専用描画やmapping補正の対象にしない。
+water alpha=160は次candidateの基準として維持するが、最終visual parityは未判定である。
+
+## Phase 4E: Aggregate section-boundary face cull
+
+Phase 3Cのsection単位cullは維持したまま、Praxis Exact Replayがready sectionを共通の
+projection-origin local座標へaggregateした直後に、同じstrict face matcherを第二段として適用する。
+対象はaxis-aligned、unit full face、整数境界、同一plane、uniqueな正負winding pairだけである。
+same-facing duplicate、ambiguous duplicate、partial-height、sloped faceは残す。
+
+第二段cullはaggregateの候補copyに対してtransactionalに実行する。`mIndices`がnon-empty、native
+per-vertex field count不一致、derived color/liquid kind不一致、quad info不一致、またはcompact後の
+`ready()`失敗時は候補を破棄し、cull前aggregateをそのままsubmitする。
+
+同一quad maskで以下をstable compactする。
+
+```text
+mPositions / mNormals / mTangents / mColors / mBoneId0s
+mTextureUVs[0..2] / mPBRTextureIndices / mMERS / mGeoType
+derivedColors / liquidKinds / mQuadInfoList
+```
+
+成功後はtyped stateの`count`と`maxVertexCount`を最終vertex countへ更新し、AABB/UVAABBを
+残存streamから再計算する。Phase 4Dのwater RGB `(108,175,255)`、alpha `160`、
+`mMatBlendBlock`、UV、section cull、tessellator flags、shader color、terrain texture-ref submit、
+aggregate 1 submit/frameは変更しない。
+
+主要runtime marker:
+
+```text
+PRAXIS_LIQUID_BOUNDARY_CULL before=... culled=... after=... pairs=... sections=... skipped=...
+```
+
+section内faceは既にPhase 3Cで削除済みなので、このmarkerで削除されるpairはsection境界由来を
+主対象とする。実際の削除数と16-block周期の帯状artifact改善は同一fixture runtime確認事項である。
