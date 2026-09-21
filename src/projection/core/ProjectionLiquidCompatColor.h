@@ -26,6 +26,7 @@ inline constexpr std::array<float, 3> PraxisMissingTint{0.56F, 0.84F, 1.00F};
 inline constexpr float PraxisMissingTintStrength = 0.52F;
 inline constexpr PraxisCompatRgba8 PraxisWaterColorSeed{63U, 118U, 228U, 255U};
 inline constexpr std::uint8_t PraxisNativeWhiteMinimum = 254U;
+inline constexpr std::uint8_t PraxisWaterDerivedAlpha = 160U;
 
 struct PraxisCompatLiquidColorSeedResult {
     std::uint32_t packed{};
@@ -64,6 +65,15 @@ selectPraxisCompatLiquidColorSeed(
         return {packAbgr(PraxisWaterColorSeed), true};
     }
     return {nativeSource, false};
+}
+
+[[nodiscard]] inline constexpr std::uint32_t applyPraxisCompatLiquidAlpha(
+    std::uint32_t derivedPacked,
+    bool          isWater
+) noexcept {
+    if (!isWater) return derivedPacked;
+    return (derivedPacked & 0x00FFFFFFU)
+        | (static_cast<std::uint32_t>(PraxisWaterDerivedAlpha) << 24U);
 }
 
 [[nodiscard]] inline std::uint32_t applyPraxisCompatMissingAbgr(

@@ -4,6 +4,7 @@
 #include "projection/mesh/ProjectionRenderer.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
@@ -549,13 +550,14 @@ void submitProjectionMeshPass(
                                 std::memory_order_acq_rel
                             )) {
                             logger().info(
-                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 vertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterVertexAlpha={} lavaVertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
                                         == PraxisLiquidMaterialCandidate::BlendBlock
                                     ? "mMatBlendBlock"
                                     : "sign_text",
                                 signTextReady ? 1 : 0,
                                 blendMaterialReady ? 1 : 0,
+                                PraxisWaterDerivedAlpha,
                                 telemetry.praxisCompatImmediateSubmitsPerFrame
                             );
                         }

@@ -66,6 +66,8 @@ std::atomic_bool gNativeLiquidCullLogged{};
 std::atomic_bool gNativeLiquidCullSkipLogged{};
 std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
+std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
+std::atomic_bool gSubmergedPlantLogged{};
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -437,17 +439,26 @@ void buildProjectionSection(
         nullptr,
         BoundingBox{}
     };
+    constexpr std::size_t NoCompositeBodyOutcome = static_cast<std::size_t>(-1);
     struct LayeredBlock {
         Block const*                  block{};
         BlockPos                      position{};
         BlockRenderLayer              layer{BlockRenderLayer::RenderlayerOpaque};
         RenderBucket bucket{RenderBucket::Opaque};
         std::size_t                   structureIndex{};
+        std::size_t compositeOutcomeIndex{NoCompositeBodyOutcome};
+    };
+    struct CompositeBodyOutcome {
+        std::size_t  structureIndex{};
+        Block const* body{};
+        Block const* liquid{};
+        std::uint64_t vertices{};
     };
     // Blocks whose model produced no geometry during tessellation
     // (block-entity blocks such as chests and signs) get a placeholder.
     std::vector<std::size_t> failedTessellationIndices;
     std::vector<LayeredBlock> layeredBlocks;
+    std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const correctionState = state.correctionStates[index];
@@ -467,6 +478,16 @@ void buildProjectionSection(
             state.anchor.y + offsetY + transformed.y,
             state.anchor.z + offsetZ + transformed.z
         };
+        std::size_t compositeOutcomeIndex = NoCompositeBodyOutcome;
+        if (entry.block && entry.liquid) {
+            compositeOutcomeIndex = compositeBodyOutcomes.size();
+            compositeBodyOutcomes.push_back({
+                index,
+                entry.block,
+                entry.liquid,
+                0U
+            });
+        }
         auto const appendBlock = [&](Block const* source) {
             auto const* transformedBlock = transformExpectedBlock(source, sectionTransformSettings, identityTransform);
             if (!transformedBlock) return;
@@ -491,7 +512,8 @@ void buildProjectionSection(
                     position,
                     layer,
                     renderBucketFor(layer),
-                    index
+                    index,
+                    compositeOutcomeIndex
                 });
             };
             appendLayer(primaryLayer);
@@ -588,6 +610,27 @@ void buildProjectionSection(
             // Trust the actual mesh delta so those models are retained.
             auto const geometryAdded =
                 tessellator.mMeshData->mPositions.get().size() > firstPosition;
+            auto const verticesAdded =
+                tessellator.mMeshData->mPositions.get().size() - firstPosition;
+            if (layered.compositeOutcomeIndex != NoCompositeBodyOutcome) {
+                auto& composite =
+                    compositeBodyOutcomes[layered.compositeOutcomeIndex];
+                composite.vertices += verticesAdded;
+                auto const logIndex = gSubmergedBodyLogCount.fetch_add(
+                    1U,
+                    std::memory_order_acq_rel
+                );
+                if (logIndex < 8U) {
+                    logger().info(
+                        "PRAXIS_SUBMERGED_BODY body={} liquid={} layer={} returned={} verticesAdded={}",
+                        layered.block->getTypeName(),
+                        composite.liquid->getTypeName(),
+                        static_cast<unsigned int>(layered.layer),
+                        rendered ? 1 : 0,
+                        verticesAdded
+                    );
+                }
+            }
             if (!rendered && !geometryAdded) {
                 // No terrain-atlas model: needs a placeholder hull.
                 failedTessellationIndices.push_back(layered.structureIndex);
@@ -626,6 +669,44 @@ void buildProjectionSection(
             meshNames[bucketIndex],
             SupplementaryFieldAutoGenerationMode{1}
         ));
+    }
+
+    state.nativeLiquidTelemetry.compositeBodyLiquidCells
+        += compositeBodyOutcomes.size();
+    std::uint64_t sectionCompositePositive{};
+    std::uint64_t sectionCompositeZero{};
+    std::uint64_t sectionCompositeVertices{};
+    for (auto const& outcome : compositeBodyOutcomes) {
+        state.nativeLiquidTelemetry.compositeBodyVertices += outcome.vertices;
+        sectionCompositeVertices += outcome.vertices;
+        if (outcome.vertices != 0U) {
+            ++state.nativeLiquidTelemetry.compositeBodyTessellationPositive;
+            ++sectionCompositePositive;
+        } else {
+            ++state.nativeLiquidTelemetry.compositeBodyTessellationZero;
+            ++sectionCompositeZero;
+        }
+        auto const& bodyName = outcome.body->getTypeName();
+        if ((bodyName.find("kelp") != std::string::npos
+             || bodyName.find("seagrass") != std::string::npos)
+            && !gSubmergedPlantLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().info(
+                "PRAXIS_SUBMERGED_PLANT body={} liquid={} verticesAdded={}",
+                bodyName,
+                outcome.liquid->getTypeName(),
+                outcome.vertices
+            );
+        }
+    }
+    if (!compositeBodyOutcomes.empty()) {
+        logger().info(
+            "PRAXIS_SUBMERGED_BODY_TELEMETRY compositeCells={} positive={} zero={} vertices={} section={}",
+            compositeBodyOutcomes.size(),
+            sectionCompositePositive,
+            sectionCompositeZero,
+            sectionCompositeVertices,
+            section
+        );
     }
 
     std::sort(failedTessellationIndices.begin(), failedTessellationIndices.end());
@@ -1305,7 +1386,10 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         auto const source = colors[vertex];
         auto const isWater = liquidKinds[vertex] == PraxisCompatLiquidKind::Water;
         auto const seed = selectPraxisCompatLiquidColorSeed(source, isWater);
-        auto const derived = applyPraxisCompatMissingAbgr(seed.packed);
+        auto const derived = applyPraxisCompatLiquidAlpha(
+            applyPraxisCompatMissingAbgr(seed.packed),
+            isWater
+        );
         compat->derivedColors.push_back(derived);
         if (seed.waterSeedApplied) {
             ++waterSeedVertices;

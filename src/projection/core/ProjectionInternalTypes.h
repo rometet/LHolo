@@ -156,6 +156,10 @@ struct NativeLiquidTelemetry {
     std::uint64_t praxisLiquidMaterialSignTextReady{};
     std::uint64_t praxisLiquidMaterialBlendReady{};
     std::uint64_t praxisLiquidMaterialCandidateBlendBlock{};
+    std::uint64_t compositeBodyLiquidCells{};
+    std::uint64_t compositeBodyTessellationPositive{};
+    std::uint64_t compositeBodyTessellationZero{};
+    std::uint64_t compositeBodyVertices{};
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};

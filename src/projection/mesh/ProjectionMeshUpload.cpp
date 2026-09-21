@@ -107,6 +107,14 @@ void mergeNativeLiquidTelemetry(
     destination.praxisCompatCapturedQuadInfo += source.praxisCompatCapturedQuadInfo;
     destination.praxisCompatDoubleLiquidBuildSections
         += source.praxisCompatDoubleLiquidBuildSections;
+    destination.compositeBodyLiquidCells
+        += source.compositeBodyLiquidCells;
+    destination.compositeBodyTessellationPositive
+        += source.compositeBodyTessellationPositive;
+    destination.compositeBodyTessellationZero
+        += source.compositeBodyTessellationZero;
+    destination.compositeBodyVertices
+        += source.compositeBodyVertices;
     destination.nativeLiquidColorVertices += source.nativeLiquidColorVertices;
     destination.nativeLiquidAlphaModifiedVertices
         += source.nativeLiquidAlphaModifiedVertices;

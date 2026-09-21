@@ -10,6 +10,7 @@
 #include "projection/runtime/ProjectionSession.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
@@ -383,6 +384,19 @@ void renderProjection(
                 telemetry.praxisCompatAggregateBuilds,
                 telemetry.praxisCompatRetainedFallbackDraws,
                 praxisCompatLiquidSections
+            );
+            logger().info(
+                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} waterSeedVertices={} lavaNativeVertices={}",
+                PraxisWaterDerivedAlpha,
+                telemetry.praxisCompatWaterSeedVertices,
+                telemetry.praxisCompatLavaNativeVertices
+            );
+            logger().info(
+                "PRAXIS_SUBMERGED_BODY_TELEMETRY compositeCells={} positive={} zero={} vertices={}",
+                telemetry.compositeBodyLiquidCells,
+                telemetry.compositeBodyTessellationPositive,
+                telemetry.compositeBodyTessellationZero,
+                telemetry.compositeBodyVertices
             );
         }
     }

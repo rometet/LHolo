@@ -624,3 +624,35 @@ PRAXIS_EXACT_REPLAY_TELEMETRY ... waterSeedVertices=... lavaNativeVertices=...
 ```
 
 Phase 4Cのlogic testとRelease buildはPASS。色差への因果はユーザー視覚確認まで未判定とする。
+
+## Phase 4D: Effective alpha / submerged body audit
+
+Phase 4Cのwater RGB `(108,175,255)`を維持し、derived color生成の最後にwaterだけalphaを
+`255`から`160`へ変更する。canonical native `mColors`とlava derived alphaは変更しない。
+
+```text
+water derived = (108,175,255,160)
+lava alpha    = unchanged
+```
+
+Phase 4Bの`mMatBlendBlock`、blend/depth state、UV、internal-face cull、`begin=true`、
+`tessellate=false`、shader color white、live terrain TexturePtr、texture-ref overload、aggregate
+replayは変更しない。
+
+同時にbody mesh buildで`entry.block != nullptr && entry.liquid != nullptr`のセルを記録する。
+各cellのnative layer試行で実際のposition stream差分を測り、複数layerの合計が1頂点以上なら
+cell単位でpositive、全layerが0ならzeroとする。最初の8試行を`PRAXIS_SUBMERGED_BODY`、
+最初のkelp/seagrass cellを`PRAXIS_SUBMERGED_PLANT`として記録する。植物専用rendererや
+mapping補正は追加しない。
+
+主要runtime marker:
+
+```text
+PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha=160
+PRAXIS_SUBMERGED_BODY
+PRAXIS_SUBMERGED_PLANT
+PRAXIS_SUBMERGED_BODY_TELEMETRY
+```
+
+Phase 4Dのlogic testとRelease buildはPASS。水の透過度と水中植物の最終判定はユーザーの
+同一fixture runtime確認まで未判定とする。
