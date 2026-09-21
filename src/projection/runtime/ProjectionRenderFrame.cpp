@@ -301,7 +301,7 @@ void renderProjection(
             state.meshPreflightDone = true;
             auto const& telemetry = state.nativeLiquidTelemetry;
             logger().info(
-                "PHASE2_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} colors={} alphaModified={} virtualLiquidHits={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
+                "PHASE3A_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} colors={} alphaModified={} virtualLiquidHits={} signTextResolved={} signTextDraws={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
                 telemetry.nativeLiquidCellsAttempted,
                 telemetry.nativeLiquidTessellationPositive,
                 telemetry.nativeLiquidTessellationZero,
@@ -311,6 +311,8 @@ void renderProjection(
                 telemetry.nativeLiquidColorVertices,
                 telemetry.nativeLiquidAlphaModifiedVertices,
                 telemetry.virtualLiquidQueryHits,
+                telemetry.nativeLiquidSignTextResolved,
+                telemetry.nativeLiquidSignTextDraws,
                 telemetry.nativeLiquidTerrainBlendResolved,
                 telemetry.nativeLiquidTerrainBlendDraws,
                 telemetry.nativeLiquidLegacyMaterialDraws,

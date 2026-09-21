@@ -46,8 +46,8 @@ auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
 }
 
-std::atomic_bool gTerrainBlendResolvedLogged{};
-std::atomic_bool gTerrainBlendUnavailableLogged{};
+std::atomic_bool gSignTextResolvedLogged{};
+std::atomic_bool gSignTextUnavailableLogged{};
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
@@ -169,12 +169,12 @@ void submitProjectionMeshPass(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Draw successful native-liquid batches before the legacy actor-material
-    // Brightness::MAX() setup below. terrain_blend consumes the terrain atlas
-    // and the tessellator's native vertex data; it must not inherit LHolo's
-    // full-brightness workaround for retained ItemInHand body meshes.
+    // Phase 3A changes one variable only: submit the unchanged native-liquid
+    // mesh and live terrain atlas through the exact sign_text material proven
+    // by Praxis. It remains before the legacy actor-material Brightness::MAX()
+    // setup so no lighting, geometry or tessellator contract changes here.
     std::vector<std::size_t> nativeLiquidSections;
-    bool nativeLiquidDrawnWithTerrain{};
+    bool nativeLiquidDrawnWithSignText{};
     if (renderAlphaLayer) {
         for (std::size_t section = 0;
              section < state.nativeLiquidSectionMeshes.size();
@@ -190,30 +190,30 @@ void submitProjectionMeshPass(
             }
         );
         if (!nativeLiquidSections.empty()) {
-            if (auto const* terrainBlend = render::resolveTerrainBlendMaterial()) {
-                state.nativeLiquidTelemetry.nativeLiquidTerrainBlendResolved = 1;
-                if (!gTerrainBlendResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
-                    logger().info("NATIVE_LIQUID_TERRAIN_BLEND_RESOLVED material=terrain_blend");
+            if (auto const* signText = render::resolveSignTextMaterial()) {
+                state.nativeLiquidTelemetry.nativeLiquidSignTextResolved = 1;
+                if (!gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
+                    logger().info("NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text");
                 }
                 for (auto const section : nativeLiquidSections) {
                     auto& mesh = *state.nativeLiquidSectionMeshes[section];
                     mesh.renderMesh(
                         renderContext.mScreenContext,
-                        *terrainBlend,
+                        *signText,
                         *state.terrainTextureVariant,
                         0,
                         mesh.mVertexCount.get().value_or(0u),
                         emptyOffscreenCaptureDescription(),
                         nullptr
                     );
-                    ++state.nativeLiquidTelemetry.nativeLiquidTerrainBlendDraws;
+                    ++state.nativeLiquidTelemetry.nativeLiquidSignTextDraws;
                 }
-                nativeLiquidDrawnWithTerrain = true;
-            } else if (!gTerrainBlendUnavailableLogged.exchange(
+                nativeLiquidDrawnWithSignText = true;
+            } else if (!gSignTextUnavailableLogged.exchange(
                            true,
                            std::memory_order_acq_rel
                        )) {
-                logger().warn("NATIVE_TERRAIN_BLEND_UNAVAILABLE material=terrain_blend");
+                logger().warn("NATIVE_LIQUID_SIGN_TEXT_UNAVAILABLE material=sign_text");
             }
         }
     }
@@ -333,10 +333,10 @@ void submitProjectionMeshPass(
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
-    // A missing runtime terrain_blend material is an explicit diagnostic
-    // fallback. Geometry stays visible for comparison, but telemetry keeps it
-    // distinct from the native terrain-material path.
-    if (renderAlphaLayer && !nativeLiquidDrawnWithTerrain) {
+    // A missing runtime sign_text material is an explicit diagnostic fallback.
+    // Geometry stays visible for comparison, but telemetry makes it impossible
+    // to mistake the legacy material for a successful Phase 3A candidate.
+    if (renderAlphaLayer && !nativeLiquidDrawnWithSignText) {
         for (auto const section : nativeLiquidSections) {
             auto& mesh = *state.nativeLiquidSectionMeshes[section];
             mesh.renderMesh(

@@ -38,6 +38,8 @@ struct NativeLiquidTelemetry {
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};
+    std::uint64_t nativeLiquidSignTextResolved{};
+    std::uint64_t nativeLiquidSignTextDraws{};
     std::uint64_t nativeLiquidTerrainBlendResolved{};
     std::uint64_t nativeLiquidTerrainBlendDraws{};
     std::uint64_t nativeLiquidLegacyMaterialDraws{};

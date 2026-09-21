@@ -18,7 +18,7 @@ Praxis参照作業ツリーには未コミット変更が多数存在する。�
 | AlphaTest | LHolo bucket + `mMatAlphaColoredBlock` | native queue/material/alpha-test | native queue/materialを使用 |
 | Alpha one-sided | LHolo bucket + `mMatAlphaOneSidedColoredBlock` | native single-sided queue/material | native queue/materialを使用 |
 | Blend | LHolo bucket。opacityが1未満なら全bucketをblendへ統合 | native分類を保持し、設定上必要なときだけghost/translucent semanticsを適用 | native分類とtranslucent設定を分離 |
-| Liquid | `LHoloLiquidProxy`、固定tint、manual quad/corner height、`mMatBlendBlock` | native liquid queue/tessellation/atlas/material | proxyを退役しnative liquid receipt確認後のみcomparison shell抑制 |
+| Liquid | 公開`BlockTessellator`のnative liquid geometryをLHolo retained meshへ保持。proxyはnative 0/failureセルだけのfallback | native liquid queue/tessellation/atlas/material | Phase 3Aでpost-tessellation material契約を`sign_text` A/Bし、後続でnative ownerとの差を分離 |
 | Block actor | `BlockActorRenderDispatcher::render()`をLHoloのblock-entity passから呼ぶ。失敗時placeholder | native block actor pathを描画pass/lighting/depth込みで利用 | native passとの同一性を実機検証し、placeholderを明示的失敗時だけに限定 |
 | Vertex RGB | 監査開始時はnative RGBを保持し、一部foliage tintを後段乗算 | native RGB/AOへghost tintを一度だけ乗算 | 実装済みgroundwork。native RenderChunk pathでもsuffix receiptを証明する必要あり |
 | Vertex alpha | 監査開始時はglobal opacityで上書き | native alpha × ghost opacity | 乗算へ変更済み。native pathでは未検証 |
@@ -46,7 +46,7 @@ opacityが1未満のときはopaque/cutoutを含む全bucketがblend materialへ
 
 ### Liquid
 
-`buildLiquidProxySectionMesh()`は`liquid_depth`から独自高さを計算し、top/side quad、隣接抑制、固定water tint `#3F76E4`、white lava tint、`getTexture(0,0)`を使う。出力名は`LHoloLiquidProxy`で、alpha passに`mMatBlendBlock`で描画される。これはnative liquid semanticsではない。
+Phase 2以降、Missing liquidは先に`BlockTessellator::tessellateInWorld()`へ直接渡され、position deltaが正のセルを`LHoloNativeLiquid`へ保持する。`buildLiquidProxySectionMesh()`の`liquid_depth`、manual quad、固定water tint `#3F76E4`はnative tessellationが0または失敗したセルだけのfallbackである。2026-09-21 14:39のStrawberry House fixtureではfallback cell/drawとも0だった。
 
 ### Correction
 
@@ -158,13 +158,13 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 - production `LHoloLiquidProxy` draw: **native tessellationが0/failureのセルだけfallbackとして残存**
 - manual water tint/surface: **fallbackセルだけ残存**
-- native liquid renderer: **公開`BlockTessellator` retained-mesh実験を接続、runtime未確認**
+- native liquid renderer: **公開`BlockTessellator` retained-mesh経路がruntime PASS。visual contractは未解決**
 - native primary/additional classification: **分類取得は実装、native owner未接続**
-- native RGB/AO保持: **legacy tessellation上は改善、native path未検証**
-- native alpha × opacity: **実装・unit test済み、runtime未検証**
+- native RGB/AO保持: **native liquid streamでposition/UV/color各59440を確認。画面上の意味論は未承認**
+- native alpha × opacity: **実装・unit test済み、native streamへ適用済み**
 - global alpha overwrite: **body geometryから除去**
 - `Brightness::MAX()` dependency: **残存**
-- waterlogged body/liquid storage: **実装・runtime未検証**
+- waterlogged body/liquid storage: **実装済み、専用waterlogged fixtureは未検証**
 - correct/wrong cell model suppression: **既存実装あり、runtime未検証**
 - native ghost lifecycle/resource reload/dimension change: **未実装**
 
@@ -186,12 +186,13 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 - `LHoloLogicTests`: 3677 checks、0 failures
 - Release DLL build: success
-- Minecraft runtime / GPU capture: NOT TESTED
-- liquid regression fixture: NOT TESTED
+- Minecraft runtime telemetry: PASS（2026-09-21 14:39、正常終了）
+- GPU capture: NOT PERFORMED
+- Strawberry House liquid fixture: native geometry/upload/draw PASS、visual parity NOT ACCEPTED
 - block actor fixture: NOT TESTED
 - resource reload / dimension change / structure reload: NOT TESTED
 
-RenderChunk ownerまでのfull parityは引き続き `BLOCKED` である。Phase 2ではその手前の公開`BlockTessellator`経路を実装したため、実機telemetryでnative liquid geometryの成否を判定する。
+RenderChunk ownerまでのfull parityは引き続き `BLOCKED` である。Phase 2の公開`BlockTessellator`経路は実機で成立したため、現在の問題は `POST_TESSELLATION_VISUAL_CONTRACT_UNRESOLVED` として扱う。
 
 ## Phase 2: retained native-liquid experiment
 
@@ -221,5 +222,55 @@ NATIVE_TERRAIN_BLEND_UNAVAILABLE
 PHASE2_NATIVE_LIQUID_TELEMETRY
 ```
 
-Phase 2のbuild/unit testは成功しているが、Minecraft runtime fixtureはまだ未実施のため、
-`PHASE2_NATIVE_LIQUID_STATUS = PARTIAL` とする。
+2026-09-21 14:39の`Strawberry House.litematic`実機結果:
+
+```text
+NATIVE_LIQUID_TESSELLATION_RUNTIME = PASS
+NATIVE_LIQUID_MESH_UPLOAD = PASS
+NATIVE_LIQUID_TERRAIN_BLEND_RESOLUTION = PASS
+NATIVE_LIQUID_DRAW_CALL = PASS
+NATIVE_LIQUID_PROXY_FALLBACK = 0
+NATIVE_LIQUID_VISUAL_PARITY = NOT_ACCEPTED
+POST_TESSELLATION_VISUAL_CONTRACT = UNRESOLVED
+
+attempted=2972
+positive=2972
+zero=0
+failure=0
+vertices=59440
+uv0=59440
+colors=59440
+terrainBlendResolved=1
+terrainBlendDraws=1101
+legacyMaterialDraws=0
+proxyFallbackCells=0
+proxyDrawCells=0
+nativeMeshes=20
+```
+
+## Phase 3A: liquid material one-variable A/B
+
+Praxisの既知実機記録では`terrain_blend` batchが不可視で、`sign_text`とlive terrain
+`TexturePtr`の組合せが可視だった。Phase 3AはLHoloのnative liquid mesh、terrain atlas、
+submit位置、sorting、opacity、tessellationを一切変えず、materialだけを正確な
+`sign_text`へ変更する。`glow_sign_text` resolverは流用しない。
+
+Phase 3Aで変更しない既知のflag差:
+
+```text
+                         begin fifth flag    tessellateInWorld final bool
+LHolo 9369d / Phase 3A   false               true
+旧Praxis実機経路         true                false
+```
+
+`sign_text`で視覚差が出ない場合だけ、後続phaseでこの2値を同時に変えず1変数ずつ
+A/Bする。2972 cells / 59440 positionsから内部共面sideの蓄積も疑われるが、Phase 3A
+では`cullCoincidentOpposingFullFaces()`相当のgeometry処理を導入しない。
+
+Phase 3A runtime marker:
+
+```text
+NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text
+NATIVE_LIQUID_SIGN_TEXT_UNAVAILABLE material=sign_text
+PHASE3A_NATIVE_LIQUID_TELEMETRY
+```
