@@ -220,7 +220,10 @@ void scheduleProjectionMeshBuild(
     snapshot->correctionOutlineSectionMeshes.resize(1);
     snapshot->wrongFillSectionMeshes.resize(1);
     snapshot->wrongOutlineSectionMeshes.resize(1);
+    snapshot->nativeLiquidSectionMeshes.resize(1);
     snapshot->liquidProxySectionMeshes.resize(1);
+    snapshot->nativeLiquidSectionCellCounts.resize(1);
+    snapshot->liquidProxySectionCellCounts.resize(1);
     snapshot->blockEntityPlaceholderSectionMeshes.resize(1);
 
     auto const snapshotDataFinished = std::chrono::steady_clock::now();
@@ -312,7 +315,11 @@ void scheduleProjectionMeshBuild(
                 result.correctionOutlineMesh = std::move(snapshot->correctionOutlineSectionMeshes[0]);
                 result.wrongFillMesh = std::move(snapshot->wrongFillSectionMeshes[0]);
                 result.wrongOutlineMesh = std::move(snapshot->wrongOutlineSectionMeshes[0]);
+                result.nativeLiquidMesh = std::move(snapshot->nativeLiquidSectionMeshes[0]);
                 result.liquidProxyMesh = std::move(snapshot->liquidProxySectionMeshes[0]);
+                result.nativeLiquidCellCount = snapshot->nativeLiquidSectionCellCounts[0];
+                result.liquidProxyCellCount = snapshot->liquidProxySectionCellCounts[0];
+                result.nativeLiquidTelemetry = snapshot->nativeLiquidTelemetry;
                 result.blockEntityPlaceholderMesh
                     = std::move(snapshot->blockEntityPlaceholderSectionMeshes[0]);
 
@@ -331,6 +338,7 @@ void scheduleProjectionMeshBuild(
                     && validateMeshData(result.correctionOutlineMesh, "correctionOutline", result)
                     && validateMeshData(result.wrongFillMesh, "wrongFill", result)
                     && validateMeshData(result.wrongOutlineMesh, "wrongOutline", result)
+                    && validateMeshData(result.nativeLiquidMesh, "nativeLiquid", result)
                     && validateMeshData(result.liquidProxyMesh, "liquidProxy", result)
                     && validateMeshData(
                         result.blockEntityPlaceholderMesh, "blockEntityPlaceholder", result

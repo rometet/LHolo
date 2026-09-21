@@ -6,8 +6,10 @@
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
+#include "plugin/LHolo.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -32,12 +34,20 @@
 #include "mc/deps/renderer/hal/interface/DepthStencilStateDescription.h"
 #include "mc/world/level/block/actor/BlockActor.h"
 #include "mc/world/level/block/actor/component/IVanillaRenderBlockActorComponent.h"
+#include "ll/api/mod/NativeMod.h"
 
 #include "render/OverlayMaterials.h"
 
 namespace lholo::projection::detail {
 
 namespace {
+
+auto& logger() {
+    return LHolo::getInstance().getSelf().getLogger();
+}
+
+std::atomic_bool gTerrainBlendResolvedLogged{};
+std::atomic_bool gTerrainBlendUnavailableLogged{};
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
@@ -145,6 +155,69 @@ void submitProjectionMeshPass(
     auto& itemRenderer = renderContext.mItemInHandRenderer;
     auto const& blendMaterial = itemRenderer.mMatBlendBlock.get();
 
+    auto worldCenter = [&](std::size_t section) {
+        return Vec3{
+            static_cast<float>(renderOrigin.x) + state.sections[section].center.x,
+            static_cast<float>(renderOrigin.y) + state.sections[section].center.y,
+            static_cast<float>(renderOrigin.z) + state.sections[section].center.z
+        };
+    };
+    auto distanceSquared = [&](Vec3 const& point) {
+        auto const dx = point.x - camera.x;
+        auto const dy = point.y - camera.y;
+        auto const dz = point.z - camera.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    // Draw successful native-liquid batches before the legacy actor-material
+    // Brightness::MAX() setup below. terrain_blend consumes the terrain atlas
+    // and the tessellator's native vertex data; it must not inherit LHolo's
+    // full-brightness workaround for retained ItemInHand body meshes.
+    std::vector<std::size_t> nativeLiquidSections;
+    bool nativeLiquidDrawnWithTerrain{};
+    if (renderAlphaLayer) {
+        for (std::size_t section = 0;
+             section < state.nativeLiquidSectionMeshes.size();
+             ++section) {
+            auto const& mesh = state.nativeLiquidSectionMeshes[section];
+            if (mesh && mesh->isValid()) nativeLiquidSections.push_back(section);
+        }
+        std::sort(
+            nativeLiquidSections.begin(),
+            nativeLiquidSections.end(),
+            [&](std::size_t lhs, std::size_t rhs) {
+                return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
+            }
+        );
+        if (!nativeLiquidSections.empty()) {
+            if (auto const* terrainBlend = render::resolveTerrainBlendMaterial()) {
+                state.nativeLiquidTelemetry.nativeLiquidTerrainBlendResolved = 1;
+                if (!gTerrainBlendResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
+                    logger().info("NATIVE_LIQUID_TERRAIN_BLEND_RESOLVED material=terrain_blend");
+                }
+                for (auto const section : nativeLiquidSections) {
+                    auto& mesh = *state.nativeLiquidSectionMeshes[section];
+                    mesh.renderMesh(
+                        renderContext.mScreenContext,
+                        *terrainBlend,
+                        *state.terrainTextureVariant,
+                        0,
+                        mesh.mVertexCount.get().value_or(0u),
+                        emptyOffscreenCaptureDescription(),
+                        nullptr
+                    );
+                    ++state.nativeLiquidTelemetry.nativeLiquidTerrainBlendDraws;
+                }
+                nativeLiquidDrawnWithTerrain = true;
+            } else if (!gTerrainBlendUnavailableLogged.exchange(
+                           true,
+                           std::memory_order_acq_rel
+                       )) {
+                logger().warn("NATIVE_TERRAIN_BLEND_UNAVAILABLE material=terrain_blend");
+            }
+        }
+    }
+
     // The ItemInHand/Entity materials used for ghost blocks drive their
     // diffuse lighting from TileLightColor in constant buffer CB0. When
     // looking down at the ground with no block entities in the view frustum
@@ -167,19 +240,6 @@ void submitProjectionMeshPass(
     struct VisibleMesh {
         std::size_t bucket;
         std::size_t section;
-    };
-    auto worldCenter = [&](std::size_t section) {
-        return Vec3{
-            static_cast<float>(renderOrigin.x) + state.sections[section].center.x,
-            static_cast<float>(renderOrigin.y) + state.sections[section].center.y,
-            static_cast<float>(renderOrigin.z) + state.sections[section].center.z
-        };
-    };
-    auto distanceSquared = [&](Vec3 const& point) {
-        auto const dx = point.x - camera.x;
-        auto const dy = point.y - camera.y;
-        auto const dz = point.z - camera.z;
-        return dx * dx + dy * dy + dz * dz;
     };
     auto sortBackToFront = [&](std::vector<VisibleMesh>& meshes) {
         std::sort(meshes.begin(), meshes.end(), [&](VisibleMesh const& lhs, VisibleMesh const& rhs) {
@@ -273,6 +333,25 @@ void submitProjectionMeshPass(
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
+    // A missing runtime terrain_blend material is an explicit diagnostic
+    // fallback. Geometry stays visible for comparison, but telemetry keeps it
+    // distinct from the native terrain-material path.
+    if (renderAlphaLayer && !nativeLiquidDrawnWithTerrain) {
+        for (auto const section : nativeLiquidSections) {
+            auto& mesh = *state.nativeLiquidSectionMeshes[section];
+            mesh.renderMesh(
+                renderContext.mScreenContext,
+                blendMaterial,
+                *state.terrainTextureVariant,
+                0,
+                mesh.mVertexCount.get().value_or(0u),
+                emptyOffscreenCaptureDescription(),
+                nullptr
+            );
+            ++state.nativeLiquidTelemetry.nativeLiquidLegacyMaterialDraws;
+        }
+    }
+
     // Textured liquid hulls travel the proven glass path: blend-block material
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
@@ -301,6 +380,8 @@ void submitProjectionMeshPass(
                 emptyOffscreenCaptureDescription(),
                 nullptr
             );
+            state.nativeLiquidTelemetry.liquidProxyDrawCells
+                += state.liquidProxySectionCellCounts[liquidSection];
         }
 
         // Textured placeholder hulls for block-entity blocks.

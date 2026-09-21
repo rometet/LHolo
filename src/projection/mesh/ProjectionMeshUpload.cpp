@@ -42,6 +42,27 @@ void markSectionDirty(ProjectionState& state, std::size_t section, bool incremen
     ++sectionState.requestedRevision;
 }
 
+void mergeNativeLiquidTelemetry(
+    NativeLiquidTelemetry&       destination,
+    NativeLiquidTelemetry const& source
+) {
+    destination.nativeLiquidCellsAttempted += source.nativeLiquidCellsAttempted;
+    destination.nativeLiquidTessellationPositive += source.nativeLiquidTessellationPositive;
+    destination.nativeLiquidTessellationZero += source.nativeLiquidTessellationZero;
+    destination.nativeLiquidTessellationFailure += source.nativeLiquidTessellationFailure;
+    destination.nativeLiquidVertices += source.nativeLiquidVertices;
+    destination.nativeLiquidUvVertices += source.nativeLiquidUvVertices;
+    destination.nativeLiquidColorVertices += source.nativeLiquidColorVertices;
+    destination.nativeLiquidAlphaModifiedVertices
+        += source.nativeLiquidAlphaModifiedVertices;
+    destination.virtualLiquidQueryHits += source.virtualLiquidQueryHits;
+    destination.liquidProxyFallbackCells += source.liquidProxyFallbackCells;
+    for (std::size_t layer = 0; layer < destination.nativeLiquidLayerAttempts.size(); ++layer) {
+        destination.nativeLiquidLayerAttempts[layer]
+            += source.nativeLiquidLayerAttempts[layer];
+    }
+}
+
 } // namespace
 
 void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessellator) {
@@ -109,6 +130,9 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 auto wrongOutline = uploadCpuMesh(
                     std::move(result.wrongOutlineMesh), "LHoloWrongOutline"
                 );
+                auto nativeLiquid = uploadCpuMesh(
+                    std::move(result.nativeLiquidMesh), "LHoloNativeLiquid"
+                );
                 auto liquidProxy = uploadCpuMesh(std::move(result.liquidProxyMesh), "LHoloLiquidProxy");
                 auto blockEntityPlaceholder = uploadCpuMesh(
                     std::move(result.blockEntityPlaceholderMesh), "LHoloBlockEntityPlaceholder"
@@ -121,7 +145,14 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);
                 state.wrongOutlineSectionMeshes[section] = std::move(wrongOutline);
+                state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
                 state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
+                state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
+                state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;
+                mergeNativeLiquidTelemetry(
+                    state.nativeLiquidTelemetry,
+                    result.nativeLiquidTelemetry
+                );
                 state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
                 state.sections[section].uploadedRevision = result.revision;
                 state.sections[section].incrementalDirty = false;

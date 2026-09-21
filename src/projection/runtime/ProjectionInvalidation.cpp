@@ -147,7 +147,18 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& mesh : state.correctionOutlineSectionMeshes) mesh.reset();
         for (auto& mesh : state.wrongFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.wrongOutlineSectionMeshes) mesh.reset();
+        for (auto& mesh : state.nativeLiquidSectionMeshes) mesh.reset();
         for (auto& mesh : state.liquidProxySectionMeshes) mesh.reset();
+        std::fill(
+            state.nativeLiquidSectionCellCounts.begin(),
+            state.nativeLiquidSectionCellCounts.end(),
+            0
+        );
+        std::fill(
+            state.liquidProxySectionCellCounts.begin(),
+            state.liquidProxySectionCellCounts.end(),
+            0
+        );
         for (auto& mesh : state.blockEntityPlaceholderSectionMeshes) mesh.reset();
         state.structureBoundsMesh.reset();
         std::fill(state.progressCorrect.begin(), state.progressCorrect.end(), 0);

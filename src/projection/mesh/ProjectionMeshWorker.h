@@ -39,7 +39,11 @@ struct AsyncSectionBuildResult {
     std::unique_ptr<mce::Mesh> correctionOutlineMesh;
     std::unique_ptr<mce::Mesh> wrongFillMesh;
     std::unique_ptr<mce::Mesh> wrongOutlineMesh;
+    std::unique_ptr<mce::Mesh> nativeLiquidMesh;
     std::unique_ptr<mce::Mesh> liquidProxyMesh;
+    std::size_t                nativeLiquidCellCount{};
+    std::size_t                liquidProxyCellCount{};
+    NativeLiquidTelemetry      nativeLiquidTelemetry;
     std::unique_ptr<mce::Mesh> blockEntityPlaceholderMesh;
 };
 

@@ -156,9 +156,9 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 現時点では `PRAXIS_VISUAL_PARITY_COMPLETE` ではない。
 
-- production `LHoloLiquidProxy` draw: **残存**
-- manual water tint/surface: **残存**
-- native liquid renderer: **未接続**
+- production `LHoloLiquidProxy` draw: **native tessellationが0/failureのセルだけfallbackとして残存**
+- manual water tint/surface: **fallbackセルだけ残存**
+- native liquid renderer: **公開`BlockTessellator` retained-mesh実験を接続、runtime未確認**
 - native primary/additional classification: **分類取得は実装、native owner未接続**
 - native RGB/AO保持: **legacy tessellation上は改善、native path未検証**
 - native alpha × opacity: **実装・unit test済み、runtime未検証**
@@ -191,4 +191,35 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 - block actor fixture: NOT TESTED
 - resource reload / dimension change / structure reload: NOT TESTED
 
-runtime fixtureとnative ownerが未成立のため、状態は `BLOCKED` である。公開APIが追加されるか、禁止されているversion-specific private ABIの利用が明示的に許可されない限り、proxyをnative parityと称して完了扱いにはしない。
+RenderChunk ownerまでのfull parityは引き続き `BLOCKED` である。Phase 2ではその手前の公開`BlockTessellator`経路を実装したため、実機telemetryでnative liquid geometryの成否を判定する。
+
+## Phase 2: retained native-liquid experiment
+
+Phase 2は`ExpectedLiquidMap`内のMissing liquidを実際に
+`BlockTessellator::tessellateInWorld()`へ渡す。bodyとliquidは別batchで、
+waterlogged cellでは両方が候補になる。
+
+セルごとにposition countの前後差を観測し、geometryが増えたセルだけを
+`LHoloNativeLiquid` meshへ採用する。そのセルは`LHoloLiquidProxy`対象から除外する。
+0 vertexまたは例外のセルだけが従来proxyへfallbackするため、native成功セルと
+manual quadの二重描画はない。
+
+native suffixのRGB/AOは維持し、alphaは`applyGhostAppearanceAbgr()`で一度だけ
+乗算する。描画はruntime material tableの`terrain_blend`とterrain atlasを優先し、
+materialがなければ明示的に`mMatBlendBlock` fallbackとしてtelemetryへ分離する。
+native terrain materialのdrawはlegacy body用`Brightness::MAX()`設定より先に行う。
+
+主要runtime marker:
+
+```text
+NATIVE_LIQUID_RENDER_LAYERS
+NATIVE_LIQUID_TESSELLATION_POSITIVE
+NATIVE_LIQUID_TESSELLATION_ZERO
+NATIVE_LIQUID_TESSELLATION_FAILURE
+NATIVE_LIQUID_TERRAIN_BLEND_RESOLVED
+NATIVE_TERRAIN_BLEND_UNAVAILABLE
+PHASE2_NATIVE_LIQUID_TELEMETRY
+```
+
+Phase 2のbuild/unit testは成功しているが、Minecraft runtime fixtureはまだ未実施のため、
+`PHASE2_NATIVE_LIQUID_STATUS = PARTIAL` とする。

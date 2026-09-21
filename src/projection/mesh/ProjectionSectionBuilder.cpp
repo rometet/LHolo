@@ -12,12 +12,15 @@
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
+#include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <span>
@@ -42,9 +45,16 @@
 #include "mc/world/level/biome/biome_color_sampling/BiomeColorSampling.h"
 #include "mc/world/level/material/Material.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
+#include "ll/api/mod/NativeMod.h"
 
 namespace lholo::projection::detail {
 namespace {
+
+auto& logger() {
+    return LHolo::getInstance().getSelf().getLogger();
+}
+
+std::atomic_bool gNativeLiquidPositiveLogged{};
 
 // Litematica's default schematic overlay palette, converted from ARGB to the
 // ABGR byte order of the tessellator vertex color buffer.
@@ -112,6 +122,17 @@ void buildCorrectionSectionMeshes(
 void buildLiquidProxySectionMesh(
     ProjectionState&,
     Tessellator&,
+    std::size_t,
+    Tessellator::UploadMode,
+    ProjectionSectionBuildSettings const&,
+    std::span<std::size_t const>
+);
+
+std::vector<std::size_t> buildNativeLiquidSectionMesh(
+    ProjectionState&,
+    Tessellator&,
+    BlockTessellator&,
+    BlockSource&,
     std::size_t,
     Tessellator::UploadMode,
     ProjectionSectionBuildSettings const&
@@ -252,7 +273,8 @@ void buildProjectionSection(
     ScopedTessellationBlocks tessellationBlocksScope(
         *state.expectedWorldBlocks,
         *state.expectedWorldLiquids,
-        *state.expectedWorldBlockActors
+        *state.expectedWorldBlockActors,
+        &state.nativeLiquidTelemetry
     );
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
@@ -353,8 +375,22 @@ void buildProjectionSection(
         failedTessellationIndices.end()
     );
 
+    auto nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
+        state,
+        tessellator,
+        blockTessellator,
+        region,
+        section,
+        uploadMode,
+        sectionBuildSettings
+    );
     detail::buildLiquidProxySectionMesh(
-        state, tessellator, section, uploadMode, sectionBuildSettings
+        state,
+        tessellator,
+        section,
+        uploadMode,
+        sectionBuildSettings,
+        nativeLiquidSucceeded
     );
     detail::buildBlockEntityPlaceholderSectionMesh(
         state,
@@ -372,12 +408,270 @@ void buildProjectionSection(
     );
 }
 
+std::vector<std::size_t> buildNativeLiquidSectionMesh(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    BlockTessellator&                     blockTessellator,
+    BlockSource&                          region,
+    std::size_t                           section,
+    Tessellator::UploadMode               uploadMode,
+    ProjectionSectionBuildSettings const& settings
+) {
+    LegacyStructureSettings sectionTransformSettings{
+        settings.mirror,
+        settings.rotation,
+        nullptr,
+        BoundingBox{}
+    };
+    std::vector<std::size_t> candidates;
+    candidates.reserve(state.sectionBlockIndices[section].size());
+    for (auto const index : state.sectionBlockIndices[section]) {
+        auto const& entry = state.structure->renderBlocks[index];
+        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        candidates.push_back(index);
+    }
+
+    std::vector<std::size_t> succeeded;
+    state.nativeLiquidSectionCellCounts[section] = 0;
+    if (candidates.empty()) {
+        state.nativeLiquidSectionMeshes[section].reset();
+        return succeeded;
+    }
+
+    tessellator.begin(
+        Tessellator::DebugContextCallback{},
+        mce::PrimitiveMode::QuadList,
+        std::max(128, static_cast<int>(candidates.size() * 24)),
+        false
+    );
+    auto const origin = BlockPos{
+        state.anchor.x + settings.offsetX,
+        state.anchor.y + settings.offsetY,
+        state.anchor.z + settings.offsetZ
+    };
+    for (auto const index : candidates) {
+        ++state.nativeLiquidTelemetry.nativeLiquidCellsAttempted;
+        auto const& entry = state.structure->renderBlocks[index];
+        auto const* expectedLiquid = transformExpectedBlock(
+            entry.liquid,
+            sectionTransformSettings,
+            settings.identityTransform
+        );
+        if (!expectedLiquid) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationFailure;
+            continue;
+        }
+        auto const local = transformStructurePosition(
+            entry,
+            *state.structure,
+            settings.mirrorMode,
+            settings.rotationTurns
+        );
+        BlockPos const worldPosition{
+            origin.x + local.x,
+            origin.y + local.y,
+            origin.z + local.z
+        };
+
+        std::array<BlockRenderLayer, 22> layers{};
+        std::size_t layerCount{};
+        std::uint32_t layerMask{};
+        auto const appendLayer = [&](BlockRenderLayer layer) {
+            auto const value = static_cast<unsigned int>(layer);
+            if (value >= layers.size() || (layerMask & (1U << value)) != 0) return;
+            layerMask |= 1U << value;
+            layers[layerCount++] = layer;
+        };
+        auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
+        appendLayer(graphics
+            ? graphics->getRenderLayer(region, worldPosition)
+            : BlockRenderLayer::RenderlayerBlend);
+        if (graphics) {
+            auto const extraMask = static_cast<std::uint32_t>(
+                const_cast<BlockGraphics*>(graphics)->getExtraRenderLayers()
+            );
+            for (unsigned int value = 0; value < layers.size(); ++value) {
+                if ((extraMask & (1U << value)) != 0) {
+                    appendLayer(static_cast<BlockRenderLayer>(value));
+                }
+            }
+        }
+        logger().debug(
+            "NATIVE_LIQUID_RENDER_LAYERS type={} pos=({}, {}, {}) primary={} mask=0x{:X}",
+            expectedLiquid->getTypeName(),
+            worldPosition.x,
+            worldPosition.y,
+            worldPosition.z,
+            static_cast<unsigned int>(layers[0]),
+            layerMask
+        );
+
+        bool cellPositive{};
+        bool cellFailure{};
+        bool lastReturned{};
+        std::size_t lastPositionsBefore{};
+        std::size_t lastPositionsAfter{};
+        std::size_t lastColorsBefore{};
+        std::size_t lastColorsAfter{};
+        std::size_t lastUvsBefore{};
+        std::size_t lastUvsAfter{};
+        auto const virtualHitsBefore = state.nativeLiquidTelemetry.virtualLiquidQueryHits;
+        unsigned int lastLayer{};
+        for (std::size_t layerIndex = 0; layerIndex < layerCount; ++layerIndex) {
+            auto const layer = layers[layerIndex];
+            auto const layerValue = static_cast<unsigned int>(layer);
+            ++state.nativeLiquidTelemetry.nativeLiquidLayerAttempts[layerValue];
+            blockTessellator.mRenderingLayer = static_cast<int>(layer);
+            auto& positions = tessellator.mMeshData->mPositions.get();
+            auto& colors = tessellator.mMeshData->mColors.get();
+            auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
+            auto const positionsBefore = positions.size();
+            auto const colorsBefore = colors.size();
+            auto const uvsBefore = uvs.size();
+            bool rendered{};
+            try {
+                rendered = blockTessellator.tessellateInWorld(
+                    tessellator,
+                    *expectedLiquid,
+                    worldPosition,
+                    true
+                );
+            } catch (std::exception const& exception) {
+                if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                    || uvs.size() != uvsBefore) throw;
+                cellFailure = true;
+                logger().warn(
+                    "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception={}",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z,
+                    exception.what()
+                );
+                break;
+            } catch (...) {
+                if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                    || uvs.size() != uvsBefore) throw;
+                cellFailure = true;
+                logger().warn(
+                    "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception=unknown",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z
+                );
+                break;
+            }
+            auto const positionsAfter = positions.size();
+            auto const colorsAfter = colors.size();
+            auto const uvsAfter = uvs.size();
+            auto const geometryAdded = positionsAfter > positionsBefore;
+            lastReturned = rendered;
+            lastPositionsBefore = positionsBefore;
+            lastPositionsAfter = positionsAfter;
+            lastColorsBefore = colorsBefore;
+            lastColorsAfter = colorsAfter;
+            lastUvsBefore = uvsBefore;
+            lastUvsAfter = uvsAfter;
+            lastLayer = layerValue;
+            if (!geometryAdded) continue;
+
+            for (std::size_t colorIndex = colorsBefore; colorIndex < colorsAfter; ++colorIndex) {
+                auto const before = colors[colorIndex];
+                auto const after = applyGhostAppearanceAbgr(
+                    colors[colorIndex],
+                    settings.structureOpacity
+                );
+                colors[colorIndex] = after;
+                state.nativeLiquidTelemetry.nativeLiquidAlphaModifiedVertices
+                    += (before >> 24U) != (after >> 24U);
+            }
+            auto const added = positionsAfter - positionsBefore;
+            state.nativeLiquidTelemetry.nativeLiquidVertices += added;
+            state.nativeLiquidTelemetry.nativeLiquidUvVertices
+                += uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0;
+            state.nativeLiquidTelemetry.nativeLiquidColorVertices
+                += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
+            cellPositive = true;
+            if (!gNativeLiquidPositiveLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().info(
+                    "NATIVE_LIQUID_TESSELLATION_POSITIVE type={} layer={} pos=({}, {}, {}) returned={} positions={}->{} colors={}->{} uv0={}->{} vertices={} virtualLiquidHitsDelta={}",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z,
+                    rendered,
+                    positionsBefore,
+                    positionsAfter,
+                    colorsBefore,
+                    colorsAfter,
+                    uvsBefore,
+                    uvsAfter,
+                    added,
+                    state.nativeLiquidTelemetry.virtualLiquidQueryHits - virtualHitsBefore
+                );
+            }
+        }
+        if (cellPositive) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationPositive;
+            succeeded.push_back(index);
+        } else if (cellFailure) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationFailure;
+        } else {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationZero;
+            logger().debug(
+                "NATIVE_LIQUID_TESSELLATION_ZERO type={} layer={} pos=({}, {}, {}) returned={} positions={}->{} colors={}->{} uv0={}->{} virtualLiquidHitsDelta={}",
+                expectedLiquid->getTypeName(),
+                lastLayer,
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                lastReturned,
+                lastPositionsBefore,
+                lastPositionsAfter,
+                lastColorsBefore,
+                lastColorsAfter,
+                lastUvsBefore,
+                lastUvsAfter,
+                state.nativeLiquidTelemetry.virtualLiquidQueryHits - virtualHitsBefore
+            );
+        }
+    }
+
+    if (succeeded.empty()) {
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloNativeLiquid",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        state.nativeLiquidSectionMeshes[section].reset();
+        return succeeded;
+    }
+    for (auto& vertex : tessellator.mMeshData->mPositions.get()) {
+        vertex.x -= static_cast<float>(origin.x);
+        vertex.y -= static_cast<float>(origin.y);
+        vertex.z -= static_cast<float>(origin.z);
+    }
+    state.nativeLiquidSectionMeshes[section] = std::make_unique<mce::Mesh>(tessellator.end(
+        uploadMode,
+        "LHoloNativeLiquid",
+        SupplementaryFieldAutoGenerationMode{1}
+    ));
+    std::sort(succeeded.begin(), succeeded.end());
+    state.nativeLiquidSectionCellCounts[section] = succeeded.size();
+    return succeeded;
+}
+
 void buildLiquidProxySectionMesh(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
     std::size_t                           section,
     Tessellator::UploadMode               uploadMode,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& settings,
+    std::span<std::size_t const>           nativeLiquidSucceeded
 ) {
     auto const mirrorMode        = settings.mirrorMode;
     auto const rotationTurns     = settings.rotationTurns;
@@ -401,8 +695,17 @@ void buildLiquidProxySectionMesh(
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
         if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (std::binary_search(
+                nativeLiquidSucceeded.begin(),
+                nativeLiquidSucceeded.end(),
+                index
+            )) {
+            continue;
+        }
         liquidProxyIndices.push_back(index);
     }
+    state.liquidProxySectionCellCounts[section] = liquidProxyIndices.size();
+    state.nativeLiquidTelemetry.liquidProxyFallbackCells += liquidProxyIndices.size();
     if (!liquidProxyIndices.empty()) {
         tessellator.begin(
             Tessellator::DebugContextCallback{},

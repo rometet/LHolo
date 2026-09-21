@@ -19,7 +19,8 @@ public:
     explicit ScopedTessellationBlocks(
         ExpectedBlockMap const&      blocks,
         ExpectedLiquidMap const&     liquids,
-        ExpectedBlockActorMap const& blockActors
+        ExpectedBlockActorMap const& blockActors,
+        NativeLiquidTelemetry*       telemetry = nullptr
     );
     ~ScopedTessellationBlocks();
 
@@ -30,6 +31,7 @@ private:
     ExpectedBlockMap const*      mPreviousBlocks{};
     ExpectedLiquidMap const*     mPreviousLiquids{};
     ExpectedBlockActorMap const* mPreviousBlockActors{};
+    NativeLiquidTelemetry*       mPreviousTelemetry{};
 };
 
 // Vanilla BlockType::connectionUpdate recomputes a block's flattened

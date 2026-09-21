@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <map>
 #include <memory>
 #include <tuple>
@@ -23,6 +24,27 @@ using SubChunkKey = std::tuple<int, int, int>;
 
 enum class CorrectionState : std::uint8_t { Unknown, Missing, Correct, WrongType, WrongState };
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
+
+// Cumulative Phase-2 counters. Async section builds accumulate into their
+// snapshot and merge into the active state only after a matching revision is
+// accepted, so discarded worker results never claim a native-liquid success.
+struct NativeLiquidTelemetry {
+    std::uint64_t nativeLiquidCellsAttempted{};
+    std::uint64_t nativeLiquidTessellationPositive{};
+    std::uint64_t nativeLiquidTessellationZero{};
+    std::uint64_t nativeLiquidTessellationFailure{};
+    std::uint64_t nativeLiquidVertices{};
+    std::uint64_t nativeLiquidUvVertices{};
+    std::uint64_t nativeLiquidColorVertices{};
+    std::uint64_t nativeLiquidAlphaModifiedVertices{};
+    std::uint64_t virtualLiquidQueryHits{};
+    std::uint64_t nativeLiquidTerrainBlendResolved{};
+    std::uint64_t nativeLiquidTerrainBlendDraws{};
+    std::uint64_t nativeLiquidLegacyMaterialDraws{};
+    std::uint64_t liquidProxyFallbackCells{};
+    std::uint64_t liquidProxyDrawCells{};
+    std::array<std::uint64_t, 22> nativeLiquidLayerAttempts{};
+};
 
 struct ProjectedBlockActor {
     BlockPos     position{};

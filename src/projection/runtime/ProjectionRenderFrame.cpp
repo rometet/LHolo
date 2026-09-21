@@ -293,11 +293,32 @@ void renderProjection(
         auto const outlineMeshes = countValid(state.correctionOutlineSectionMeshes);
         auto const wrongFillMeshes = countValid(state.wrongFillSectionMeshes);
         auto const wrongOutlineMeshes = countValid(state.wrongOutlineSectionMeshes);
+        auto const nativeLiquidMeshes = countValid(state.nativeLiquidSectionMeshes);
         auto const liquidMeshes = countValid(state.liquidProxySectionMeshes);
         auto const placeholderMeshes = countValid(state.blockEntityPlaceholderSectionMeshes);
         if (normalMeshes + warningMeshes + outlineMeshes + wrongFillMeshes
-            + wrongOutlineMeshes + liquidMeshes + placeholderMeshes != 0) {
+            + wrongOutlineMeshes + nativeLiquidMeshes + liquidMeshes + placeholderMeshes != 0) {
             state.meshPreflightDone = true;
+            auto const& telemetry = state.nativeLiquidTelemetry;
+            logger().info(
+                "PHASE2_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} colors={} alphaModified={} virtualLiquidHits={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
+                telemetry.nativeLiquidCellsAttempted,
+                telemetry.nativeLiquidTessellationPositive,
+                telemetry.nativeLiquidTessellationZero,
+                telemetry.nativeLiquidTessellationFailure,
+                telemetry.nativeLiquidVertices,
+                telemetry.nativeLiquidUvVertices,
+                telemetry.nativeLiquidColorVertices,
+                telemetry.nativeLiquidAlphaModifiedVertices,
+                telemetry.virtualLiquidQueryHits,
+                telemetry.nativeLiquidTerrainBlendResolved,
+                telemetry.nativeLiquidTerrainBlendDraws,
+                telemetry.nativeLiquidLegacyMaterialDraws,
+                telemetry.liquidProxyFallbackCells,
+                telemetry.liquidProxyDrawCells,
+                nativeLiquidMeshes,
+                liquidMeshes
+            );
         }
     }
 

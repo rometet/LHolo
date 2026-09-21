@@ -112,7 +112,10 @@ struct ProjectionState {
     std::vector<std::unique_ptr<mce::Mesh>> correctionOutlineSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongFillSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongOutlineSectionMeshes;
+    std::vector<std::unique_ptr<mce::Mesh>> nativeLiquidSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
+    std::vector<std::size_t>                nativeLiquidSectionCellCounts;
+    std::vector<std::size_t>                liquidProxySectionCellCounts;
     std::vector<std::unique_ptr<mce::Mesh>> blockEntityPlaceholderSectionMeshes;
     std::unique_ptr<mce::Mesh>              structureBoundsMesh;
     std::vector<SectionState>               sections;
@@ -144,6 +147,7 @@ struct ProjectionState {
     std::shared_ptr<ExpectedBlockIndexMap>   expectedWorldBlockIndices{
         std::make_shared<ExpectedBlockIndexMap>()
     };
+    NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
 };
 

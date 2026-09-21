@@ -56,6 +56,7 @@ bool AppKernel::enable() {
     }
 
     logger.info("LHolo enabled. Type lholo to open the projection menu.");
+    logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
     return true;
 }
 
