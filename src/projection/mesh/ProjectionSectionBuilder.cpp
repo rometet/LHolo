@@ -9,23 +9,31 @@
 #include "projection/mesh/ProjectionSectionBuilder.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidFaceCull.h"
+#include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
+#include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "mc/client/renderer/SupplementaryFieldAutoGenerationMode.h"
+#include "mc/client/renderer/TessellatorQuadInfo.h"
 #include "mc/client/renderer/block/BlockGraphics.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
 #include "mc/client/renderer/texture/TextureUVCoordinateSet.h"
@@ -42,9 +50,108 @@
 #include "mc/world/level/biome/biome_color_sampling/BiomeColorSampling.h"
 #include "mc/world/level/material/Material.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
+#include "ll/api/mod/NativeMod.h"
 
 namespace lholo::projection::detail {
 namespace {
+
+auto& logger() {
+    return LHolo::getInstance().getSelf().getLogger();
+}
+
+std::atomic_bool gNativeLiquidPositiveLogged{};
+std::atomic_bool gNativeLiquidUvRemapLogged{};
+std::atomic_bool gNativeLiquidUvFailureLogged{};
+std::atomic_bool gNativeLiquidCullLogged{};
+std::atomic_bool gNativeLiquidCullSkipLogged{};
+std::atomic_bool gPraxisCompatLiquidColorLogged{};
+std::atomic_bool gPraxisLiquidColorSeedLogged{};
+std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
+std::atomic_bool gSubmergedPlantLogged{};
+
+// A UV failure must return the cell to LiquidProxy ownership. Restore every
+// typed Tessellator stream and the small amount of public builder state that
+// the rejected call advanced, without touching raw offsets or private ABI.
+struct TessellatorSuffixCheckpoint {
+    std::size_t positions{};
+    std::size_t normals{};
+    std::size_t tangents{};
+    std::size_t indices{};
+    std::size_t colors{};
+    std::size_t boneIds{};
+    std::array<std::size_t, 3> textureUvs{};
+    std::size_t pbrTextureIndices{};
+    std::size_t mers{};
+    std::size_t geoType{};
+    std::size_t quadInfo{};
+    std::uint32_t count{};
+    int curQuadVertex{};
+    bool hasNormals{};
+    bool indexPhase{};
+    bool noColor{};
+    unsigned char quadFacing{};
+    bool quadTwoSided{};
+    Vec3 faceCenterAccumulator{};
+    std::pair<glm::vec3, glm::vec3> aabb{};
+    std::pair<glm::vec2, glm::vec2> uvAabb{};
+    std::array<bool, 15> fieldEnabled{};
+
+    explicit TessellatorSuffixCheckpoint(Tessellator& tessellator) {
+        auto const& data = tessellator.mMeshData.get();
+        positions = data.mPositions.get().size();
+        normals = data.mNormals.get().size();
+        tangents = data.mTangents.get().size();
+        indices = data.mIndices.get().size();
+        colors = data.mColors.get().size();
+        boneIds = data.mBoneId0s.get().size();
+        for (std::size_t uv = 0; uv < textureUvs.size(); ++uv) {
+            textureUvs[uv] = data.mTextureUVs[uv].get().size();
+        }
+        pbrTextureIndices = data.mPBRTextureIndices.get().size();
+        mers = data.mMERS.get().size();
+        geoType = data.mGeoType.get().size();
+        quadInfo = tessellator.mQuadInfoList.get().size();
+        count = tessellator.mCount;
+        curQuadVertex = tessellator.mCurQuadVertex;
+        hasNormals = tessellator.mHasNormals;
+        indexPhase = tessellator.mIndexPhase;
+        noColor = tessellator.mNoColor;
+        quadFacing = tessellator.mQuadFacing;
+        quadTwoSided = tessellator.mQuadTwoSided;
+        faceCenterAccumulator = tessellator.mFaceCenterAccumulator;
+        aabb = data.mAABB.get();
+        uvAabb = data.mUVAABB.get();
+        fieldEnabled = data.mFieldEnabled.get();
+    }
+
+    void restore(Tessellator& tessellator) const {
+        auto& data = tessellator.mMeshData.get();
+        data.mPositions.get().resize(positions);
+        data.mNormals.get().resize(normals);
+        data.mTangents.get().resize(tangents);
+        data.mIndices.get().resize(indices);
+        data.mColors.get().resize(colors);
+        data.mBoneId0s.get().resize(boneIds);
+        for (std::size_t uv = 0; uv < textureUvs.size(); ++uv) {
+            data.mTextureUVs[uv].get().resize(textureUvs[uv]);
+        }
+        data.mPBRTextureIndices.get().resize(pbrTextureIndices);
+        data.mMERS.get().resize(mers);
+        data.mGeoType.get().resize(geoType);
+        tessellator.mQuadInfoList.get().resize(quadInfo);
+        tessellator.mCount = count;
+        tessellator.mCurQuadVertex = curQuadVertex;
+        tessellator.mHasNormals = hasNormals;
+        tessellator.mIndexPhase = indexPhase;
+        tessellator.mNoColor = noColor;
+        tessellator.mQuadFacing = quadFacing;
+        tessellator.mQuadTwoSided = quadTwoSided;
+        tessellator.mFaceCenterAccumulator = faceCenterAccumulator;
+        data.mAABB.get() = aabb;
+        data.mUVAABB.get() = uvAabb;
+        data.mFieldEnabled.get() = fieldEnabled;
+    }
+};
 
 // Litematica's default schematic overlay palette, converted from ARGB to the
 // ABGR byte order of the tessellator vertex color buffer.
@@ -99,6 +206,162 @@ int correctionPriority(CorrectionState state) {
         : 0;
 }
 
+template <class Value>
+void compactPerVertexField(
+    std::vector<Value>&               field,
+    std::span<std::uint8_t const>     removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write{};
+    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
+        if (removeQuads[quad] != 0U) continue;
+        for (std::size_t corner = 0; corner < 4U; ++corner) {
+            auto const read = quad * 4U + corner;
+            if (write != read) field[write] = std::move(field[read]);
+            ++write;
+        }
+    }
+    field.resize(write);
+}
+
+template <class Value>
+void compactPerQuadField(
+    std::vector<Value>&               field,
+    std::span<std::uint8_t const>     removeQuads
+) {
+    if (field.empty()) return;
+    std::size_t write{};
+    for (std::size_t read = 0; read < removeQuads.size(); ++read) {
+        if (removeQuads[read] != 0U) continue;
+        if (write != read) field[write] = std::move(field[read]);
+        ++write;
+    }
+    field.resize(write);
+}
+
+struct NativeLiquidCullOutcome {
+    bool        processed{};
+    char const* skipReason{"unknown"};
+    std::size_t before{};
+    std::size_t culled{};
+    std::size_t after{};
+    std::size_t pairs{};
+    std::size_t indices{};
+    std::size_t quadInfo{};
+};
+
+NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
+    Tessellator&                              tessellator,
+    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr
+) {
+    NativeLiquidCullOutcome outcome{};
+    auto& data = tessellator.mMeshData.get();
+    auto& positions = data.mPositions.get();
+    auto& quadInfo = tessellator.mQuadInfoList.get();
+    outcome.before = positions.size();
+    outcome.after = positions.size();
+    outcome.indices = data.mIndices.get().size();
+    outcome.quadInfo = quadInfo.size();
+
+    if (!data.mIndices.get().empty()) {
+        outcome.skipReason = "indices_nonempty";
+        return outcome;
+    }
+    if (positions.size() < 8U || positions.size() % 4U != 0U) {
+        outcome.skipReason = "malformed_positions";
+        return outcome;
+    }
+
+    std::array<std::size_t, 10> const fieldCounts{
+        data.mNormals.get().size(),
+        data.mTangents.get().size(),
+        data.mColors.get().size(),
+        data.mBoneId0s.get().size(),
+        data.mTextureUVs[0].get().size(),
+        data.mTextureUVs[1].get().size(),
+        data.mTextureUVs[2].get().size(),
+        data.mPBRTextureIndices.get().size(),
+        data.mMERS.get().size(),
+        data.mGeoType.get().size()
+    };
+    if (!nativeLiquidPerVertexFieldCountsMatch(positions.size(), fieldCounts)) {
+        outcome.skipReason = "vertex_field_count_mismatch";
+        return outcome;
+    }
+    if (liquidKinds && liquidKinds->size() != positions.size()) {
+        outcome.skipReason = "liquid_kind_count_mismatch";
+        return outcome;
+    }
+
+    auto const quadCount = positions.size() / 4U;
+    if (!quadInfo.empty() && quadInfo.size() != quadCount) {
+        outcome.skipReason = "quad_info_count_mismatch";
+        return outcome;
+    }
+
+    auto const mask = buildNativeLiquidInternalFaceCullMask(
+        std::span<glm::vec3 const>{positions.data(), positions.size()}
+    );
+    if (!mask.valid) {
+        outcome.skipReason = "geometry_contract_invalid";
+        return outcome;
+    }
+    outcome.culled = mask.removedVertices();
+    outcome.pairs = mask.facePairs;
+    if (outcome.culled >= outcome.before && outcome.culled != 0U) {
+        // Do not turn an otherwise successful section into an empty retained
+        // mesh. A real liquid body should always retain exposed geometry.
+        outcome.culled = 0U;
+        outcome.pairs = 0U;
+        outcome.skipReason = "all_vertices_would_be_removed";
+        return outcome;
+    }
+
+    if (outcome.culled != 0U) {
+        compactPerVertexField(positions, mask.removeQuads);
+        compactPerVertexField(data.mNormals.get(), mask.removeQuads);
+        compactPerVertexField(data.mTangents.get(), mask.removeQuads);
+        compactPerVertexField(data.mColors.get(), mask.removeQuads);
+        compactPerVertexField(data.mBoneId0s.get(), mask.removeQuads);
+        for (std::size_t uv = 0; uv < 3U; ++uv) {
+            compactPerVertexField(data.mTextureUVs[uv].get(), mask.removeQuads);
+        }
+        compactPerVertexField(data.mPBRTextureIndices.get(), mask.removeQuads);
+        compactPerVertexField(data.mMERS.get(), mask.removeQuads);
+        compactPerVertexField(data.mGeoType.get(), mask.removeQuads);
+        if (liquidKinds) {
+            compactPerVertexField(*liquidKinds, mask.removeQuads);
+        }
+        compactPerQuadField(quadInfo, mask.removeQuads);
+
+        auto minimum = positions.front();
+        auto maximum = positions.front();
+        for (auto const& position : positions) {
+            minimum = glm::min(minimum, position);
+            maximum = glm::max(maximum, position);
+        }
+        data.mAABB.get() = {minimum, maximum};
+        auto const& uv0 = data.mTextureUVs[0].get();
+        if (!uv0.empty()) {
+            auto uvMinimum = uv0.front();
+            auto uvMaximum = uv0.front();
+            for (auto const& uv : uv0) {
+                uvMinimum = glm::min(uvMinimum, uv);
+                uvMaximum = glm::max(uvMaximum, uv);
+            }
+            data.mUVAABB.get() = {uvMinimum, uvMaximum};
+        }
+        // mCount is a typed/public Fake Headers field consumed by end(). No
+        // terminal-state bytes or private renderer offsets are modified.
+        tessellator.mCount = static_cast<unsigned int>(positions.size());
+    }
+
+    outcome.processed = true;
+    outcome.skipReason = "none";
+    outcome.after = positions.size();
+    return outcome;
+}
+
 } // namespace
 
 void buildCorrectionSectionMeshes(
@@ -114,6 +377,25 @@ void buildLiquidProxySectionMesh(
     Tessellator&,
     std::size_t,
     Tessellator::UploadMode,
+    ProjectionSectionBuildSettings const&,
+    std::span<std::size_t const>
+);
+
+std::vector<std::size_t> buildNativeLiquidSectionMesh(
+    ProjectionState&,
+    Tessellator&,
+    BlockTessellator&,
+    BlockSource&,
+    std::size_t,
+    Tessellator::UploadMode,
+    ProjectionSectionBuildSettings const&
+);
+
+std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
+    ProjectionState&,
+    Tessellator&,
+    BlockTessellator&,
+    std::size_t,
     ProjectionSectionBuildSettings const&
 );
 
@@ -157,18 +439,27 @@ void buildProjectionSection(
         nullptr,
         BoundingBox{}
     };
+    constexpr std::size_t NoCompositeBodyOutcome = static_cast<std::size_t>(-1);
     struct LayeredBlock {
         Block const*                  block{};
         BlockPos                      position{};
         BlockRenderLayer              layer{BlockRenderLayer::RenderlayerOpaque};
         RenderBucket bucket{RenderBucket::Opaque};
         std::size_t                   structureIndex{};
+        std::size_t compositeOutcomeIndex{NoCompositeBodyOutcome};
+    };
+    struct CompositeBodyOutcome {
+        std::size_t  structureIndex{};
+        Block const* body{};
+        Block const* liquid{};
+        std::uint64_t vertices{};
     };
     // Blocks whose model produced no geometry during tessellation
     // (block-entity blocks such as chests and signs) get a placeholder.
     std::vector<std::size_t> failedTessellationIndices;
     std::vector<LayeredBlock> layeredBlocks;
-    layeredBlocks.reserve(state.sectionBlockIndices[section].size());
+    std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
+    layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const correctionState = state.correctionStates[index];
         // Never draw a projected block model on top of an existing
@@ -187,6 +478,16 @@ void buildProjectionSection(
             state.anchor.y + offsetY + transformed.y,
             state.anchor.z + offsetZ + transformed.z
         };
+        std::size_t compositeOutcomeIndex = NoCompositeBodyOutcome;
+        if (entry.block && entry.liquid) {
+            compositeOutcomeIndex = compositeBodyOutcomes.size();
+            compositeBodyOutcomes.push_back({
+                index,
+                entry.block,
+                entry.liquid,
+                0U
+            });
+        }
         auto const appendBlock = [&](Block const* source) {
             auto const* transformedBlock = transformExpectedBlock(source, sectionTransformSettings, identityTransform);
             if (!transformedBlock) return;
@@ -195,13 +496,46 @@ void buildProjectionSection(
                 || typeName == VanillaBlockTypeIds::StickyPistonArmCollision().getString()) {
                 return;
             }
-            auto const* graphics = BlockGraphics::getForBlock(*transformedBlock);
-            auto const layer = graphics
+            auto* graphics = BlockGraphics::getForBlock(*transformedBlock);
+            auto const primaryLayer = graphics
                 ? graphics->getRenderLayer(region, position)
                 : (transformedBlock->getBlockType().mIsOpaqueFullBlock
                     ? BlockRenderLayer::RenderlayerOpaque
                     : BlockRenderLayer::RenderlayerAlphatest);
-            layeredBlocks.push_back({transformedBlock, position, layer, renderBucketFor(layer), index});
+            std::uint32_t appendedLayerMask{};
+            auto const appendLayer = [&](BlockRenderLayer layer) {
+                auto const value = static_cast<unsigned int>(layer);
+                if (value >= 32 || (appendedLayerMask & (1U << value)) != 0) return;
+                appendedLayerMask |= 1U << value;
+                layeredBlocks.push_back({
+                    transformedBlock,
+                    position,
+                    layer,
+                    renderBucketFor(layer),
+                    index,
+                    compositeOutcomeIndex
+                });
+            };
+            appendLayer(primaryLayer);
+            if (graphics) {
+                // This is Minecraft's current BlockGraphics classification,
+                // not an LHolo family guess. A block may request more than
+                // one of the 22 native RenderChunk layers.
+                auto const extraMask = static_cast<std::uint32_t>(
+                    // Fake Headers exposes this native virtual as non-const
+                    // even though getForBlock returns the shared graphics
+                    // object as const. The query is the engine's classifier;
+                    // no LHolo-owned state is written here.
+                    const_cast<BlockGraphics*>(graphics)->getExtraRenderLayers()
+                );
+                auto const layerCount = static_cast<unsigned int>(
+                    BlockRenderLayer::RenderlayerCount
+                );
+                for (unsigned int value = 0; value < layerCount; ++value) {
+                    if ((extraMask & (1U << value)) == 0) continue;
+                    appendLayer(static_cast<BlockRenderLayer>(value));
+                }
+            }
         };
         appendBlock(entry.block);
     }
@@ -219,7 +553,9 @@ void buildProjectionSection(
         };
     ScopedTessellationBlocks tessellationBlocksScope(
         *state.expectedWorldBlocks,
-        *state.expectedWorldBlockActors
+        *state.expectedWorldLiquids,
+        *state.expectedWorldBlockActors,
+        &state.nativeLiquidTelemetry
     );
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
@@ -274,22 +610,42 @@ void buildProjectionSection(
             // Trust the actual mesh delta so those models are retained.
             auto const geometryAdded =
                 tessellator.mMeshData->mPositions.get().size() > firstPosition;
+            auto const verticesAdded =
+                tessellator.mMeshData->mPositions.get().size() - firstPosition;
+            if (layered.compositeOutcomeIndex != NoCompositeBodyOutcome) {
+                auto& composite =
+                    compositeBodyOutcomes[layered.compositeOutcomeIndex];
+                composite.vertices += verticesAdded;
+                auto const logIndex = gSubmergedBodyLogCount.fetch_add(
+                    1U,
+                    std::memory_order_acq_rel
+                );
+                if (logIndex < 8U) {
+                    logger().info(
+                        "PRAXIS_SUBMERGED_BODY body={} liquid={} layer={} returned={} verticesAdded={}",
+                        layered.block->getTypeName(),
+                        composite.liquid->getTypeName(),
+                        static_cast<unsigned int>(layered.layer),
+                        rendered ? 1 : 0,
+                        verticesAdded
+                    );
+                }
+            }
             if (!rendered && !geometryAdded) {
                 // No terrain-atlas model: needs a placeholder hull.
                 failedTessellationIndices.push_back(layered.structureIndex);
                 continue;
             }
             auto& colors = tessellator.mMeshData->mColors.get();
-            auto const alpha = static_cast<uint>(std::lround(
-                std::clamp(structureOpacity, 0.05f, 1.0f) * 255.0f
-            ));
             if (foliageTint) {
                 for (std::size_t colorIndex = firstColor; colorIndex < colors.size(); ++colorIndex) {
                     colors[colorIndex] = modulateAbgr(colors[colorIndex], *foliageTint);
                 }
             }
             for (std::size_t colorIndex = firstColor; colorIndex < colors.size(); ++colorIndex) {
-                colors[colorIndex] = (colors[colorIndex] & 0x00FFFFFFU) | (alpha << 24U);
+                colors[colorIndex] = applyGhostAppearanceAbgr(
+                    colors[colorIndex], structureOpacity
+                );
             }
             bucketTessellated = true;
         }
@@ -315,8 +671,104 @@ void buildProjectionSection(
         ));
     }
 
+    state.nativeLiquidTelemetry.compositeBodyLiquidCells
+        += compositeBodyOutcomes.size();
+    std::uint64_t sectionCompositePositive{};
+    std::uint64_t sectionCompositeZero{};
+    std::uint64_t sectionCompositeVertices{};
+    for (auto const& outcome : compositeBodyOutcomes) {
+        state.nativeLiquidTelemetry.compositeBodyVertices += outcome.vertices;
+        sectionCompositeVertices += outcome.vertices;
+        if (outcome.vertices != 0U) {
+            ++state.nativeLiquidTelemetry.compositeBodyTessellationPositive;
+            ++sectionCompositePositive;
+        } else {
+            ++state.nativeLiquidTelemetry.compositeBodyTessellationZero;
+            ++sectionCompositeZero;
+        }
+        auto const& bodyName = outcome.body->getTypeName();
+        if ((bodyName.find("kelp") != std::string::npos
+             || bodyName.find("seagrass") != std::string::npos)
+            && !gSubmergedPlantLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().info(
+                "PRAXIS_SUBMERGED_PLANT body={} liquid={} verticesAdded={}",
+                bodyName,
+                outcome.liquid->getTypeName(),
+                outcome.vertices
+            );
+        }
+    }
+    if (!compositeBodyOutcomes.empty()) {
+        logger().info(
+            "PRAXIS_SUBMERGED_BODY_TELEMETRY compositeCells={} positive={} zero={} vertices={} section={}",
+            compositeBodyOutcomes.size(),
+            sectionCompositePositive,
+            sectionCompositeZero,
+            sectionCompositeVertices,
+            section
+        );
+    }
+
+    std::sort(failedTessellationIndices.begin(), failedTessellationIndices.end());
+    failedTessellationIndices.erase(
+        std::unique(failedTessellationIndices.begin(), failedTessellationIndices.end()),
+        failedTessellationIndices.end()
+    );
+
+    std::vector<std::size_t> nativeLiquidSucceeded;
+    std::vector<std::size_t> praxisCompatLiquidSucceeded;
+    if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
+        auto const compatAttemptsBefore =
+            state.nativeLiquidTelemetry.praxisCompatCellsAttempted;
+        praxisCompatLiquidSucceeded = detail::buildPraxisCompatLiquidSectionData(
+            state,
+            tessellator,
+            blockTessellator,
+            section,
+            sectionBuildSettings
+        );
+        if (state.praxisCompatLiquidSections[section]) {
+            // The exact replay stream owns this section. Do not spend a second
+            // BlockTessellator pass building the retained comparison mesh.
+            state.nativeLiquidSectionMeshes[section].reset();
+            state.nativeLiquidSectionCellCounts[section] = 0U;
+        } else if (state.nativeLiquidTelemetry.praxisCompatCellsAttempted
+                   != compatAttemptsBefore) {
+            // Build the old route only as a section-local fail-closed fallback.
+            // Successful PraxisExactReplay sections never enter this branch.
+            ++state.nativeLiquidTelemetry.praxisCompatDoubleLiquidBuildSections;
+            nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
+                state,
+                tessellator,
+                blockTessellator,
+                region,
+                section,
+                uploadMode,
+                sectionBuildSettings
+            );
+        }
+    } else {
+        state.praxisCompatLiquidSections[section].reset();
+        nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
+            state,
+            tessellator,
+            blockTessellator,
+            region,
+            section,
+            uploadMode,
+            sectionBuildSettings
+        );
+    }
+    auto const& liquidOwnership = state.praxisCompatLiquidSections[section]
+        ? praxisCompatLiquidSucceeded
+        : nativeLiquidSucceeded;
     detail::buildLiquidProxySectionMesh(
-        state, tessellator, section, uploadMode, sectionBuildSettings
+        state,
+        tessellator,
+        section,
+        uploadMode,
+        sectionBuildSettings,
+        liquidOwnership
     );
     detail::buildBlockEntityPlaceholderSectionMesh(
         state,
@@ -334,12 +786,732 @@ void buildProjectionSection(
     );
 }
 
+std::vector<std::size_t> buildNativeLiquidSectionMesh(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    BlockTessellator&                     blockTessellator,
+    BlockSource&                          region,
+    std::size_t                           section,
+    Tessellator::UploadMode               uploadMode,
+    ProjectionSectionBuildSettings const& settings
+) {
+    LegacyStructureSettings sectionTransformSettings{
+        settings.mirror,
+        settings.rotation,
+        nullptr,
+        BoundingBox{}
+    };
+    std::vector<std::size_t> candidates;
+    candidates.reserve(state.sectionBlockIndices[section].size());
+    for (auto const index : state.sectionBlockIndices[section]) {
+        auto const& entry = state.structure->renderBlocks[index];
+        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        candidates.push_back(index);
+    }
+
+    std::vector<std::size_t> succeeded;
+    state.nativeLiquidSectionCellCounts[section] = 0;
+    if (candidates.empty()) {
+        state.nativeLiquidSectionMeshes[section].reset();
+        return succeeded;
+    }
+
+    tessellator.begin(
+        Tessellator::DebugContextCallback{},
+        mce::PrimitiveMode::QuadList,
+        std::max(128, static_cast<int>(candidates.size() * 24)),
+        false
+    );
+    auto const origin = BlockPos{
+        state.anchor.x + settings.offsetX,
+        state.anchor.y + settings.offsetY,
+        state.anchor.z + settings.offsetZ
+    };
+    for (auto const index : candidates) {
+        ++state.nativeLiquidTelemetry.nativeLiquidCellsAttempted;
+        auto const& entry = state.structure->renderBlocks[index];
+        auto const* expectedLiquid = transformExpectedBlock(
+            entry.liquid,
+            sectionTransformSettings,
+            settings.identityTransform
+        );
+        if (!expectedLiquid) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationFailure;
+            continue;
+        }
+        auto const local = transformStructurePosition(
+            entry,
+            *state.structure,
+            settings.mirrorMode,
+            settings.rotationTurns
+        );
+        BlockPos const worldPosition{
+            origin.x + local.x,
+            origin.y + local.y,
+            origin.z + local.z
+        };
+
+        std::array<BlockRenderLayer, 22> layers{};
+        std::size_t layerCount{};
+        std::uint32_t layerMask{};
+        auto const appendLayer = [&](BlockRenderLayer layer) {
+            auto const value = static_cast<unsigned int>(layer);
+            if (value >= layers.size() || (layerMask & (1U << value)) != 0) return;
+            layerMask |= 1U << value;
+            layers[layerCount++] = layer;
+        };
+        auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
+        appendLayer(graphics
+            ? graphics->getRenderLayer(region, worldPosition)
+            : BlockRenderLayer::RenderlayerBlend);
+        if (graphics) {
+            auto const extraMask = static_cast<std::uint32_t>(
+                const_cast<BlockGraphics*>(graphics)->getExtraRenderLayers()
+            );
+            for (unsigned int value = 0; value < layers.size(); ++value) {
+                if ((extraMask & (1U << value)) != 0) {
+                    appendLayer(static_cast<BlockRenderLayer>(value));
+                }
+            }
+        }
+        NativeLiquidAtlasRect atlasRect{};
+        if (graphics) {
+            auto const& texture = graphics->getTexture(0, 0);
+            atlasRect = {texture._u0, texture._v0, texture._u1, texture._v1};
+        }
+        if (!graphics || !isValidNativeLiquidAtlasRect(atlasRect)) {
+            ++state.nativeLiquidTelemetry.nativeLiquidUvRemapFailures;
+            if (!gNativeLiquidUvFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().warn(
+                    "NATIVE_LIQUID_UV_REMAP_FAILURE type={} reason=invalid_atlas_rect atlas=({}, {}, {}, {})",
+                    expectedLiquid->getTypeName(),
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1
+                );
+            }
+            continue;
+        }
+        ++state.nativeLiquidTelemetry.nativeLiquidUvAtlasResolvedCells;
+        logger().debug(
+            "NATIVE_LIQUID_RENDER_LAYERS type={} pos=({}, {}, {}) primary={} mask=0x{:X}",
+            expectedLiquid->getTypeName(),
+            worldPosition.x,
+            worldPosition.y,
+            worldPosition.z,
+            static_cast<unsigned int>(layers[0]),
+            layerMask
+        );
+
+        TessellatorSuffixCheckpoint const cellCheckpoint{tessellator};
+        bool cellPositive{};
+        bool cellFailure{};
+        bool cellUvFailure{};
+        std::uint64_t cellVertices{};
+        std::uint64_t cellUvVertices{};
+        std::uint64_t cellColorVertices{};
+        std::uint64_t cellAlphaModifiedVertices{};
+        bool lastReturned{};
+        std::size_t lastPositionsBefore{};
+        std::size_t lastPositionsAfter{};
+        std::size_t lastColorsBefore{};
+        std::size_t lastColorsAfter{};
+        std::size_t lastUvsBefore{};
+        std::size_t lastUvsAfter{};
+        auto const virtualHitsBefore = state.nativeLiquidTelemetry.virtualLiquidQueryHits;
+        unsigned int lastLayer{};
+        for (std::size_t layerIndex = 0; layerIndex < layerCount; ++layerIndex) {
+            auto const layer = layers[layerIndex];
+            auto const layerValue = static_cast<unsigned int>(layer);
+            ++state.nativeLiquidTelemetry.nativeLiquidLayerAttempts[layerValue];
+            blockTessellator.mRenderingLayer = static_cast<int>(layer);
+            auto& positions = tessellator.mMeshData->mPositions.get();
+            auto& colors = tessellator.mMeshData->mColors.get();
+            auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
+            auto const positionsBefore = positions.size();
+            auto const colorsBefore = colors.size();
+            auto const uvsBefore = uvs.size();
+            bool rendered{};
+            try {
+                rendered = blockTessellator.tessellateInWorld(
+                    tessellator,
+                    *expectedLiquid,
+                    worldPosition,
+                    true
+                );
+            } catch (std::exception const& exception) {
+                if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                    || uvs.size() != uvsBefore) throw;
+                cellFailure = true;
+                logger().warn(
+                    "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception={}",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z,
+                    exception.what()
+                );
+                break;
+            } catch (...) {
+                if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                    || uvs.size() != uvsBefore) throw;
+                cellFailure = true;
+                logger().warn(
+                    "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception=unknown",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z
+                );
+                break;
+            }
+            auto const positionsAfter = positions.size();
+            auto const colorsAfter = colors.size();
+            auto const uvsAfter = uvs.size();
+            auto const geometryAdded = positionsAfter > positionsBefore;
+            lastReturned = rendered;
+            lastPositionsBefore = positionsBefore;
+            lastPositionsAfter = positionsAfter;
+            lastColorsBefore = colorsBefore;
+            lastColorsAfter = colorsAfter;
+            lastUvsBefore = uvsBefore;
+            lastUvsAfter = uvsAfter;
+            lastLayer = layerValue;
+            if (!geometryAdded) continue;
+
+            auto const added = positionsAfter - positionsBefore;
+            auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+            NativeLiquidUvRemapDiagnostics uvDiagnostics{};
+            auto const uvRemapped = addedUvs == added
+                && remapNativeLiquidUvToAtlas(
+                    std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
+                    atlasRect,
+                    &uvDiagnostics
+                );
+            if (!uvRemapped) {
+                cellCheckpoint.restore(tessellator);
+                cellPositive = false;
+                cellUvFailure = true;
+                if (!gNativeLiquidUvFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                    logger().warn(
+                        "NATIVE_LIQUID_UV_REMAP_FAILURE type={} reason=invalid_uv_suffix positions={} uv0={}",
+                        expectedLiquid->getTypeName(),
+                        added,
+                        addedUvs
+                    );
+                }
+                break;
+            }
+            if (!gNativeLiquidUvRemapLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().info(
+                    "NATIVE_LIQUID_UV_REMAP type={} atlas=({}, {}, {}, {}) vertices={} rawUvMinMax=({}, {}, {}, {}) mappedAtlasRect=({}, {}, {}, {})",
+                    expectedLiquid->getTypeName(),
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1,
+                    uvDiagnostics.remappedVertices,
+                    uvDiagnostics.firstQuadMinU,
+                    uvDiagnostics.firstQuadMaxU,
+                    uvDiagnostics.firstQuadMinV,
+                    uvDiagnostics.firstQuadMaxV,
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1
+                );
+            }
+            for (std::size_t colorIndex = colorsBefore; colorIndex < colorsAfter; ++colorIndex) {
+                auto const before = colors[colorIndex];
+                auto const after = applyGhostAppearanceAbgr(
+                    colors[colorIndex],
+                    settings.structureOpacity
+                );
+                colors[colorIndex] = after;
+                cellAlphaModifiedVertices += (before >> 24U) != (after >> 24U);
+            }
+            cellVertices += added;
+            cellUvVertices += addedUvs;
+            cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
+            cellPositive = true;
+            if (!gNativeLiquidPositiveLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().info(
+                    "NATIVE_LIQUID_TESSELLATION_POSITIVE type={} layer={} pos=({}, {}, {}) returned={} positions={}->{} colors={}->{} uv0={}->{} vertices={} virtualLiquidHitsDelta={}",
+                    expectedLiquid->getTypeName(),
+                    layerValue,
+                    worldPosition.x,
+                    worldPosition.y,
+                    worldPosition.z,
+                    rendered,
+                    positionsBefore,
+                    positionsAfter,
+                    colorsBefore,
+                    colorsAfter,
+                    uvsBefore,
+                    uvsAfter,
+                    added,
+                    state.nativeLiquidTelemetry.virtualLiquidQueryHits - virtualHitsBefore
+                );
+            }
+        }
+        if (cellUvFailure) {
+            ++state.nativeLiquidTelemetry.nativeLiquidUvRemapFailures;
+        } else if (cellPositive) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationPositive;
+            state.nativeLiquidTelemetry.nativeLiquidVertices += cellVertices;
+            state.nativeLiquidTelemetry.nativeLiquidUvVertices += cellUvVertices;
+            state.nativeLiquidTelemetry.nativeLiquidUvRemappedVertices += cellUvVertices;
+            state.nativeLiquidTelemetry.nativeLiquidColorVertices += cellColorVertices;
+            state.nativeLiquidTelemetry.nativeLiquidAlphaModifiedVertices
+                += cellAlphaModifiedVertices;
+            succeeded.push_back(index);
+        } else if (cellFailure) {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationFailure;
+        } else {
+            ++state.nativeLiquidTelemetry.nativeLiquidTessellationZero;
+            logger().debug(
+                "NATIVE_LIQUID_TESSELLATION_ZERO type={} layer={} pos=({}, {}, {}) returned={} positions={}->{} colors={}->{} uv0={}->{} virtualLiquidHitsDelta={}",
+                expectedLiquid->getTypeName(),
+                lastLayer,
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                lastReturned,
+                lastPositionsBefore,
+                lastPositionsAfter,
+                lastColorsBefore,
+                lastColorsAfter,
+                lastUvsBefore,
+                lastUvsAfter,
+                state.nativeLiquidTelemetry.virtualLiquidQueryHits - virtualHitsBefore
+            );
+        }
+    }
+
+    if (succeeded.empty()) {
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloNativeLiquid",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        state.nativeLiquidSectionMeshes[section].reset();
+        return succeeded;
+    }
+    auto const cull = cullNativeLiquidInternalFaces(tessellator);
+    state.nativeLiquidTelemetry.nativeLiquidVerticesBeforeCull += cull.before;
+    state.nativeLiquidTelemetry.nativeLiquidVerticesAfterCull += cull.after;
+    if (cull.processed) {
+        state.nativeLiquidTelemetry.nativeLiquidVerticesCulled += cull.culled;
+        state.nativeLiquidTelemetry.nativeLiquidFacePairsCulled += cull.pairs;
+        if (!gNativeLiquidCullLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().info(
+                "NATIVE_LIQUID_INTERNAL_FACE_CULL before={} culled={} after={} pairs={} indices={} quadInfo={}",
+                cull.before,
+                cull.culled,
+                cull.after,
+                cull.pairs,
+                cull.indices,
+                cull.quadInfo
+            );
+        }
+    } else {
+        ++state.nativeLiquidTelemetry.nativeLiquidCullSkipped;
+        if (!gNativeLiquidCullSkipLogged.exchange(true, std::memory_order_acq_rel)) {
+            logger().warn(
+                "NATIVE_LIQUID_INTERNAL_FACE_CULL_SKIPPED reason={} vertices={} indices={} quadInfo={}",
+                cull.skipReason,
+                cull.before,
+                cull.indices,
+                cull.quadInfo
+            );
+        }
+    }
+    for (auto& vertex : tessellator.mMeshData->mPositions.get()) {
+        vertex.x -= static_cast<float>(origin.x);
+        vertex.y -= static_cast<float>(origin.y);
+        vertex.z -= static_cast<float>(origin.z);
+    }
+    state.nativeLiquidSectionMeshes[section] = std::make_unique<mce::Mesh>(tessellator.end(
+        uploadMode,
+        "LHoloNativeLiquid",
+        SupplementaryFieldAutoGenerationMode{1}
+    ));
+    std::sort(succeeded.begin(), succeeded.end());
+    state.nativeLiquidSectionCellCounts[section] = succeeded.size();
+    return succeeded;
+}
+
+std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    BlockTessellator&                     blockTessellator,
+    std::size_t                           section,
+    ProjectionSectionBuildSettings const& settings
+) {
+    static_assert(
+        static_cast<unsigned int>(BlockRenderLayer::RenderlayerBlend) == 3U,
+        "Praxis compatibility liquid layer must remain native layer 3"
+    );
+    state.praxisCompatLiquidSections[section].reset();
+
+    LegacyStructureSettings sectionTransformSettings{
+        settings.mirror,
+        settings.rotation,
+        nullptr,
+        BoundingBox{}
+    };
+    std::vector<std::size_t> candidates;
+    std::vector<PraxisCompatLiquidKind> liquidKinds;
+    candidates.reserve(state.sectionBlockIndices[section].size());
+    for (auto const index : state.sectionBlockIndices[section]) {
+        auto const& entry = state.structure->renderBlocks[index];
+        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        candidates.push_back(index);
+    }
+    std::vector<std::size_t> succeeded;
+    if (candidates.empty()) return succeeded;
+
+    // This is the separate Praxis 1.21.132 compatibility candidate. The
+    // existing LHolo retained build above remains false/true; this build uses
+    // the proven true/false generation contract without sharing its output.
+    tessellator.begin(
+        Tessellator::DebugContextCallback{},
+        mce::PrimitiveMode::QuadList,
+        std::max(128, static_cast<int>(candidates.size() * 24)),
+        true
+    );
+    auto const origin = BlockPos{
+        state.anchor.x + settings.offsetX,
+        state.anchor.y + settings.offsetY,
+        state.anchor.z + settings.offsetZ
+    };
+    constexpr auto PraxisLiquidLayer = BlockRenderLayer::RenderlayerBlend;
+    blockTessellator.mRenderingLayer = static_cast<int>(PraxisLiquidLayer);
+
+    for (auto const index : candidates) {
+        ++state.nativeLiquidTelemetry.praxisCompatCellsAttempted;
+        auto const& entry = state.structure->renderBlocks[index];
+        auto const* expectedLiquid = transformExpectedBlock(
+            entry.liquid,
+            sectionTransformSettings,
+            settings.identityTransform
+        );
+        if (!expectedLiquid) {
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            continue;
+        }
+        auto const local = transformStructurePosition(
+            entry,
+            *state.structure,
+            settings.mirrorMode,
+            settings.rotationTurns
+        );
+        BlockPos const worldPosition{
+            origin.x + local.x,
+            origin.y + local.y,
+            origin.z + local.z
+        };
+
+        auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
+        NativeLiquidAtlasRect atlasRect{};
+        if (graphics) {
+            auto const& texture = graphics->getTexture(0, 0);
+            atlasRect = {texture._u0, texture._v0, texture._u1, texture._v1};
+        }
+        if (!graphics || !isValidNativeLiquidAtlasRect(atlasRect)) {
+            ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
+            continue;
+        }
+
+        TessellatorSuffixCheckpoint const checkpoint{tessellator};
+        auto& positions = tessellator.mMeshData->mPositions.get();
+        auto& colors = tessellator.mMeshData->mColors.get();
+        auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
+        auto const positionsBefore = positions.size();
+        auto const colorsBefore = colors.size();
+        auto const uvsBefore = uvs.size();
+        bool rendered{};
+        try {
+            rendered = blockTessellator.tessellateInWorld(
+                tessellator,
+                *expectedLiquid,
+                worldPosition,
+                false
+            );
+        } catch (std::exception const& exception) {
+            if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                || uvs.size() != uvsBefore) {
+                checkpoint.restore(tessellator);
+            }
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            logger().warn(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception={}",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                exception.what()
+            );
+            continue;
+        } catch (...) {
+            if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                || uvs.size() != uvsBefore) {
+                checkpoint.restore(tessellator);
+            }
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            logger().warn(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception=unknown",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z
+            );
+            continue;
+        }
+
+        auto const positionsAfter = positions.size();
+        auto const uvsAfter = uvs.size();
+        if (positionsAfter <= positionsBefore) {
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationZero;
+            logger().debug(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_ZERO type={} layer=3 pos=({}, {}, {}) returned={}",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                rendered
+            );
+            continue;
+        }
+
+        auto const addedVertices = positionsAfter - positionsBefore;
+        auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+        auto const uvRemapped = addedUvs == addedVertices
+            && remapNativeLiquidUvToAtlas(
+                std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
+                atlasRect
+            );
+        if (!uvRemapped) {
+            checkpoint.restore(tessellator);
+            ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
+            continue;
+        }
+
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
+        state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
+        state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
+        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
+            ? PraxisCompatLiquidKind::Lava
+            : PraxisCompatLiquidKind::Water;
+        liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
+        succeeded.push_back(index);
+    }
+
+    // Compatibility ownership is section-atomic. Any missing cell keeps this
+    // section on the unchanged retained/proxy fallback instead of mixing two
+    // visual contracts in one translucent body.
+    if (succeeded.size() != candidates.size()) {
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
+    state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
+    state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
+    if (!cull.processed) {
+        ++state.nativeLiquidTelemetry.praxisCompatCullSkipped;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidCullRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+    state.nativeLiquidTelemetry.praxisCompatVerticesCulled += cull.culled;
+    state.nativeLiquidTelemetry.praxisCompatFacePairsCulled += cull.pairs;
+
+    auto& meshData = tessellator.mMeshData.get();
+    auto& positions = meshData.mPositions.get();
+    auto& colors = meshData.mColors.get();
+    auto& uvs = meshData.mTextureUVs[0].get();
+    if (positions.empty() || positions.size() != colors.size()
+        || positions.size() != uvs.size()
+        || positions.size() != liquidKinds.size()) {
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidStreamRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    // Convert the complete native stream into projection-origin local space.
+    // Supplementary vectors remain byte-for-byte/native-value copies.
+    for (auto& vertex : positions) {
+        vertex.x -= static_cast<float>(origin.x);
+        vertex.y -= static_cast<float>(origin.y);
+        vertex.z -= static_cast<float>(origin.z);
+    }
+    for (auto& quad : tessellator.mQuadInfoList.get()) {
+        auto& centroid = quad.centroid.get();
+        centroid.x -= static_cast<float>(origin.x);
+        centroid.y -= static_cast<float>(origin.y);
+        centroid.z -= static_cast<float>(origin.z);
+    }
+    auto minimum = positions.front();
+    auto maximum = positions.front();
+    for (auto const& position : positions) {
+        minimum = glm::min(minimum, position);
+        maximum = glm::max(maximum, position);
+    }
+    meshData.mAABB.get() = {minimum, maximum};
+
+    auto compat = std::make_unique<PraxisCompatLiquidSectionData>();
+    compat->derivedColors.reserve(colors.size());
+    compat->liquidKinds = liquidKinds;
+    std::uint64_t waterSeedVertices{};
+    std::uint64_t lavaNativeVertices{};
+    for (std::size_t vertex = 0; vertex < colors.size(); ++vertex) {
+        auto const source = colors[vertex];
+        auto const isWater = liquidKinds[vertex] == PraxisCompatLiquidKind::Water;
+        auto const seed = selectPraxisCompatLiquidColorSeed(source, isWater);
+        auto const derived = applyPraxisCompatLiquidAlpha(
+            applyPraxisCompatMissingAbgr(seed.packed),
+            isWater
+        );
+        compat->derivedColors.push_back(derived);
+        if (seed.waterSeedApplied) {
+            ++waterSeedVertices;
+            if (!gPraxisLiquidColorSeedLogged.exchange(
+                    true,
+                    std::memory_order_acq_rel
+                )) {
+                auto const nativeRgba = unpackAbgr(source);
+                auto const seedRgba = unpackAbgr(seed.packed);
+                auto const derivedRgba = unpackAbgr(derived);
+                logger().info(
+                    "PRAXIS_LIQUID_COLOR_SEED type=minecraft:water nativeSource=({},{},{},{}) compatSeed=({},{},{},{}) derived=({},{},{},{})",
+                    nativeRgba.red,
+                    nativeRgba.green,
+                    nativeRgba.blue,
+                    nativeRgba.alpha,
+                    seedRgba.red,
+                    seedRgba.green,
+                    seedRgba.blue,
+                    seedRgba.alpha,
+                    derivedRgba.red,
+                    derivedRgba.green,
+                    derivedRgba.blue,
+                    derivedRgba.alpha
+                );
+            }
+        } else if (!isWater) {
+            ++lavaNativeVertices;
+        }
+    }
+    state.nativeLiquidTelemetry.praxisCompatWaterSeedVertices
+        += waterSeedVertices;
+    state.nativeLiquidTelemetry.praxisCompatLavaNativeVertices
+        += lavaNativeVertices;
+    compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
+    compat->tessellatorState = {
+        .isFormatFixed        = tessellator.mIsFormatFixed,
+        .hasNormals           = tessellator.mHasNormals,
+        .indexPhase           = tessellator.mIndexPhase,
+        .noColor              = tessellator.mNoColor,
+        .buildFaceData        = tessellator.mBuildFaceData,
+        .quadFacing           = tessellator.mQuadFacing,
+        .quadTwoSided         = tessellator.mQuadTwoSided,
+        .curQuadVertex        = tessellator.mCurQuadVertex,
+        .count                = tessellator.mCount,
+        .maxVertexCount       = tessellator.mMaxVertexCount,
+        .faceCenterAccumulator = tessellator.mFaceCenterAccumulator,
+        .quadInfo             = tessellator.mQuadInfoList.get()
+    };
+    if (!compat->ready()) {
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidPayloadRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    if (!gPraxisCompatLiquidColorLogged.exchange(true, std::memory_order_acq_rel)) {
+        auto const& sourceColors = compat->nativeStream->mColors.get();
+        auto const sampleCount = std::min<std::size_t>(4U, sourceColors.size());
+        for (std::size_t sample = 0; sample < sampleCount; ++sample) {
+            auto const source = unpackAbgr(sourceColors[sample]);
+            auto const derived = unpackAbgr(compat->derivedColors[sample]);
+            logger().info(
+                "PRAXIS_COMPAT_LIQUID_COLOR vertex={} sourceRGBA=({}, {}, {}, {}) derivedRGBA=({}, {}, {}, {})",
+                sample,
+                source.red,
+                source.green,
+                source.blue,
+                source.alpha,
+                derived.red,
+                derived.green,
+                derived.blue,
+                derived.alpha
+            );
+        }
+    }
+
+    state.nativeLiquidTelemetry.praxisCompatDerivedColorVertices
+        += compat->derivedColors.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedPositions += positions.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedNormals
+        += meshData.mNormals.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedTangents
+        += meshData.mTangents.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedColors += colors.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedBoneIds
+        += meshData.mBoneId0s.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv0 += uvs.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv1
+        += meshData.mTextureUVs[1].get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv2
+        += meshData.mTextureUVs[2].get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedPbrTextureIndices
+        += meshData.mPBRTextureIndices.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedMers
+        += meshData.mMERS.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedGeoType
+        += meshData.mGeoType.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedQuadInfo
+        += compat->tessellatorState.quadInfo.size();
+    ++state.nativeLiquidTelemetry.praxisCompatBuildSections;
+    std::sort(succeeded.begin(), succeeded.end());
+    tessellator.end(
+        Tessellator::UploadMode::Never,
+        "LHoloPraxisCompatLiquidBuild",
+        SupplementaryFieldAutoGenerationMode{0}
+    );
+    state.praxisCompatLiquidSections[section] = std::move(compat);
+    return succeeded;
+}
+
 void buildLiquidProxySectionMesh(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
     std::size_t                           section,
     Tessellator::UploadMode               uploadMode,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& settings,
+    std::span<std::size_t const>           nativeLiquidSucceeded
 ) {
     auto const mirrorMode        = settings.mirrorMode;
     auto const rotationTurns     = settings.rotationTurns;
@@ -363,8 +1535,17 @@ void buildLiquidProxySectionMesh(
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
         if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (std::binary_search(
+                nativeLiquidSucceeded.begin(),
+                nativeLiquidSucceeded.end(),
+                index
+            )) {
+            continue;
+        }
         liquidProxyIndices.push_back(index);
     }
+    state.liquidProxySectionCellCounts[section] = liquidProxyIndices.size();
+    state.nativeLiquidTelemetry.liquidProxyFallbackCells += liquidProxyIndices.size();
     if (!liquidProxyIndices.empty()) {
         tessellator.begin(
             Tessellator::DebugContextCallback{},

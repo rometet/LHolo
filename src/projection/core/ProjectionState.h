@@ -112,7 +112,14 @@ struct ProjectionState {
     std::vector<std::unique_ptr<mce::Mesh>> correctionOutlineSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongFillSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongOutlineSectionMeshes;
+    std::vector<std::unique_ptr<mce::Mesh>> nativeLiquidSectionMeshes;
+    std::vector<std::unique_ptr<PraxisCompatLiquidSectionData>> praxisCompatLiquidSections;
+    std::unique_ptr<PraxisCompatLiquidSectionData> praxisCompatLiquidAggregate;
+    std::vector<std::size_t>                       praxisCompatLiquidAggregateOrder;
+    bool                                           praxisCompatLiquidAggregateDirty{true};
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
+    std::vector<std::size_t>                nativeLiquidSectionCellCounts;
+    std::vector<std::size_t>                liquidProxySectionCellCounts;
     std::vector<std::unique_ptr<mce::Mesh>> blockEntityPlaceholderSectionMeshes;
     std::unique_ptr<mce::Mesh>              structureBoundsMesh;
     std::vector<SectionState>               sections;
@@ -133,6 +140,10 @@ struct ProjectionState {
     std::uint64_t                           meshWorkerPeakBuildMicros{};
     std::uint64_t                           meshWorkerPeakUploadMicros{};
     std::shared_ptr<ExpectedBlockMap>        expectedWorldBlocks{std::make_shared<ExpectedBlockMap>()};
+    // Bedrock stores the solid/body layer and liquid layer independently.
+    // Keeping a separate immutable map preserves waterlogged cells instead of
+    // forcing one layer to overwrite the other at the same world coordinate.
+    std::shared_ptr<ExpectedLiquidMap>       expectedWorldLiquids{std::make_shared<ExpectedLiquidMap>()};
     std::shared_ptr<ExpectedBlockActorMap>   expectedWorldBlockActors{
         std::make_shared<ExpectedBlockActorMap>()
     };
@@ -140,6 +151,7 @@ struct ProjectionState {
     std::shared_ptr<ExpectedBlockIndexMap>   expectedWorldBlockIndices{
         std::make_shared<ExpectedBlockIndexMap>()
     };
+    NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
 };
 

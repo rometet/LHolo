@@ -17,7 +17,9 @@ namespace lholo::projection::detail {
 namespace {
 
 thread_local ExpectedBlockMap const*      gTessellationBlocks{};
+thread_local ExpectedLiquidMap const*     gTessellationLiquids{};
 thread_local ExpectedBlockActorMap const* gTessellationBlockActors{};
+thread_local NativeLiquidTelemetry*       gNativeLiquidTelemetry{};
 thread_local bool                         gSuppressRegionWrites{};
 
 } // namespace
@@ -35,14 +37,20 @@ bool regionWritesSuppressed() {
 
 ScopedTessellationBlocks::ScopedTessellationBlocks(
     ExpectedBlockMap const&      blocks,
-    ExpectedBlockActorMap const& blockActors
+    ExpectedLiquidMap const&     liquids,
+    ExpectedBlockActorMap const& blockActors,
+    NativeLiquidTelemetry*       telemetry
 )
 : mPreviousBlocks(std::exchange(gTessellationBlocks, &blocks)),
-  mPreviousBlockActors(std::exchange(gTessellationBlockActors, &blockActors)) {}
+  mPreviousLiquids(std::exchange(gTessellationLiquids, &liquids)),
+  mPreviousBlockActors(std::exchange(gTessellationBlockActors, &blockActors)),
+  mPreviousTelemetry(std::exchange(gNativeLiquidTelemetry, telemetry)) {}
 
 ScopedTessellationBlocks::~ScopedTessellationBlocks() {
     gTessellationBlocks      = mPreviousBlocks;
+    gTessellationLiquids     = mPreviousLiquids;
     gTessellationBlockActors = mPreviousBlockActors;
+    gNativeLiquidTelemetry   = mPreviousTelemetry;
 }
 
 Block const* findTessellationBlock(BlockPos const& position) {
@@ -51,6 +59,15 @@ Block const* findTessellationBlock(BlockPos const& position) {
         std::tuple{position.x, position.y, position.z}
     );
     return found == gTessellationBlocks->end() ? nullptr : found->second;
+}
+
+Block const* findTessellationLiquid(BlockPos const& position) {
+    if (!gTessellationLiquids) return nullptr;
+    if (gNativeLiquidTelemetry) ++gNativeLiquidTelemetry->virtualLiquidQueryHits;
+    auto const found = gTessellationLiquids->find(
+        std::tuple{position.x, position.y, position.z}
+    );
+    return found == gTessellationLiquids->end() ? nullptr : found->second;
 }
 
 BlockActor const* findTessellationBlockActor(BlockPos const& position) {

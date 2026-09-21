@@ -10,6 +10,8 @@
 #pragma once
 
 #include <optional>
+#include <string>
+#include <string_view>
 #include <variant>
 
 #include "mc/client/renderer/RenderMaterialGroup.h"
@@ -94,6 +96,63 @@ inline mce::MaterialPtr const* resolveGlowSignMaterial() {
         if (!found) scan("switchable", mce::RenderMaterialGroup::switchable());
     }
     return materialExists(*cached) ? cached : nullptr;
+}
+
+// The Phase 3A liquid candidate intentionally uses the exact material proven
+// by Praxis. sign_text and glow_sign_text have different render contracts, so
+// keep a separately owned handle and require an exact runtime-table match.
+inline mce::MaterialPtr const* resolveSignTextMaterial() {
+    alignas(mce::MaterialPtr) static std::byte storage[sizeof(mce::MaterialPtr)]{};
+    static auto* const cached = reinterpret_cast<mce::MaterialPtr*>(storage);
+    if (!materialExists(*cached)) {
+        bool found = false;
+        auto const scan = [&](mce::RenderMaterialGroup& group) {
+            if (found) return;
+            for (auto const& entry : group.mMaterials.get()) {
+                auto const& info = entry.second;
+                if (!info || !info->mPtr || entry.first.getString() != "sign_text") continue;
+                cached->mRenderMaterialInfoPtr = info;
+                found                          = true;
+                break;
+            }
+        };
+        scan(mce::RenderMaterialGroup::common());
+        if (!found) scan(mce::RenderMaterialGroup::switchable());
+        if (!found) return nullptr;
+    }
+    return materialExists(*cached) ? cached : nullptr;
+}
+
+// Resolve a native terrain material by its runtime table name. This uses only
+// the public RenderMaterialGroup maps exposed by Fake Headers; no renderer
+// address, vtable slot or RenderChunk private field is involved. The retained
+// RenderMaterialInfo shared pointer keeps the selected material alive.
+inline mce::MaterialPtr const* resolveTerrainMaterial(std::string_view name) {
+    alignas(mce::MaterialPtr) static std::byte storage[sizeof(mce::MaterialPtr)]{};
+    static auto* const cached = reinterpret_cast<mce::MaterialPtr*>(storage);
+    static std::string cachedName;
+    if (cachedName != name || !materialExists(*cached)) {
+        bool found = false;
+        auto const scan = [&](mce::RenderMaterialGroup& group) {
+            if (found) return;
+            for (auto const& entry : group.mMaterials.get()) {
+                auto const& info = entry.second;
+                if (!info || !info->mPtr || entry.first.getString() != name) continue;
+                cached->mRenderMaterialInfoPtr = info;
+                cachedName.assign(name);
+                found = true;
+                break;
+            }
+        };
+        scan(mce::RenderMaterialGroup::common());
+        if (!found) scan(mce::RenderMaterialGroup::switchable());
+        if (!found) return nullptr;
+    }
+    return materialExists(*cached) ? cached : nullptr;
+}
+
+inline mce::MaterialPtr const* resolveTerrainBlendMaterial() {
+    return resolveTerrainMaterial("terrain_blend");
 }
 
 } // namespace lholo::render

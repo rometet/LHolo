@@ -10,6 +10,7 @@
 #include "projection/runtime/ProjectionSession.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
@@ -293,11 +294,110 @@ void renderProjection(
         auto const outlineMeshes = countValid(state.correctionOutlineSectionMeshes);
         auto const wrongFillMeshes = countValid(state.wrongFillSectionMeshes);
         auto const wrongOutlineMeshes = countValid(state.wrongOutlineSectionMeshes);
+        auto const nativeLiquidMeshes = countValid(state.nativeLiquidSectionMeshes);
+        auto const praxisCompatLiquidSections = std::count_if(
+            state.praxisCompatLiquidSections.begin(),
+            state.praxisCompatLiquidSections.end(),
+            [](auto const& data) { return data && data->ready(); }
+        );
         auto const liquidMeshes = countValid(state.liquidProxySectionMeshes);
         auto const placeholderMeshes = countValid(state.blockEntityPlaceholderSectionMeshes);
         if (normalMeshes + warningMeshes + outlineMeshes + wrongFillMeshes
-            + wrongOutlineMeshes + liquidMeshes + placeholderMeshes != 0) {
+            + wrongOutlineMeshes + nativeLiquidMeshes + praxisCompatLiquidSections
+            + liquidMeshes + placeholderMeshes != 0) {
             state.meshPreflightDone = true;
+            auto const& telemetry = state.nativeLiquidTelemetry;
+            logger().info(
+                "PHASE3C_NATIVE_LIQUID_TELEMETRY attempted={} positive={} zero={} failure={} vertices={} uv0={} uvAtlasResolvedCells={} uvRemappedVertices={} uvRemapFailures={} verticesBeforeCull={} verticesCulled={} verticesAfterCull={} facePairsCulled={} cullSkipped={} colors={} alphaModified={} virtualLiquidHits={} signTextResolved={} signTextDraws={} terrainBlendResolved={} terrainBlendDraws={} legacyMaterialDraws={} proxyFallbackCells={} proxyDrawCells={} nativeMeshes={} proxyMeshes={}",
+                telemetry.nativeLiquidCellsAttempted,
+                telemetry.nativeLiquidTessellationPositive,
+                telemetry.nativeLiquidTessellationZero,
+                telemetry.nativeLiquidTessellationFailure,
+                telemetry.nativeLiquidVertices,
+                telemetry.nativeLiquidUvVertices,
+                telemetry.nativeLiquidUvAtlasResolvedCells,
+                telemetry.nativeLiquidUvRemappedVertices,
+                telemetry.nativeLiquidUvRemapFailures,
+                telemetry.nativeLiquidVerticesBeforeCull,
+                telemetry.nativeLiquidVerticesCulled,
+                telemetry.nativeLiquidVerticesAfterCull,
+                telemetry.nativeLiquidFacePairsCulled,
+                telemetry.nativeLiquidCullSkipped,
+                telemetry.nativeLiquidColorVertices,
+                telemetry.nativeLiquidAlphaModifiedVertices,
+                telemetry.virtualLiquidQueryHits,
+                telemetry.nativeLiquidSignTextResolved,
+                telemetry.nativeLiquidSignTextDraws,
+                telemetry.nativeLiquidTerrainBlendResolved,
+                telemetry.nativeLiquidTerrainBlendDraws,
+                telemetry.nativeLiquidLegacyMaterialDraws,
+                telemetry.liquidProxyFallbackCells,
+                telemetry.liquidProxyDrawCells,
+                nativeLiquidMeshes,
+                liquidMeshes
+            );
+            logger().info(
+                "PRAXIS_EXACT_REPLAY_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} waterSeedVertices={} lavaNativeVertices={} buildSections={} positions={} normals={} tangents={} colors={} boneIds={} uv0={} uv1={} uv2={} pbr={} mers={} geoType={} quadInfo={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} submitPerFrame={} verticesReplayedPerFrame={} replayMicros={} submitMicros={} aggregateBuilds={} retainedFallbackDraws={} compatSections={}",
+                ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
+                    ? "PraxisExactReplay" : "LHoloRetained",
+                telemetry.praxisCompatCellsAttempted,
+                telemetry.praxisCompatTessellationPositive,
+                telemetry.praxisCompatTessellationZero,
+                telemetry.praxisCompatTessellationFailure,
+                telemetry.praxisCompatVertices,
+                telemetry.praxisCompatUvRemappedVertices,
+                telemetry.praxisCompatUvRemapFailures,
+                telemetry.praxisCompatVerticesBeforeCull,
+                telemetry.praxisCompatVerticesCulled,
+                telemetry.praxisCompatVerticesAfterCull,
+                telemetry.praxisCompatFacePairsCulled,
+                telemetry.praxisCompatCullSkipped,
+                telemetry.praxisCompatDerivedColorVertices,
+                telemetry.praxisCompatWaterSeedVertices,
+                telemetry.praxisCompatLavaNativeVertices,
+                telemetry.praxisCompatBuildSections,
+                telemetry.praxisCompatCapturedPositions,
+                telemetry.praxisCompatCapturedNormals,
+                telemetry.praxisCompatCapturedTangents,
+                telemetry.praxisCompatCapturedColors,
+                telemetry.praxisCompatCapturedBoneIds,
+                telemetry.praxisCompatCapturedUv0,
+                telemetry.praxisCompatCapturedUv1,
+                telemetry.praxisCompatCapturedUv2,
+                telemetry.praxisCompatCapturedPbrTextureIndices,
+                telemetry.praxisCompatCapturedMers,
+                telemetry.praxisCompatCapturedGeoType,
+                telemetry.praxisCompatCapturedQuadInfo,
+                telemetry.praxisCompatFullNativeStreamsPreserved,
+                telemetry.praxisCompatTextureRefSubmit,
+                telemetry.praxisCompatTerrainTextureBound,
+                telemetry.praxisCompatPerVertexReemit,
+                telemetry.praxisCompatDoubleLiquidBuildSections,
+                telemetry.praxisCompatShaderColorWhite,
+                telemetry.praxisCompatSignTextResolved,
+                telemetry.praxisCompatTerrainTextureReady,
+                telemetry.praxisCompatImmediateSubmits,
+                telemetry.praxisCompatImmediateSubmitsPerFrame,
+                telemetry.praxisCompatVerticesReplayedPerFrame,
+                telemetry.praxisCompatReplayMicros,
+                telemetry.praxisCompatSubmitMicros,
+                telemetry.praxisCompatAggregateBuilds,
+                telemetry.praxisCompatRetainedFallbackDraws,
+                praxisCompatLiquidSections
+            );
+            logger().info(
+                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} waterSeedVertices={} lavaNativeVertices={}",
+                PraxisWaterDerivedAlpha,
+                telemetry.praxisCompatWaterSeedVertices,
+                telemetry.praxisCompatLavaNativeVertices
+            );
+            logger().info(
+                "PRAXIS_SUBMERGED_BODY_TELEMETRY compositeCells={} positive={} zero={} vertices={}",
+                telemetry.compositeBodyLiquidCells,
+                telemetry.compositeBodyTessellationPositive,
+                telemetry.compositeBodyTessellationZero,
+                telemetry.compositeBodyVertices
+            );
         }
     }
 

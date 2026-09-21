@@ -7,6 +7,9 @@
 
 #include "projection/core/ProjectionRules.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace lholo::projection::detail {
 
 RenderBucket renderBucketFor(BlockRenderLayer layer) {
@@ -26,6 +29,29 @@ RenderBucket renderBucketFor(BlockRenderLayer layer) {
     default:
         return RenderBucket::Alpha;
     }
+}
+
+std::uint32_t applyGhostAppearanceAbgr(
+    std::uint32_t nativeColor,
+    float         opacity,
+    float         blueTint
+) {
+    auto const normalizedOpacity = std::isfinite(opacity)
+        ? std::clamp(opacity, 0.0f, 1.0f)
+        : 1.0f;
+    auto const normalizedTint = std::isfinite(blueTint)
+        ? std::clamp(blueTint, 0.0f, 1.0f)
+        : 0.0f;
+    auto const multiply = [&](unsigned int shift, float factor) {
+        return static_cast<std::uint32_t>(
+            static_cast<float>((nativeColor >> shift) & 0xFFU) * factor
+        ) << shift;
+    };
+    // Keep these factors synchronized with SchematicVisuals::ghost().
+    return multiply(0, 1.0f - 0.25f * normalizedTint)
+        | multiply(8, 1.0f - 0.15f * normalizedTint)
+        | multiply(16, 1.0f)
+        | multiply(24, normalizedOpacity);
 }
 
 Mirror getProjectionMirror(int mirrorMode) {

@@ -8,6 +8,7 @@
 
 #include "structure/LayerDisplayTypes.h"
 
+#include <cstdint>
 #include <string_view>
 
 #include "projection/core/ProjectionInternalTypes.h"
@@ -24,6 +25,15 @@ class LegacyStructureSettings;
 namespace lholo::projection::detail {
 
 RenderBucket renderBucketFor(BlockRenderLayer layer);
+
+// Praxis visual contract for packed AABBGGRR terrain colors. Minecraft's
+// native RGB/AO and native alpha are multiplied once after tessellation;
+// opacity never replaces the source alpha.
+std::uint32_t applyGhostAppearanceAbgr(
+    std::uint32_t nativeColor,
+    float         opacity,
+    float         blueTint = 0.0f
+);
 
 Mirror   getProjectionMirror(int mirrorMode);
 Rotation getProjectionRotation(int quarterTurns);

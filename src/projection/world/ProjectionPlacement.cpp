@@ -49,7 +49,9 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
     }};
 
     ScopedTessellationBlocks projectedWorld{
-        *state.expectedWorldBlocks, *state.expectedWorldBlockActors
+        *state.expectedWorldBlocks,
+        *state.expectedWorldLiquids,
+        *state.expectedWorldBlockActors
     };
     for (auto const& [key, actor] : *state.expectedWorldBlockActors) {
         if (actor->mType != BlockActorType::Chest) continue;
@@ -89,6 +91,7 @@ void rebuildProjectionPlacement(
     // Publish a new immutable virtual-world version. In-flight workers keep
     // the previous maps alive without observing a partially rebuilt placement.
     state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
+    state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
     state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
     state.projectedBlockActors.clear();
     std::fill(
@@ -152,15 +155,15 @@ void rebuildProjectionPlacement(
                     }
                 }
             }
-        } else {
-            // Liquids join the virtual world so vanilla liquid-height queries
-            // see stacked virtual water (full-cell columns).
-            auto const* transformedLiquid = transformExpectedBlock(
-                entry.liquid, transformSettings, settings.identityTransform
-            );
-            if (transformedLiquid) {
-                state.expectedWorldBlocks->emplace(worldKey, transformedLiquid);
-            }
+        }
+        // The liquid layer is independent of the body layer. This must run
+        // even when a solid body exists so waterlogged slabs, stairs, fences
+        // and signs remain a two-layer cell in the virtual projection world.
+        auto const* transformedLiquid = transformExpectedBlock(
+            entry.liquid, transformSettings, settings.identityTransform
+        );
+        if (transformedLiquid) {
+            state.expectedWorldLiquids->emplace(worldKey, transformedLiquid);
         }
         state.expectedWorldBlockIndices->emplace(worldKey, index);
         auto const section = state.blockToSection[index];

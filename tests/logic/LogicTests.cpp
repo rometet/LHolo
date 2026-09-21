@@ -1,17 +1,26 @@
 // LHolo logic tests: pure projection rules and progress publication.
 // Run with: xmake r LHoloLogicTests
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <cctype>
 #include <fstream>
+#include <limits>
+#include <span>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 #include "block/BlockPlacementRules.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidFaceCull.h"
+#include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "settings/SettingsStore.h"
@@ -42,6 +51,264 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+struct TestUv {
+    float x{};
+    float y{};
+};
+
+struct TestPosition {
+    float x{};
+    float y{};
+    float z{};
+};
+
+bool nearlyEqual(float lhs, float rhs) {
+    return std::abs(lhs - rhs) < 0.00001f;
+}
+
+void testNativeLiquidUvRemap() {
+    NativeLiquidAtlasRect const atlas{0.25f, 0.5f, 0.5f, 0.75f};
+    auto checkUv = [](TestUv const& uv, float u, float v) {
+        LHOLO_CHECK(nearlyEqual(uv.x, u));
+        LHOLO_CHECK(nearlyEqual(uv.y, v));
+    };
+
+    std::array<TestUv, 4> normal{{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{normal}, atlas));
+    checkUv(normal[0], 0.25f, 0.5f);
+    checkUv(normal[1], 0.5f, 0.5f);
+    checkUv(normal[2], 0.5f, 0.75f);
+    checkUv(normal[3], 0.25f, 0.75f);
+
+    std::array<TestUv, 4> reversedU{{{1, 0}, {0, 0}, {0, 1}, {1, 1}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{reversedU}, atlas));
+    checkUv(reversedU[0], 0.5f, 0.5f);
+    checkUv(reversedU[1], 0.25f, 0.5f);
+    checkUv(reversedU[2], 0.25f, 0.75f);
+    checkUv(reversedU[3], 0.5f, 0.75f);
+
+    std::array<TestUv, 4> reversedV{{{0, 1}, {1, 1}, {1, 0}, {0, 0}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{reversedV}, atlas));
+    checkUv(reversedV[0], 0.25f, 0.75f);
+    checkUv(reversedV[1], 0.5f, 0.75f);
+    checkUv(reversedV[2], 0.5f, 0.5f);
+    checkUv(reversedV[3], 0.25f, 0.5f);
+
+    std::array<TestUv, 4> arbitrary{{{-2, 10}, {6, 10}, {6, 14}, {-2, 14}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{arbitrary}, atlas));
+    checkUv(arbitrary[0], 0.25f, 0.5f);
+    checkUv(arbitrary[2], 0.5f, 0.75f);
+
+    std::array<TestUv, 4> degenerate{{{4, 4}, {4, 4}, {4, 4}, {4, 4}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{degenerate}, atlas));
+    checkUv(degenerate[0], 0.25f, 0.5f);
+    checkUv(degenerate[1], 0.5f, 0.5f);
+    checkUv(degenerate[2], 0.5f, 0.75f);
+    checkUv(degenerate[3], 0.25f, 0.75f);
+
+    auto invalidAtlasUvs = normal;
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(
+        std::span{invalidAtlasUvs}, NativeLiquidAtlasRect{0.5f, 0.5f, 0.5f, 0.75f}
+    ));
+    auto nonFinite = normal;
+    nonFinite[2].x = std::numeric_limits<float>::infinity();
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{nonFinite}, atlas));
+    std::array<TestUv, 3> incompleteQuad{{{0, 0}, {1, 0}, {1, 1}}};
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
+}
+
+void testPraxisCompatLiquidColor() {
+    auto const expect = [](std::uint32_t source, PraxisCompatRgba8 expected) {
+        auto const derived = applyPraxisCompatMissingAbgr(source);
+        LHOLO_CHECK(unpackAbgr(derived) == expected);
+        LHOLO_CHECK(unpackAbgr(derived).alpha == 0xFFU);
+    };
+
+    // ExistingCurrent first normalizes native RGB by max intensity, then mixes
+    // the Missing tint. White, gray, black, and the <=1/255 threshold all
+    // intentionally converge to the same opaque candidate.
+    expect(packAbgr({255, 255, 255, 17}), {197, 234, 255, 255});
+    expect(packAbgr({128, 128, 128, 64}), {197, 234, 255, 255});
+    expect(packAbgr({0, 0, 0, 0}), {197, 234, 255, 255});
+    expect(packAbgr({1, 1, 1, 1}), {197, 234, 255, 255});
+    expect(packAbgr({255, 0, 0, 128}), {197, 111, 133, 255});
+    expect(packAbgr({0, 255, 0, 128}), {74, 234, 133, 255});
+    expect(packAbgr({0, 0, 255, 128}), {74, 111, 255, 255});
+    expect(packAbgr({2, 1, 0, 9}), {197, 173, 133, 255});
+
+    auto const nativeWhite = packAbgr({255, 255, 255, 255});
+    auto const waterSeed = selectPraxisCompatLiquidColorSeed(nativeWhite, true);
+    LHOLO_CHECK(waterSeed.waterSeedApplied);
+    LHOLO_CHECK(unpackAbgr(waterSeed.packed) == PraxisWaterColorSeed);
+    LHOLO_CHECK(
+        unpackAbgr(applyPraxisCompatMissingAbgr(waterSeed.packed))
+        == (PraxisCompatRgba8{108, 175, 255, 255})
+    );
+    auto const waterFinal = applyPraxisCompatLiquidAlpha(
+        applyPraxisCompatMissingAbgr(waterSeed.packed),
+        true
+    );
+    LHOLO_CHECK(
+        unpackAbgr(waterFinal) == (PraxisCompatRgba8{108, 175, 255, 160})
+    );
+
+    // The one-byte white tolerance accepts native rounding noise. Water that
+    // already carries meaningful RGB and every lava vertex stay canonical.
+    auto const nearWhite = selectPraxisCompatLiquidColorSeed(
+        packAbgr({254, 255, 254, 17}),
+        true
+    );
+    LHOLO_CHECK(nearWhite.waterSeedApplied);
+    auto const tintedWater = packAbgr({253, 255, 255, 99});
+    auto const tintedResult = selectPraxisCompatLiquidColorSeed(tintedWater, true);
+    LHOLO_CHECK(!tintedResult.waterSeedApplied);
+    LHOLO_CHECK(tintedResult.packed == tintedWater);
+    auto const lavaResult = selectPraxisCompatLiquidColorSeed(nativeWhite, false);
+    LHOLO_CHECK(!lavaResult.waterSeedApplied);
+    LHOLO_CHECK(lavaResult.packed == nativeWhite);
+    auto const lavaDerived = applyPraxisCompatMissingAbgr(lavaResult.packed);
+    LHOLO_CHECK(applyPraxisCompatLiquidAlpha(lavaDerived, false) == lavaDerived);
+}
+
+void testNativeLiquidInternalFaceCull() {
+    using Quad = std::array<TestPosition, 4>;
+    auto const append = [](std::vector<TestPosition>& positions, Quad const& quad) {
+        positions.insert(positions.end(), quad.begin(), quad.end());
+    };
+    auto const positiveX = Quad{{
+        {1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}
+    }};
+    auto const negativeX = Quad{{
+        {1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}
+    }};
+
+    // 1. A unique pair on the same plane with opposite winding is removed.
+    std::vector<TestPosition> opposite;
+    append(opposite, positiveX);
+    append(opposite, negativeX);
+    auto result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{opposite}
+    );
+    LHOLO_CHECK(result.valid);
+    LHOLO_CHECK(result.facePairs == 1U);
+    LHOLO_CHECK(result.removedVertices() == 8U);
+    LHOLO_CHECK(result.removeQuads[0] == 1U && result.removeQuads[1] == 1U);
+
+    // 2. Same-facing duplicates may be intentional overlays and remain.
+    std::vector<TestPosition> sameFacing;
+    append(sameFacing, positiveX);
+    append(sameFacing, positiveX);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{sameFacing});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 3. A single exposed face remains. Add a non-candidate so the aggregate
+    // still satisfies the minimum two-quad contract.
+    auto const partialX = Quad{{
+        {1, 0, 0}, {1, 0.5F, 0}, {1, 0.5F, 1}, {1, 0, 1}
+    }};
+    std::vector<TestPosition> exposed;
+    append(exposed, positiveX);
+    append(exposed, partialX);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{exposed});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 4. Partial-height liquid sides are never unit full-face candidates.
+    std::vector<TestPosition> partial;
+    append(partial, partialX);
+    auto reversedPartial = partialX;
+    std::reverse(reversedPartial.begin(), reversedPartial.end());
+    append(partial, reversedPartial);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{partial});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 5. Sloped liquid geometry is not axis-aligned and remains.
+    auto const sloped = Quad{{
+        {1, 0, 0}, {1.1F, 1, 0}, {1.1F, 1, 1}, {1, 0, 1}
+    }};
+    std::vector<TestPosition> slopes;
+    append(slopes, sloped);
+    auto reversedSlope = sloped;
+    std::reverse(reversedSlope.begin(), reversedSlope.end());
+    append(slopes, reversedSlope);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{slopes});
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 6. Matching unit faces emitted by adjacent cells are removed on another
+    // axis and at a non-origin block boundary.
+    auto const positiveZ = Quad{{
+        {3, 4, 7}, {4, 4, 7}, {4, 5, 7}, {3, 5, 7}
+    }};
+    auto const negativeZ = Quad{{
+        {3, 4, 7}, {3, 5, 7}, {4, 5, 7}, {4, 4, 7}
+    }};
+    std::vector<TestPosition> adjacent;
+    append(adjacent, positiveZ);
+    append(adjacent, negativeZ);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{adjacent});
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
+    // The same typed matcher operates after aggregate assembly, so a pair on
+    // the canonical 16-block section boundary is eligible as one global pair.
+    auto const sectionBoundaryPositive = Quad{{
+        {16, 2, 3}, {16, 3, 3}, {16, 3, 4}, {16, 2, 4}
+    }};
+    auto const sectionBoundaryNegative = Quad{{
+        {16, 2, 3}, {16, 2, 4}, {16, 3, 4}, {16, 3, 3}
+    }};
+    std::vector<TestPosition> sectionBoundary;
+    append(sectionBoundary, sectionBoundaryPositive);
+    append(sectionBoundary, sectionBoundaryNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{sectionBoundary}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
+    // 7. Normal tessellation noise inside the Praxis tolerance still pairs.
+    auto withinPositive = positiveX;
+    auto withinNegative = negativeX;
+    for (auto& vertex : withinPositive) {
+        vertex.x += 0.001F;
+        vertex.y -= 0.001F;
+        vertex.z += 0.001F;
+    }
+    for (auto& vertex : withinNegative) {
+        vertex.x += 0.001F;
+        vertex.y -= 0.001F;
+        vertex.z += 0.001F;
+    }
+    std::vector<TestPosition> withinTolerance;
+    append(withinTolerance, withinPositive);
+    append(withinTolerance, withinNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{withinTolerance}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 1U);
+
+    // 8. A plane beyond tolerance from an integer boundary is retained.
+    auto outsidePositive = positiveX;
+    auto outsideNegative = negativeX;
+    for (auto& vertex : outsidePositive) vertex.x += 0.004F;
+    for (auto& vertex : outsideNegative) vertex.x += 0.004F;
+    std::vector<TestPosition> outsideTolerance;
+    append(outsideTolerance, outsidePositive);
+    append(outsideTolerance, outsideNegative);
+    result = buildNativeLiquidInternalFaceCullMask(
+        std::span<TestPosition const>{outsideTolerance}
+    );
+    LHOLO_CHECK(result.valid && result.facePairs == 0U);
+
+    // 9. A malformed non-quad stream fails closed.
+    std::array<TestPosition, 7> malformed{};
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{malformed});
+    LHOLO_CHECK(!result.valid && result.removeQuads.empty());
+
+    // 10. Every enabled typed stream must match the position vertex count.
+    std::array<std::size_t, 5> matchingFields{8U, 8U, 0U, 8U, 0U};
+    std::array<std::size_t, 5> mismatchedFields{8U, 8U, 7U, 8U, 0U};
+    LHOLO_CHECK(nativeLiquidPerVertexFieldCountsMatch(8U, matchingFields));
+    LHOLO_CHECK(!nativeLiquidPerVertexFieldCountsMatch(8U, mismatchedFields));
 }
 
 void testLayoutRules() {
@@ -137,6 +404,15 @@ void testLayoutRules() {
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerAlphatestSingleSide) == RenderBucket::AlphaOneSided);
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerAlphatest) == RenderBucket::Alpha);
     LHOLO_CHECK(renderBucketFor(BlockRenderLayer::RenderlayerDoubleSided) == RenderBucket::Alpha);
+
+    // Praxis appearance contract: preserve native RGB/AO, multiply native
+    // alpha, and leave alpha zero transparent.
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 0.5f) == 0x7F563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0x80563412U, 0.5f) == 0x40563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0x00563412U, 0.5f) == 0x00563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 0.0f) == 0x00563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF563412U, 1.0f) == 0xFF563412U);
+    LHOLO_CHECK(applyGhostAppearanceAbgr(0xFF804020U, 1.0f, 1.0f) == 0xFF803618U);
 }
 
 void testProgress() {
@@ -932,6 +1208,9 @@ void testI18n() {
 } // namespace
 
 int main() {
+    testNativeLiquidUvRemap();
+    testPraxisCompatLiquidColor();
+    testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();
     testSettingsStore();

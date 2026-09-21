@@ -18,7 +18,9 @@ class ScopedTessellationBlocks {
 public:
     explicit ScopedTessellationBlocks(
         ExpectedBlockMap const&      blocks,
-        ExpectedBlockActorMap const& blockActors
+        ExpectedLiquidMap const&     liquids,
+        ExpectedBlockActorMap const& blockActors,
+        NativeLiquidTelemetry*       telemetry = nullptr
     );
     ~ScopedTessellationBlocks();
 
@@ -27,7 +29,9 @@ public:
 
 private:
     ExpectedBlockMap const*      mPreviousBlocks{};
+    ExpectedLiquidMap const*     mPreviousLiquids{};
     ExpectedBlockActorMap const* mPreviousBlockActors{};
+    NativeLiquidTelemetry*       mPreviousTelemetry{};
 };
 
 // Vanilla BlockType::connectionUpdate recomputes a block's flattened
@@ -50,6 +54,7 @@ private:
 bool regionWritesSuppressed();
 
 Block const*      findTessellationBlock(BlockPos const& position);
+Block const*      findTessellationLiquid(BlockPos const& position);
 BlockActor const* findTessellationBlockActor(BlockPos const& position);
 
 } // namespace lholo::projection::detail
