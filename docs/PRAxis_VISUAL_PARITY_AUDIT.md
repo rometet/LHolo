@@ -566,5 +566,31 @@ PRAXIS_LIQUID_BLEND_PARITY
 PRAXIS_LIQUID_BLEND_STATE_COMPARE
 ```
 
-Phase 4Aのbuildとlogic testはPASS。水の透過差に対する因果はユーザーの同一fixture視覚確認まで
-未判定とし、`PHASE4A_BLEND_CAUSALITY`を先行してPASSにはしない。
+Phase 4A runtimeでは`statesDifferBefore=0`となり、26.51の`sign_text`と
+`mMatBlendBlock`の`BlendStateDescription`は公開7フィールドすべて同一だった。したがって
+`PHASE4A_BLEND_CAUSALITY=NOT_SUPPORTED`とし、blend stateだけでは透過差を説明できない。
+
+## Phase 4B: Material identity A/B
+
+Phase 4BはExact Replayのgeometry、UV、packed color、alpha=255、face cull、tessellator flags、
+shader color white、live terrain `TexturePtr`、texture-ref overload、aggregate submitを固定する。
+変更点は`MeshHelpers::renderMeshImmediately()`へ渡す`MaterialPtr`だけである。
+
+```text
+Candidate A = exact sign_text
+Candidate B = ItemInHandRenderer::mMatBlendBlock
+Phase 4B default = Candidate B
+```
+
+Candidate Aは`LHOLO_PRAXIS_LIQUID_SIGN_TEXT_DIAGNOSTIC`を定義する診断buildとして残す。
+Candidate Bでは`mMatBlendBlock`のblend stateを`sign_text`へコピーせず、materialそのものを
+texture-ref submitへ渡す。depth/stencilとvertex alphaは変更しない。
+
+主要runtime marker:
+
+```text
+PRAXIS_LIQUID_MATERIAL_PARITY
+```
+
+Phase 4Bのbuildとlogic testはPASS。shader/material identityの因果とtexture compatibilityは、
+同一fixtureでのユーザー視覚確認まで未判定とする。

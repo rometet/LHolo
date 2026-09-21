@@ -148,11 +148,9 @@ struct NativeLiquidTelemetry {
     std::uint64_t praxisCompatReplayMicros{};
     std::uint64_t praxisCompatSubmitMicros{};
     std::uint64_t praxisCompatAggregateBuilds{};
-    std::uint64_t praxisLiquidBlendSignTextReady{};
-    std::uint64_t praxisLiquidBlendSourceReady{};
-    std::uint64_t praxisLiquidBlendOverrideApplied{};
-    std::uint64_t praxisLiquidBlendRestored{};
-    std::uint64_t praxisLiquidBlendStatesDiffer{};
+    std::uint64_t praxisLiquidMaterialSignTextReady{};
+    std::uint64_t praxisLiquidMaterialBlendReady{};
+    std::uint64_t praxisLiquidMaterialCandidateBlendBlock{};
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};

@@ -59,7 +59,22 @@ auto& logger() {
 std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
-std::atomic_bool gPraxisLiquidBlendParityLogged{};
+std::atomic_bool gPraxisLiquidMaterialParityLogged{};
+
+enum class PraxisLiquidMaterialCandidate : std::uint8_t {
+    SignText,
+    BlendBlock
+};
+
+// Candidate A remains available as an explicit diagnostic build. Phase 4B
+// uses Candidate B and changes only the MaterialPtr passed to Exact Replay.
+#if defined(LHOLO_PRAXIS_LIQUID_SIGN_TEXT_DIAGNOSTIC)
+inline constexpr PraxisLiquidMaterialCandidate ActivePraxisLiquidMaterial =
+    PraxisLiquidMaterialCandidate::SignText;
+#else
+inline constexpr PraxisLiquidMaterialCandidate ActivePraxisLiquidMaterial =
+    PraxisLiquidMaterialCandidate::BlendBlock;
+#endif
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
@@ -69,90 +84,6 @@ mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     auto* info = material.mRenderMaterialInfoPtr.get();
     return info ? info->mPtr.get() : nullptr;
 }
-
-struct BlendStateFields {
-    unsigned int blendSource{};
-    unsigned int blendDestination{};
-    unsigned int alphaSource{};
-    unsigned int alphaDestination{};
-    unsigned int colorWriteMask{};
-    bool         enableBlend{};
-    bool         enableAlphaToCoverage{};
-
-    bool operator==(BlendStateFields const&) const = default;
-};
-
-BlendStateFields captureBlendStateFields(
-    mce::BlendStateDescription const& description
-) {
-    return {
-        static_cast<unsigned int>(description.blendSource),
-        static_cast<unsigned int>(description.blendDestination),
-        static_cast<unsigned int>(description.alphaSource),
-        static_cast<unsigned int>(description.alphaDestination),
-        static_cast<unsigned int>(description.colorWriteMask),
-        description.enableBlend,
-        description.enableAlphaToCoverage
-    };
-}
-
-struct LiquidBlendParityResult {
-    bool             signTextReady{};
-    bool             blendSourceReady{};
-    bool             overrideApplied{};
-    bool             restored{};
-    bool             statesDifferBefore{};
-    BlendStateFields signTextBefore{};
-    BlendStateFields blendSource{};
-};
-
-// sign_text and mMatBlendBlock are shared Minecraft materials. Phase 4A changes
-// only sign_text's typed blend description for the synchronous exact-replay
-// submit and restores the complete seven-field value before vanilla can draw.
-// Depth/stencil state and every other material field remain untouched.
-class ScopedLiquidBlendParity {
-public:
-    ScopedLiquidBlendParity(
-        mce::MaterialPtr const&  signText,
-        mce::MaterialPtr const&  blendSource,
-        LiquidBlendParityResult& result
-    )
-      : mResult(result),
-        mSignText(tryRenderMaterial(signText)) {
-        auto* source = tryRenderMaterial(blendSource);
-        mResult.signTextReady = mSignText != nullptr;
-        mResult.blendSourceReady = source != nullptr;
-        if (!mSignText || !source) return;
-
-        auto& targetDescription = mSignText->blendStateDescription.get();
-        auto const& sourceDescription = source->blendStateDescription.get();
-        mSaved = targetDescription;
-        mResult.signTextBefore = captureBlendStateFields(targetDescription);
-        mResult.blendSource = captureBlendStateFields(sourceDescription);
-        mResult.statesDifferBefore =
-            mResult.signTextBefore != mResult.blendSource;
-
-        targetDescription = sourceDescription;
-        mResult.overrideApplied =
-            captureBlendStateFields(targetDescription) == mResult.blendSource;
-    }
-
-    ~ScopedLiquidBlendParity() {
-        if (!mSignText || !mSaved) return;
-        auto& targetDescription = mSignText->blendStateDescription.get();
-        targetDescription = *mSaved;
-        mResult.restored =
-            captureBlendStateFields(targetDescription) == mResult.signTextBefore;
-    }
-
-    ScopedLiquidBlendParity(ScopedLiquidBlendParity const&) = delete;
-    ScopedLiquidBlendParity& operator=(ScopedLiquidBlendParity const&) = delete;
-
-private:
-    LiquidBlendParityResult&                    mResult;
-    mce::RenderMaterial*                        mSignText{};
-    std::optional<mce::BlendStateDescription>   mSaved;
-};
 
 OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
     using Storage = decltype(dragon::RenderMetadata::mOffscreenCaptureDescription);
@@ -500,7 +431,7 @@ void submitProjectionMeshPass(
     // Retained meshes exist only for a section whose exact build failed, or in
     // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
-    bool nativeLiquidDrawnWithSignText{};
+    bool nativeLiquidDrawnWithSelectedMaterial{};
     if (renderAlphaLayer) {
         auto& telemetry = state.nativeLiquidTelemetry;
         telemetry.praxisCompatImmediateSubmitsPerFrame = 0;
@@ -527,8 +458,27 @@ void submitProjectionMeshPass(
         );
         if (!nativeLiquidSections.empty()) {
             if (auto const* signText = render::resolveSignTextMaterial()) {
-                telemetry.nativeLiquidSignTextResolved = 1;
-                telemetry.praxisCompatSignTextResolved = 1;
+                auto const signTextReady = tryRenderMaterial(*signText) != nullptr;
+                auto const blendMaterialReady =
+                    tryRenderMaterial(blendMaterial) != nullptr;
+                auto const& exactReplayMaterial =
+                    ActivePraxisLiquidMaterial
+                            == PraxisLiquidMaterialCandidate::BlendBlock
+                        ? blendMaterial
+                        : *signText;
+                auto const exactReplayMaterialReady =
+                    tryRenderMaterial(exactReplayMaterial) != nullptr;
+                telemetry.nativeLiquidSignTextResolved = signTextReady ? 1U : 0U;
+                telemetry.praxisCompatSignTextResolved = signTextReady ? 1U : 0U;
+                telemetry.praxisLiquidMaterialSignTextReady =
+                    signTextReady ? 1U : 0U;
+                telemetry.praxisLiquidMaterialBlendReady =
+                    blendMaterialReady ? 1U : 0U;
+                telemetry.praxisLiquidMaterialCandidateBlendBlock =
+                    ActivePraxisLiquidMaterial
+                            == PraxisLiquidMaterialCandidate::BlendBlock
+                        ? 1U
+                        : 0U;
                 if (!gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
                     logger().info("NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text");
                 }
@@ -536,7 +486,8 @@ void submitProjectionMeshPass(
                     state.terrainTexture ? 1U : 0U;
                 auto const usePraxisExactReplay =
                     ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
-                    && state.terrainTexture.has_value();
+                    && state.terrainTexture.has_value()
+                    && exactReplayMaterialReady;
                 std::vector<std::size_t> exactSections;
                 std::vector<std::size_t> retainedSections;
                 for (auto const section : nativeLiquidSections) {
@@ -566,67 +517,16 @@ void submitProjectionMeshPass(
                     }
 
                     auto submitExact = [&](PraxisCompatLiquidSectionData const& data) {
-                        LiquidBlendParityResult blendParity;
-                        PraxisExactReplaySubmitResult submitted;
-                        {
-                            ScopedLiquidBlendParity blendOverride{
-                                *signText,
-                                blendMaterial,
-                                blendParity
-                            };
-                            ScopedShaderColorWhite shaderColorWhite{
-                                renderContext.mScreenContext
-                            };
-                            telemetry.praxisCompatShaderColorWhite = 1;
-                            submitted = submitPraxisExactReplayImmediately(
-                                renderContext.mScreenContext,
-                                data,
-                                *signText,
-                                *state.terrainTexture
-                            );
-                        }
-
-                        telemetry.praxisLiquidBlendSignTextReady =
-                            blendParity.signTextReady ? 1U : 0U;
-                        telemetry.praxisLiquidBlendSourceReady =
-                            blendParity.blendSourceReady ? 1U : 0U;
-                        telemetry.praxisLiquidBlendOverrideApplied =
-                            blendParity.overrideApplied ? 1U : 0U;
-                        telemetry.praxisLiquidBlendRestored =
-                            blendParity.restored ? 1U : 0U;
-                        telemetry.praxisLiquidBlendStatesDiffer =
-                            blendParity.statesDifferBefore ? 1U : 0U;
-
-                        if (!gPraxisLiquidBlendParityLogged.exchange(
-                                true,
-                                std::memory_order_acq_rel
-                            )) {
-                            logger().info(
-                                "PRAXIS_LIQUID_BLEND_PARITY signTextReady={} blendSource=ItemInHandRenderer::mMatBlendBlock blendSourceReady={} blendOverrideApplied={} blendRestored={} vertexAlphaMode=opaque-255 depthStateChanged=0",
-                                blendParity.signTextReady ? 1 : 0,
-                                blendParity.blendSourceReady ? 1 : 0,
-                                blendParity.overrideApplied ? 1 : 0,
-                                blendParity.restored ? 1 : 0
-                            );
-                            logger().info(
-                                "PRAXIS_LIQUID_BLEND_STATE_COMPARE statesDifferBefore={} signText=(src={},dst={},alphaSrc={},alphaDst={},mask={},blend={},alphaToCoverage={}) blendBlock=(src={},dst={},alphaSrc={},alphaDst={},mask={},blend={},alphaToCoverage={})",
-                                blendParity.statesDifferBefore ? 1 : 0,
-                                blendParity.signTextBefore.blendSource,
-                                blendParity.signTextBefore.blendDestination,
-                                blendParity.signTextBefore.alphaSource,
-                                blendParity.signTextBefore.alphaDestination,
-                                blendParity.signTextBefore.colorWriteMask,
-                                blendParity.signTextBefore.enableBlend ? 1 : 0,
-                                blendParity.signTextBefore.enableAlphaToCoverage ? 1 : 0,
-                                blendParity.blendSource.blendSource,
-                                blendParity.blendSource.blendDestination,
-                                blendParity.blendSource.alphaSource,
-                                blendParity.blendSource.alphaDestination,
-                                blendParity.blendSource.colorWriteMask,
-                                blendParity.blendSource.enableBlend ? 1 : 0,
-                                blendParity.blendSource.enableAlphaToCoverage ? 1 : 0
-                            );
-                        }
+                        ScopedShaderColorWhite shaderColorWhite{
+                            renderContext.mScreenContext
+                        };
+                        telemetry.praxisCompatShaderColorWhite = 1;
+                        auto const submitted = submitPraxisExactReplayImmediately(
+                            renderContext.mScreenContext,
+                            data,
+                            exactReplayMaterial,
+                            *state.terrainTexture
+                        );
                         ++telemetry.praxisCompatImmediateSubmits;
                         ++telemetry.praxisCompatImmediateSubmitsPerFrame;
                         telemetry.praxisCompatVerticesReplayedPerFrame
@@ -636,7 +536,23 @@ void submitProjectionMeshPass(
                         telemetry.praxisCompatFullNativeStreamsPreserved = 1;
                         telemetry.praxisCompatTextureRefSubmit = 1;
                         telemetry.praxisCompatTerrainTextureBound = 1;
-                        nativeLiquidDrawnWithSignText = true;
+                        nativeLiquidDrawnWithSelectedMaterial = true;
+
+                        if (!gPraxisLiquidMaterialParityLogged.exchange(
+                                true,
+                                std::memory_order_acq_rel
+                            )) {
+                            logger().info(
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 vertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
+                                ActivePraxisLiquidMaterial
+                                        == PraxisLiquidMaterialCandidate::BlendBlock
+                                    ? "mMatBlendBlock"
+                                    : "sign_text",
+                                signTextReady ? 1 : 0,
+                                blendMaterialReady ? 1 : 0,
+                                telemetry.praxisCompatImmediateSubmitsPerFrame
+                            );
+                        }
                     };
 
                     if (state.praxisCompatLiquidAggregate
@@ -668,7 +584,7 @@ void submitProjectionMeshPass(
                     if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
                         ++telemetry.praxisCompatRetainedFallbackDraws;
                     }
-                    nativeLiquidDrawnWithSignText = true;
+                    nativeLiquidDrawnWithSelectedMaterial = true;
                 }
 
                 if (!exactSections.empty()
@@ -677,7 +593,7 @@ void submitProjectionMeshPass(
                         std::memory_order_acq_rel
                     )) {
                     logger().info(
-                        "PRAXIS_EXACT_REPLAY path=PraxisExactReplay generationBeginFlag=1 tessellateFlag=0 layer=3 uvRemapped={} culled={} derivedColors={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} submitPath=MeshHelpers::renderMeshImmediately(texture-refs) material=sign_text submitPerFrame={} verticesReplayed={} replayMicros={} submitMicros={} retainedFallbackDraws={}",
+                        "PRAXIS_EXACT_REPLAY path=PraxisExactReplay generationBeginFlag=1 tessellateFlag=0 layer=3 uvRemapped={} culled={} derivedColors={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} submitPath=MeshHelpers::renderMeshImmediately(texture-refs) material={} submitPerFrame={} verticesReplayed={} replayMicros={} submitMicros={} retainedFallbackDraws={}",
                         telemetry.praxisCompatUvRemappedVertices,
                         telemetry.praxisCompatVerticesCulled,
                         telemetry.praxisCompatDerivedColorVertices,
@@ -687,6 +603,10 @@ void submitProjectionMeshPass(
                         telemetry.praxisCompatPerVertexReemit,
                         telemetry.praxisCompatDoubleLiquidBuildSections,
                         telemetry.praxisCompatShaderColorWhite,
+                        ActivePraxisLiquidMaterial
+                                == PraxisLiquidMaterialCandidate::BlendBlock
+                            ? "mMatBlendBlock"
+                            : "sign_text",
                         telemetry.praxisCompatImmediateSubmitsPerFrame,
                         telemetry.praxisCompatVerticesReplayedPerFrame,
                         telemetry.praxisCompatReplayMicros,
@@ -818,10 +738,10 @@ void submitProjectionMeshPass(
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
-    // A missing runtime sign_text material is an explicit diagnostic fallback.
-    // Geometry stays visible for comparison, but telemetry makes it impossible
-    // to mistake the legacy material for a successful Phase 3A candidate.
-    if (renderAlphaLayer && !nativeLiquidDrawnWithSignText) {
+    // If the selected Exact Replay material is unavailable, retain the legacy
+    // mesh fallback. Candidate A still requires exact sign_text resolution;
+    // Candidate B requires the typed mMatBlendBlock MaterialPtr instead.
+    if (renderAlphaLayer && !nativeLiquidDrawnWithSelectedMaterial) {
         for (auto const section : nativeLiquidSections) {
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
             if (!mesh || !mesh->isValid()) continue;
