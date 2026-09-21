@@ -65,6 +65,7 @@ std::atomic_bool gNativeLiquidUvFailureLogged{};
 std::atomic_bool gNativeLiquidCullLogged{};
 std::atomic_bool gNativeLiquidCullSkipLogged{};
 std::atomic_bool gPraxisCompatLiquidColorLogged{};
+std::atomic_bool gPraxisLiquidColorSeedLogged{};
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -247,7 +248,10 @@ struct NativeLiquidCullOutcome {
     std::size_t quadInfo{};
 };
 
-NativeLiquidCullOutcome cullNativeLiquidInternalFaces(Tessellator& tessellator) {
+NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
+    Tessellator&                              tessellator,
+    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr
+) {
     NativeLiquidCullOutcome outcome{};
     auto& data = tessellator.mMeshData.get();
     auto& positions = data.mPositions.get();
@@ -280,6 +284,10 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(Tessellator& tessellator) 
     };
     if (!nativeLiquidPerVertexFieldCountsMatch(positions.size(), fieldCounts)) {
         outcome.skipReason = "vertex_field_count_mismatch";
+        return outcome;
+    }
+    if (liquidKinds && liquidKinds->size() != positions.size()) {
+        outcome.skipReason = "liquid_kind_count_mismatch";
         return outcome;
     }
 
@@ -319,6 +327,9 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(Tessellator& tessellator) 
         compactPerVertexField(data.mPBRTextureIndices.get(), mask.removeQuads);
         compactPerVertexField(data.mMERS.get(), mask.removeQuads);
         compactPerVertexField(data.mGeoType.get(), mask.removeQuads);
+        if (liquidKinds) {
+            compactPerVertexField(*liquidKinds, mask.removeQuads);
+        }
         compactPerQuadField(quadInfo, mask.removeQuads);
 
         auto minimum = positions.front();
@@ -1072,6 +1083,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         BoundingBox{}
     };
     std::vector<std::size_t> candidates;
+    std::vector<PraxisCompatLiquidKind> liquidKinds;
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
@@ -1210,6 +1222,10 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
+        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
+            ? PraxisCompatLiquidKind::Lava
+            : PraxisCompatLiquidKind::Water;
+        liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
         succeeded.push_back(index);
     }
 
@@ -1226,7 +1242,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
-    auto const cull = cullNativeLiquidInternalFaces(tessellator);
+    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
     state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
     if (!cull.processed) {
@@ -1247,7 +1263,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     auto& colors = meshData.mColors.get();
     auto& uvs = meshData.mTextureUVs[0].get();
     if (positions.empty() || positions.size() != colors.size()
-        || positions.size() != uvs.size()) {
+        || positions.size() != uvs.size()
+        || positions.size() != liquidKinds.size()) {
         ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
         tessellator.end(
             Tessellator::UploadMode::Never,
@@ -1281,9 +1298,48 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
 
     auto compat = std::make_unique<PraxisCompatLiquidSectionData>();
     compat->derivedColors.reserve(colors.size());
-    for (auto const source : colors) {
-        compat->derivedColors.push_back(applyPraxisCompatMissingAbgr(source));
+    compat->liquidKinds = liquidKinds;
+    std::uint64_t waterSeedVertices{};
+    std::uint64_t lavaNativeVertices{};
+    for (std::size_t vertex = 0; vertex < colors.size(); ++vertex) {
+        auto const source = colors[vertex];
+        auto const isWater = liquidKinds[vertex] == PraxisCompatLiquidKind::Water;
+        auto const seed = selectPraxisCompatLiquidColorSeed(source, isWater);
+        auto const derived = applyPraxisCompatMissingAbgr(seed.packed);
+        compat->derivedColors.push_back(derived);
+        if (seed.waterSeedApplied) {
+            ++waterSeedVertices;
+            if (!gPraxisLiquidColorSeedLogged.exchange(
+                    true,
+                    std::memory_order_acq_rel
+                )) {
+                auto const nativeRgba = unpackAbgr(source);
+                auto const seedRgba = unpackAbgr(seed.packed);
+                auto const derivedRgba = unpackAbgr(derived);
+                logger().info(
+                    "PRAXIS_LIQUID_COLOR_SEED type=minecraft:water nativeSource=({},{},{},{}) compatSeed=({},{},{},{}) derived=({},{},{},{})",
+                    nativeRgba.red,
+                    nativeRgba.green,
+                    nativeRgba.blue,
+                    nativeRgba.alpha,
+                    seedRgba.red,
+                    seedRgba.green,
+                    seedRgba.blue,
+                    seedRgba.alpha,
+                    derivedRgba.red,
+                    derivedRgba.green,
+                    derivedRgba.blue,
+                    derivedRgba.alpha
+                );
+            }
+        } else if (!isWater) {
+            ++lavaNativeVertices;
+        }
     }
+    state.nativeLiquidTelemetry.praxisCompatWaterSeedVertices
+        += waterSeedVertices;
+    state.nativeLiquidTelemetry.praxisCompatLavaNativeVertices
+        += lavaNativeVertices;
     compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
     compat->tessellatorState = {
         .isFormatFixed        = tessellator.mIsFormatFixed,

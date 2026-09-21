@@ -24,6 +24,13 @@ struct PraxisCompatRgba8 {
 
 inline constexpr std::array<float, 3> PraxisMissingTint{0.56F, 0.84F, 1.00F};
 inline constexpr float PraxisMissingTintStrength = 0.52F;
+inline constexpr PraxisCompatRgba8 PraxisWaterColorSeed{63U, 118U, 228U, 255U};
+inline constexpr std::uint8_t PraxisNativeWhiteMinimum = 254U;
+
+struct PraxisCompatLiquidColorSeedResult {
+    std::uint32_t packed{};
+    bool          waterSeedApplied{};
+};
 
 [[nodiscard]] inline constexpr PraxisCompatRgba8 unpackAbgr(std::uint32_t packed) noexcept {
     return {
@@ -39,6 +46,24 @@ inline constexpr float PraxisMissingTintStrength = 0.52F;
         | (static_cast<std::uint32_t>(rgba.green) << 8U)
         | (static_cast<std::uint32_t>(rgba.blue) << 16U)
         | (static_cast<std::uint32_t>(rgba.alpha) << 24U);
+}
+
+// 26.51 emits effectively-white COLOR0 for native water even though its atlas
+// tile is intentionally untinted. Only a water vertex within one byte of white
+// receives the vanilla #3F76E4 seed; lava and already-tinted water remain native.
+[[nodiscard]] inline constexpr PraxisCompatLiquidColorSeedResult
+selectPraxisCompatLiquidColorSeed(
+    std::uint32_t nativeSource,
+    bool          isWater
+) noexcept {
+    auto const source = unpackAbgr(nativeSource);
+    auto const effectivelyWhite = source.red >= PraxisNativeWhiteMinimum
+        && source.green >= PraxisNativeWhiteMinimum
+        && source.blue >= PraxisNativeWhiteMinimum;
+    if (isWater && effectivelyWhite) {
+        return {packAbgr(PraxisWaterColorSeed), true};
+    }
+    return {nativeSource, false};
 }
 
 [[nodiscard]] inline std::uint32_t applyPraxisCompatMissingAbgr(

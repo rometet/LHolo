@@ -592,5 +592,35 @@ texture-ref submitへ渡す。depth/stencilとvertex alphaは変更しない。
 PRAXIS_LIQUID_MATERIAL_PARITY
 ```
 
-Phase 4Bのbuildとlogic testはPASS。shader/material identityの因果とtexture compatibilityは、
-同一fixtureでのユーザー視覚確認まで未判定とする。
+Phase 4B runtimeでは`mMatBlendBlock`でもwater textureは正常で、見た目は大きく変化した。
+ただしPraxisより白く/薄く表示されるため、material identityだけではvisual parity未達である。
+
+## Phase 4C: Water COLOR0 parity
+
+26.51 native waterのcanonical `mColors`は`(255,255,255,255)`だが、water atlas自体は無色系で
+ある。Phase 4Cではcanonical source streamを変更せず、waterかつnative RGBの全channelが
+254以上の場合だけ、Praxis Missing transformへ渡すseedをvanilla water tint `#3F76E4`
+`(63,118,228,255)`へ置き換える。既存の正規化、Missing tint、strength 0.52は変更しない。
+
+```text
+native source = (255,255,255,255)
+water seed    = (63,118,228,255)
+derived       = (108,175,255,255)
+```
+
+`mSuperHot == false`をwater、`mSuperHot == true`をlavaとしてセルtessellation直後に
+`PraxisCompatLiquidKind`を各追加vertexへ記録する。このtyped metadataはPhase 3Cと同じ
+quad remove maskでstable compactし、section/aggregate payloadでもvertex count一致を検証する。
+lavaはnative RGBのまま既存transformへ渡す。
+
+materialはPhase 4Bの`mMatBlendBlock`、alpha=255、UV、face cull、begin/tessellate flags、
+shader color white、texture-ref submit、aggregate replay、depth stateを変更しない。
+
+主要runtime marker:
+
+```text
+PRAXIS_LIQUID_COLOR_SEED
+PRAXIS_EXACT_REPLAY_TELEMETRY ... waterSeedVertices=... lavaNativeVertices=...
+```
+
+Phase 4Cのlogic testとRelease buildはPASS。色差への因果はユーザー視覚確認まで未判定とする。

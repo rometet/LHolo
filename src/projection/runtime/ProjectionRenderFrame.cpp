@@ -336,7 +336,7 @@ void renderProjection(
                 liquidMeshes
             );
             logger().info(
-                "PRAXIS_EXACT_REPLAY_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} buildSections={} positions={} normals={} tangents={} colors={} boneIds={} uv0={} uv1={} uv2={} pbr={} mers={} geoType={} quadInfo={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} submitPerFrame={} verticesReplayedPerFrame={} replayMicros={} submitMicros={} aggregateBuilds={} retainedFallbackDraws={} compatSections={}",
+                "PRAXIS_EXACT_REPLAY_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} waterSeedVertices={} lavaNativeVertices={} buildSections={} positions={} normals={} tangents={} colors={} boneIds={} uv0={} uv1={} uv2={} pbr={} mers={} geoType={} quadInfo={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} submitPerFrame={} verticesReplayedPerFrame={} replayMicros={} submitMicros={} aggregateBuilds={} retainedFallbackDraws={} compatSections={}",
                 ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
                     ? "PraxisExactReplay" : "LHoloRetained",
                 telemetry.praxisCompatCellsAttempted,
@@ -352,6 +352,8 @@ void renderProjection(
                 telemetry.praxisCompatFacePairsCulled,
                 telemetry.praxisCompatCullSkipped,
                 telemetry.praxisCompatDerivedColorVertices,
+                telemetry.praxisCompatWaterSeedVertices,
+                telemetry.praxisCompatLavaNativeVertices,
                 telemetry.praxisCompatBuildSections,
                 telemetry.praxisCompatCapturedPositions,
                 telemetry.praxisCompatCapturedNormals,

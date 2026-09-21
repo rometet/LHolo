@@ -137,6 +137,30 @@ void testPraxisCompatLiquidColor() {
     expect(packAbgr({0, 255, 0, 128}), {74, 234, 133, 255});
     expect(packAbgr({0, 0, 255, 128}), {74, 111, 255, 255});
     expect(packAbgr({2, 1, 0, 9}), {197, 173, 133, 255});
+
+    auto const nativeWhite = packAbgr({255, 255, 255, 255});
+    auto const waterSeed = selectPraxisCompatLiquidColorSeed(nativeWhite, true);
+    LHOLO_CHECK(waterSeed.waterSeedApplied);
+    LHOLO_CHECK(unpackAbgr(waterSeed.packed) == PraxisWaterColorSeed);
+    LHOLO_CHECK(
+        unpackAbgr(applyPraxisCompatMissingAbgr(waterSeed.packed))
+        == (PraxisCompatRgba8{108, 175, 255, 255})
+    );
+
+    // The one-byte white tolerance accepts native rounding noise. Water that
+    // already carries meaningful RGB and every lava vertex stay canonical.
+    auto const nearWhite = selectPraxisCompatLiquidColorSeed(
+        packAbgr({254, 255, 254, 17}),
+        true
+    );
+    LHOLO_CHECK(nearWhite.waterSeedApplied);
+    auto const tintedWater = packAbgr({253, 255, 255, 99});
+    auto const tintedResult = selectPraxisCompatLiquidColorSeed(tintedWater, true);
+    LHOLO_CHECK(!tintedResult.waterSeedApplied);
+    LHOLO_CHECK(tintedResult.packed == tintedWater);
+    auto const lavaResult = selectPraxisCompatLiquidColorSeed(nativeWhite, false);
+    LHOLO_CHECK(!lavaResult.waterSeedApplied);
+    LHOLO_CHECK(lavaResult.packed == nativeWhite);
 }
 
 void testNativeLiquidInternalFaceCull() {

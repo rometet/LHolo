@@ -87,6 +87,10 @@ void mergeNativeLiquidTelemetry(
     destination.praxisCompatCullSkipped += source.praxisCompatCullSkipped;
     destination.praxisCompatDerivedColorVertices
         += source.praxisCompatDerivedColorVertices;
+    destination.praxisCompatWaterSeedVertices
+        += source.praxisCompatWaterSeedVertices;
+    destination.praxisCompatLavaNativeVertices
+        += source.praxisCompatLavaNativeVertices;
     destination.praxisCompatBuildSections += source.praxisCompatBuildSections;
     destination.praxisCompatCapturedPositions += source.praxisCompatCapturedPositions;
     destination.praxisCompatCapturedNormals += source.praxisCompatCapturedNormals;

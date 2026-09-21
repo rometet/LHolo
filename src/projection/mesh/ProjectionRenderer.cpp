@@ -225,6 +225,11 @@ bool appendPraxisExactReplayStream(
         source.derivedColors.begin(),
         source.derivedColors.end()
     );
+    destination.liquidKinds.insert(
+        destination.liquidKinds.end(),
+        source.liquidKinds.begin(),
+        source.liquidKinds.end()
+    );
     destination.tessellatorState.quadInfo.insert(
         destination.tessellatorState.quadInfo.end(),
         source.tessellatorState.quadInfo.begin(),
@@ -277,6 +282,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
                 *source->nativeStream
             );
             result->derivedColors = source->derivedColors;
+            result->liquidKinds = source->liquidKinds;
             result->tessellatorState = source->tessellatorState;
         } else if (!appendPraxisExactReplayStream(*result, *source)) {
             return {};

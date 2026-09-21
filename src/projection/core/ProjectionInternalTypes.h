@@ -30,6 +30,7 @@ using SubChunkKey = std::tuple<int, int, int>;
 enum class CorrectionState : std::uint8_t { Unknown, Missing, Correct, WrongType, WrongState };
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
 enum class NativeLiquidRenderPath : std::uint8_t { LHoloRetained, PraxisCompat };
+enum class PraxisCompatLiquidKind : std::uint8_t { Water, Lava };
 
 #if defined(LHOLO_NATIVE_LIQUID_RETAINED_DIAGNOSTIC)
 inline constexpr NativeLiquidRenderPath ActiveNativeLiquidRenderPath =
@@ -61,6 +62,7 @@ struct PraxisCompatTessellatorState {
 struct PraxisCompatLiquidSectionData {
     std::unique_ptr<mce::MeshData> nativeStream;
     std::vector<std::uint32_t> derivedColors;
+    std::vector<PraxisCompatLiquidKind> liquidKinds;
     PraxisCompatTessellatorState tessellatorState;
 
     [[nodiscard]] bool ready() const noexcept {
@@ -76,6 +78,7 @@ struct PraxisCompatLiquidSectionData {
             && nativeStream->mIndices.get().empty()
             && nativeStream->mColors.get().size() == vertexCount
             && nativeStream->mTextureUVs[0].get().size() == vertexCount
+            && liquidKinds.size() == vertexCount
             && fullOrEmpty(nativeStream->mNormals.get().size())
             && fullOrEmpty(nativeStream->mTangents.get().size())
             && fullOrEmpty(nativeStream->mBoneId0s.get().size())
@@ -120,6 +123,8 @@ struct NativeLiquidTelemetry {
     std::uint64_t praxisCompatFacePairsCulled{};
     std::uint64_t praxisCompatCullSkipped{};
     std::uint64_t praxisCompatDerivedColorVertices{};
+    std::uint64_t praxisCompatWaterSeedVertices{};
+    std::uint64_t praxisCompatLavaNativeVertices{};
     std::uint64_t praxisCompatBuildSections{};
     std::uint64_t praxisCompatCapturedPositions{};
     std::uint64_t praxisCompatCapturedNormals{};
