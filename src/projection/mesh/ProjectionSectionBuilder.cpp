@@ -9,6 +9,7 @@
 #include "projection/mesh/ProjectionSectionBuilder.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
@@ -63,6 +64,7 @@ std::atomic_bool gNativeLiquidUvRemapLogged{};
 std::atomic_bool gNativeLiquidUvFailureLogged{};
 std::atomic_bool gNativeLiquidCullLogged{};
 std::atomic_bool gNativeLiquidCullSkipLogged{};
+std::atomic_bool gPraxisCompatLiquidColorLogged{};
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -376,6 +378,14 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     ProjectionSectionBuildSettings const&
 );
 
+std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
+    ProjectionState&,
+    Tessellator&,
+    BlockTessellator&,
+    std::size_t,
+    ProjectionSectionBuildSettings const&
+);
+
 void buildBlockEntityPlaceholderSectionMesh(
     ProjectionState&,
     Tessellator&,
@@ -622,13 +632,25 @@ void buildProjectionSection(
         uploadMode,
         sectionBuildSettings
     );
+    auto praxisCompatLiquidSucceeded = detail::buildPraxisCompatLiquidSectionData(
+        state,
+        tessellator,
+        blockTessellator,
+        section,
+        sectionBuildSettings
+    );
+    auto const& liquidOwnership =
+        ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
+            && state.praxisCompatLiquidSections[section]
+        ? praxisCompatLiquidSucceeded
+        : nativeLiquidSucceeded;
     detail::buildLiquidProxySectionMesh(
         state,
         tessellator,
         section,
         uploadMode,
         sectionBuildSettings,
-        nativeLiquidSucceeded
+        liquidOwnership
     );
     detail::buildBlockEntityPlaceholderSectionMesh(
         state,
@@ -1001,6 +1023,269 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     ));
     std::sort(succeeded.begin(), succeeded.end());
     state.nativeLiquidSectionCellCounts[section] = succeeded.size();
+    return succeeded;
+}
+
+std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    BlockTessellator&                     blockTessellator,
+    std::size_t                           section,
+    ProjectionSectionBuildSettings const& settings
+) {
+    static_assert(
+        static_cast<unsigned int>(BlockRenderLayer::RenderlayerBlend) == 3U,
+        "Praxis compatibility liquid layer must remain native layer 3"
+    );
+    state.praxisCompatLiquidSections[section].reset();
+
+    LegacyStructureSettings sectionTransformSettings{
+        settings.mirror,
+        settings.rotation,
+        nullptr,
+        BoundingBox{}
+    };
+    std::vector<std::size_t> candidates;
+    candidates.reserve(state.sectionBlockIndices[section].size());
+    for (auto const index : state.sectionBlockIndices[section]) {
+        auto const& entry = state.structure->renderBlocks[index];
+        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        candidates.push_back(index);
+    }
+    std::vector<std::size_t> succeeded;
+    if (candidates.empty()) return succeeded;
+
+    // This is the separate Praxis 1.21.132 compatibility candidate. The
+    // existing LHolo retained build above remains false/true; this build uses
+    // the proven true/false generation contract without sharing its output.
+    tessellator.begin(
+        Tessellator::DebugContextCallback{},
+        mce::PrimitiveMode::QuadList,
+        std::max(128, static_cast<int>(candidates.size() * 24)),
+        true
+    );
+    auto const origin = BlockPos{
+        state.anchor.x + settings.offsetX,
+        state.anchor.y + settings.offsetY,
+        state.anchor.z + settings.offsetZ
+    };
+    constexpr auto PraxisLiquidLayer = BlockRenderLayer::RenderlayerBlend;
+    blockTessellator.mRenderingLayer = static_cast<int>(PraxisLiquidLayer);
+
+    for (auto const index : candidates) {
+        ++state.nativeLiquidTelemetry.praxisCompatCellsAttempted;
+        auto const& entry = state.structure->renderBlocks[index];
+        auto const* expectedLiquid = transformExpectedBlock(
+            entry.liquid,
+            sectionTransformSettings,
+            settings.identityTransform
+        );
+        if (!expectedLiquid) {
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            continue;
+        }
+        auto const local = transformStructurePosition(
+            entry,
+            *state.structure,
+            settings.mirrorMode,
+            settings.rotationTurns
+        );
+        BlockPos const worldPosition{
+            origin.x + local.x,
+            origin.y + local.y,
+            origin.z + local.z
+        };
+
+        auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
+        NativeLiquidAtlasRect atlasRect{};
+        if (graphics) {
+            auto const& texture = graphics->getTexture(0, 0);
+            atlasRect = {texture._u0, texture._v0, texture._u1, texture._v1};
+        }
+        if (!graphics || !isValidNativeLiquidAtlasRect(atlasRect)) {
+            ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
+            continue;
+        }
+
+        TessellatorSuffixCheckpoint const checkpoint{tessellator};
+        auto& positions = tessellator.mMeshData->mPositions.get();
+        auto& colors = tessellator.mMeshData->mColors.get();
+        auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
+        auto const positionsBefore = positions.size();
+        auto const colorsBefore = colors.size();
+        auto const uvsBefore = uvs.size();
+        bool rendered{};
+        try {
+            rendered = blockTessellator.tessellateInWorld(
+                tessellator,
+                *expectedLiquid,
+                worldPosition,
+                false
+            );
+        } catch (std::exception const& exception) {
+            if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                || uvs.size() != uvsBefore) {
+                checkpoint.restore(tessellator);
+            }
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            logger().warn(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception={}",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                exception.what()
+            );
+            continue;
+        } catch (...) {
+            if (positions.size() != positionsBefore || colors.size() != colorsBefore
+                || uvs.size() != uvsBefore) {
+                checkpoint.restore(tessellator);
+            }
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+            logger().warn(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception=unknown",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z
+            );
+            continue;
+        }
+
+        auto const positionsAfter = positions.size();
+        auto const uvsAfter = uvs.size();
+        if (positionsAfter <= positionsBefore) {
+            ++state.nativeLiquidTelemetry.praxisCompatTessellationZero;
+            logger().debug(
+                "PRAXIS_COMPAT_LIQUID_TESSELLATION_ZERO type={} layer=3 pos=({}, {}, {}) returned={}",
+                expectedLiquid->getTypeName(),
+                worldPosition.x,
+                worldPosition.y,
+                worldPosition.z,
+                rendered
+            );
+            continue;
+        }
+
+        auto const addedVertices = positionsAfter - positionsBefore;
+        auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+        auto const uvRemapped = addedUvs == addedVertices
+            && remapNativeLiquidUvToAtlas(
+                std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
+                atlasRect
+            );
+        if (!uvRemapped) {
+            checkpoint.restore(tessellator);
+            ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
+            continue;
+        }
+
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
+        state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
+        state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
+        succeeded.push_back(index);
+    }
+
+    // Compatibility ownership is section-atomic. Any missing cell keeps this
+    // section on the unchanged retained/proxy fallback instead of mixing two
+    // visual contracts in one translucent body.
+    if (succeeded.size() != candidates.size()) {
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    auto const cull = cullNativeLiquidInternalFaces(tessellator);
+    state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
+    state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
+    if (!cull.processed) {
+        ++state.nativeLiquidTelemetry.praxisCompatCullSkipped;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidCullRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+    state.nativeLiquidTelemetry.praxisCompatVerticesCulled += cull.culled;
+    state.nativeLiquidTelemetry.praxisCompatFacePairsCulled += cull.pairs;
+
+    auto& meshData = tessellator.mMeshData.get();
+    auto& positions = meshData.mPositions.get();
+    auto& colors = meshData.mColors.get();
+    auto& uvs = meshData.mTextureUVs[0].get();
+    if (positions.empty() || positions.size() != colors.size()
+        || positions.size() != uvs.size()) {
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidStreamRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    auto compat = std::make_unique<PraxisCompatLiquidSectionData>();
+    compat->positions = positions;
+    compat->uv0 = uvs;
+    compat->sourceColors = colors;
+    compat->derivedColors.reserve(colors.size());
+    for (auto const source : colors) {
+        compat->derivedColors.push_back(applyPraxisCompatMissingAbgr(source));
+    }
+    for (auto& vertex : compat->positions) {
+        vertex.x -= static_cast<float>(origin.x);
+        vertex.y -= static_cast<float>(origin.y);
+        vertex.z -= static_cast<float>(origin.z);
+    }
+    if (!compat->ready()) {
+        ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
+        tessellator.end(
+            Tessellator::UploadMode::Never,
+            "LHoloPraxisCompatLiquidPayloadRejected",
+            SupplementaryFieldAutoGenerationMode{0}
+        );
+        succeeded.clear();
+        return succeeded;
+    }
+
+    if (!gPraxisCompatLiquidColorLogged.exchange(true, std::memory_order_acq_rel)) {
+        auto const sampleCount = std::min<std::size_t>(4U, compat->sourceColors.size());
+        for (std::size_t sample = 0; sample < sampleCount; ++sample) {
+            auto const source = unpackAbgr(compat->sourceColors[sample]);
+            auto const derived = unpackAbgr(compat->derivedColors[sample]);
+            logger().info(
+                "PRAXIS_COMPAT_LIQUID_COLOR vertex={} sourceRGBA=({}, {}, {}, {}) derivedRGBA=({}, {}, {}, {})",
+                sample,
+                source.red,
+                source.green,
+                source.blue,
+                source.alpha,
+                derived.red,
+                derived.green,
+                derived.blue,
+                derived.alpha
+            );
+        }
+    }
+
+    state.nativeLiquidTelemetry.praxisCompatDerivedColorVertices
+        += compat->derivedColors.size();
+    ++state.nativeLiquidTelemetry.praxisCompatBuildSections;
+    std::sort(succeeded.begin(), succeeded.end());
+    tessellator.end(
+        Tessellator::UploadMode::Never,
+        "LHoloPraxisCompatLiquidBuild",
+        SupplementaryFieldAutoGenerationMode{0}
+    );
+    state.praxisCompatLiquidSections[section] = std::move(compat);
     return succeeded;
 }
 

@@ -4,6 +4,7 @@
 #include "projection/mesh/ProjectionRenderer.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
@@ -20,12 +21,16 @@
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/client/renderer/ActorShaderManager.h"
 #include "mc/client/renderer/BaseActorRenderContext.h"
+#include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/game/ItemInHandRenderer.h"
+#include "mc/common/client/renderer/helpers/MeshHelpers.h"
 #include "mc/common/Brightness.h"
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
+#include "mc/deps/core/math/Vec2.h"
+#include "mc/deps/renderer/ShaderColor.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
 #include "mc/deps/minecraft_renderer/renderer/RenderMaterial.h"
 #include "mc/deps/minecraft_renderer/renderer/TexturePtr.h"
@@ -48,6 +53,7 @@ auto& logger() {
 
 std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
+std::atomic_bool gPraxisCompatBuildLogged{};
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
@@ -96,6 +102,66 @@ private:
     mce::RenderMaterial* mMaterial{};
     bool                 mSaved{};
 };
+
+class ScopedShaderColorWhite {
+public:
+    explicit ScopedShaderColorWhite(ScreenContext& screenContext)
+        : mShader(screenContext.currentShaderColor),
+          mSaved(mShader.color.get()) {
+        mShader.color.get() = mce::Color{1.0F, 1.0F, 1.0F, 1.0F};
+        mShader.dirty = true;
+    }
+
+    ~ScopedShaderColorWhite() {
+        mShader.color.get() = mSaved;
+        // The immediate submit may have uploaded white. Mark the restored
+        // value dirty so the next vanilla owner cannot inherit that multiplier.
+        mShader.dirty = true;
+    }
+
+    ScopedShaderColorWhite(ScopedShaderColorWhite const&) = delete;
+    ScopedShaderColorWhite& operator=(ScopedShaderColorWhite const&) = delete;
+
+private:
+    ShaderColor& mShader;
+    mce::Color   mSaved;
+};
+
+void submitPraxisCompatLiquidImmediately(
+    ScreenContext&                       screenContext,
+    PraxisCompatLiquidSectionData const& data,
+    mce::MaterialPtr const&              material,
+    TextureVariant const&                terrainTexture
+) {
+    Tessellator& tessellator = screenContext.tessellator;
+    tessellator.begin(
+        Tessellator::DebugContextCallback{},
+        mce::PrimitiveMode::QuadList,
+        static_cast<int>(data.positions.size()),
+        true
+    );
+    for (std::size_t vertex = 0; vertex < data.positions.size(); ++vertex) {
+        auto const rgba = unpackAbgr(data.derivedColors[vertex]);
+        tessellator.color(
+            static_cast<float>(rgba.red) / 255.0F,
+            static_cast<float>(rgba.green) / 255.0F,
+            static_cast<float>(rgba.blue) / 255.0F,
+            static_cast<float>(rgba.alpha) / 255.0F
+        );
+        auto const& uv = data.uv0[vertex];
+        tessellator.tex2(Vec2{uv.x, uv.y});
+        auto const& position = data.positions[vertex];
+        tessellator.vertex(position.x, position.y, position.z);
+    }
+    MeshHelpers::renderMeshImmediately(
+        screenContext,
+        tessellator,
+        material,
+        terrainTexture,
+        SupplementaryFieldAutoGenerationMode{1},
+        emptyOffscreenCaptureDescription()
+    );
+}
 
 } // namespace
 
@@ -169,10 +235,11 @@ void submitProjectionMeshPass(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Phase 3A changes one variable only: submit the unchanged native-liquid
-    // mesh and live terrain atlas through the exact sign_text material proven
-    // by Praxis. It remains before the legacy actor-material Brightness::MAX()
-    // setup so no lighting, geometry or tessellator contract changes here.
+    // The default 26.51 candidate replays the separately generated Praxis
+    // true/false stream through ScreenContext's own Tessellator and the typed
+    // MeshHelpers immediate entry. The Phase 3C retained mesh remains present
+    // and is used only by the diagnostic switch or an explicit fail-closed
+    // section fallback.
     std::vector<std::size_t> nativeLiquidSections;
     bool nativeLiquidDrawnWithSignText{};
     if (renderAlphaLayer) {
@@ -180,7 +247,10 @@ void submitProjectionMeshPass(
              section < state.nativeLiquidSectionMeshes.size();
              ++section) {
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
-            if (mesh && mesh->isValid()) nativeLiquidSections.push_back(section);
+            auto const& compat = state.praxisCompatLiquidSections[section];
+            if ((mesh && mesh->isValid()) || (compat && compat->ready())) {
+                nativeLiquidSections.push_back(section);
+            }
         }
         std::sort(
             nativeLiquidSections.begin(),
@@ -192,21 +262,62 @@ void submitProjectionMeshPass(
         if (!nativeLiquidSections.empty()) {
             if (auto const* signText = render::resolveSignTextMaterial()) {
                 state.nativeLiquidTelemetry.nativeLiquidSignTextResolved = 1;
+                state.nativeLiquidTelemetry.praxisCompatSignTextResolved = 1;
                 if (!gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
                     logger().info("NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text");
                 }
+                state.nativeLiquidTelemetry.praxisCompatTerrainTextureReady =
+                    state.terrainTextureVariant ? 1U : 0U;
+                auto const usePraxisCompat =
+                    ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
+                    && state.terrainTextureVariant.has_value();
                 for (auto const section : nativeLiquidSections) {
-                    auto& mesh = *state.nativeLiquidSectionMeshes[section];
-                    mesh.renderMesh(
+                    auto const& compat = state.praxisCompatLiquidSections[section];
+                    if (usePraxisCompat && compat && compat->ready()) {
+                        ScopedShaderColorWhite shaderColorWhite{
+                            renderContext.mScreenContext
+                        };
+                        state.nativeLiquidTelemetry.praxisCompatShaderColorWhite = 1;
+                        submitPraxisCompatLiquidImmediately(
+                            renderContext.mScreenContext,
+                            *compat,
+                            *signText,
+                            *state.terrainTextureVariant
+                        );
+                        ++state.nativeLiquidTelemetry.praxisCompatImmediateSubmits;
+                        if (!gPraxisCompatBuildLogged.exchange(
+                                true,
+                                std::memory_order_acq_rel
+                            )) {
+                            auto const& telemetry = state.nativeLiquidTelemetry;
+                            logger().info(
+                                "PRAXIS_COMPAT_LIQUID_BUILD generationBeginFlag=1 tessellateFlag=0 layer=3 uvRemapped={} culled={} derivedColors={} shaderColorWhite={} submitPath=MeshHelpers::renderMeshImmediately material=sign_text terrainTextureReady={} immediateSubmits={}",
+                                telemetry.praxisCompatUvRemappedVertices,
+                                telemetry.praxisCompatVerticesCulled,
+                                telemetry.praxisCompatDerivedColorVertices,
+                                telemetry.praxisCompatShaderColorWhite,
+                                telemetry.praxisCompatTerrainTextureReady,
+                                telemetry.praxisCompatImmediateSubmits
+                            );
+                        }
+                        continue;
+                    }
+
+                    auto const& mesh = state.nativeLiquidSectionMeshes[section];
+                    if (!mesh || !mesh->isValid()) continue;
+                    mesh->renderMesh(
                         renderContext.mScreenContext,
                         *signText,
                         *state.terrainTextureVariant,
                         0,
-                        mesh.mVertexCount.get().value_or(0u),
+                        mesh->mVertexCount.get().value_or(0u),
                         emptyOffscreenCaptureDescription(),
                         nullptr
                     );
                     ++state.nativeLiquidTelemetry.nativeLiquidSignTextDraws;
+                    if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
+                        ++state.nativeLiquidTelemetry.praxisCompatRetainedFallbackDraws;
+                    }
                 }
                 nativeLiquidDrawnWithSignText = true;
             } else if (!gSignTextUnavailableLogged.exchange(
@@ -338,17 +449,21 @@ void submitProjectionMeshPass(
     // to mistake the legacy material for a successful Phase 3A candidate.
     if (renderAlphaLayer && !nativeLiquidDrawnWithSignText) {
         for (auto const section : nativeLiquidSections) {
-            auto& mesh = *state.nativeLiquidSectionMeshes[section];
-            mesh.renderMesh(
+            auto const& mesh = state.nativeLiquidSectionMeshes[section];
+            if (!mesh || !mesh->isValid()) continue;
+            mesh->renderMesh(
                 renderContext.mScreenContext,
                 blendMaterial,
                 *state.terrainTextureVariant,
                 0,
-                mesh.mVertexCount.get().value_or(0u),
+                mesh->mVertexCount.get().value_or(0u),
                 emptyOffscreenCaptureDescription(),
                 nullptr
             );
             ++state.nativeLiquidTelemetry.nativeLiquidLegacyMaterialDraws;
+            if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
+                ++state.nativeLiquidTelemetry.praxisCompatRetainedFallbackDraws;
+            }
         }
     }
 

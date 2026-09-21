@@ -66,6 +66,28 @@ void mergeNativeLiquidTelemetry(
     destination.nativeLiquidFacePairsCulled
         += source.nativeLiquidFacePairsCulled;
     destination.nativeLiquidCullSkipped += source.nativeLiquidCullSkipped;
+    destination.praxisCompatCellsAttempted += source.praxisCompatCellsAttempted;
+    destination.praxisCompatTessellationPositive
+        += source.praxisCompatTessellationPositive;
+    destination.praxisCompatTessellationZero += source.praxisCompatTessellationZero;
+    destination.praxisCompatTessellationFailure
+        += source.praxisCompatTessellationFailure;
+    destination.praxisCompatVertices += source.praxisCompatVertices;
+    destination.praxisCompatUvRemappedVertices
+        += source.praxisCompatUvRemappedVertices;
+    destination.praxisCompatUvRemapFailures += source.praxisCompatUvRemapFailures;
+    destination.praxisCompatVerticesBeforeCull
+        += source.praxisCompatVerticesBeforeCull;
+    destination.praxisCompatVerticesCulled
+        += source.praxisCompatVerticesCulled;
+    destination.praxisCompatVerticesAfterCull
+        += source.praxisCompatVerticesAfterCull;
+    destination.praxisCompatFacePairsCulled
+        += source.praxisCompatFacePairsCulled;
+    destination.praxisCompatCullSkipped += source.praxisCompatCullSkipped;
+    destination.praxisCompatDerivedColorVertices
+        += source.praxisCompatDerivedColorVertices;
+    destination.praxisCompatBuildSections += source.praxisCompatBuildSections;
     destination.nativeLiquidColorVertices += source.nativeLiquidColorVertices;
     destination.nativeLiquidAlphaModifiedVertices
         += source.nativeLiquidAlphaModifiedVertices;
@@ -160,6 +182,9 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);
                 state.wrongOutlineSectionMeshes[section] = std::move(wrongOutline);
                 state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
+                state.praxisCompatLiquidSections[section] = std::move(
+                    result.praxisCompatLiquidData
+                );
                 state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
                 state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
                 state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;

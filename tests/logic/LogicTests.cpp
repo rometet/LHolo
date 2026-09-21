@@ -18,6 +18,7 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
@@ -116,6 +117,26 @@ void testNativeLiquidUvRemap() {
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{nonFinite}, atlas));
     std::array<TestUv, 3> incompleteQuad{{{0, 0}, {1, 0}, {1, 1}}};
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
+}
+
+void testPraxisCompatLiquidColor() {
+    auto const expect = [](std::uint32_t source, PraxisCompatRgba8 expected) {
+        auto const derived = applyPraxisCompatMissingAbgr(source);
+        LHOLO_CHECK(unpackAbgr(derived) == expected);
+        LHOLO_CHECK(unpackAbgr(derived).alpha == 0xFFU);
+    };
+
+    // ExistingCurrent first normalizes native RGB by max intensity, then mixes
+    // the Missing tint. White, gray, black, and the <=1/255 threshold all
+    // intentionally converge to the same opaque candidate.
+    expect(packAbgr({255, 255, 255, 17}), {197, 234, 255, 255});
+    expect(packAbgr({128, 128, 128, 64}), {197, 234, 255, 255});
+    expect(packAbgr({0, 0, 0, 0}), {197, 234, 255, 255});
+    expect(packAbgr({1, 1, 1, 1}), {197, 234, 255, 255});
+    expect(packAbgr({255, 0, 0, 128}), {197, 111, 133, 255});
+    expect(packAbgr({0, 255, 0, 128}), {74, 234, 133, 255});
+    expect(packAbgr({0, 0, 255, 128}), {74, 111, 255, 255});
+    expect(packAbgr({2, 1, 0, 9}), {197, 173, 133, 255});
 }
 
 void testNativeLiquidInternalFaceCull() {
@@ -1139,6 +1160,7 @@ void testI18n() {
 
 int main() {
     testNativeLiquidUvRemap();
+    testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();

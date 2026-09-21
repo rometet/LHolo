@@ -121,6 +121,7 @@ bool prepareProjectionState(
     state.wrongFillSectionMeshes.resize(state.sectionBlockIndices.size());
     state.wrongOutlineSectionMeshes.resize(state.sectionBlockIndices.size());
     state.nativeLiquidSectionMeshes.resize(state.sectionBlockIndices.size());
+    state.praxisCompatLiquidSections.resize(state.sectionBlockIndices.size());
     state.liquidProxySectionMeshes.resize(state.sectionBlockIndices.size());
     state.nativeLiquidSectionCellCounts.resize(state.sectionBlockIndices.size());
     state.liquidProxySectionCellCounts.resize(state.sectionBlockIndices.size());

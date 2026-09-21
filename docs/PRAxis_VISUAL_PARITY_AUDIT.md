@@ -184,7 +184,7 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 ## 検証記録
 
-- `LHoloLogicTests`: 3735 checks、0 failures（Phase 3B UV remapとPhase 3C face-cull casesを含む）
+- `LHoloLogicTests`: 3751 checks、0 failures（Phase 3B UV、Phase 3C cull、PraxisCompat color casesを含む）
 - Release DLL build: success
 - Minecraft runtime telemetry: PASS（2026-09-21 14:39、正常終了）
 - GPU capture: NOT PERFORMED
@@ -415,3 +415,82 @@ PHASE3C_NATIVE_LIQUID_TELEMETRY
 
 実装・logic test・Release buildはPASS。Minecraft runtimeと視覚判定は未実施であり、
 `PHASE3C_INTERNAL_FACE_CAUSALITY`はユーザーの同一fixture確認まで未判定とする。
+
+### Phase 3C runtime結果
+
+2026-09-22 00:16の`Strawberry House.litematic`最終telemetry:
+
+```text
+attempted=2972
+positive=2972
+vertices=59440
+uvRemapFailures=0
+verticesBeforeCull=59440
+verticesCulled=43080
+verticesAfterCull=16360
+facePairsCulled=5385
+cullSkipped=0
+proxyFallbackCells=0
+nativeMeshes=20
+```
+
+typed cullerはruntime PASSし、内部full-faceの72%以上を削除したが、poolは引き続き
+灰黒く表示された。したがってPhase 3C後はUV/internal-faceを再補正せず、残るPraxis
+visual/submission contractを独立したcompatibility pathで検証する。
+
+## Praxis Compatibility Liquid Path (26.51)
+
+既存`LHoloRetained`経路は変更・削除せず、同じsectionについて別の
+`PraxisCompat` CPU payloadを構築する。既定表示ownerは`PraxisCompat`であり、
+`LHOLO_NATIVE_LIQUID_RETAINED_DIAGNOSTIC`を定義したbuildでは従来ownerへ戻せる。
+PraxisCompat sectionのbuildまたはsubmit前提が成立しない場合も、既存retained meshと
+LiquidProxyがfail-closed fallbackとして残る。
+
+### 26.51 API監査
+
+| Contract | 26.51 surface | Result |
+| --- | --- | --- |
+| begin/tessellate | `Tessellator::begin(..., true)` / `BlockTessellator::tessellateInWorld(..., false)` | typed MCAPI |
+| liquid layer | `BlockRenderLayer::RenderlayerBlend == 3` / `BlockTessellator::mRenderingLayer` | typed field |
+| UV | `BlockGraphics::getForBlock()->getTexture(0,0)` + Phase 3B helper | typed API |
+| face cull | Phase 3C `mce::MeshData` stable compaction | typed fields |
+| shader color | `ScreenContext` → public `mce::MeshContext::currentShaderColor`; `ShaderColor::color/dirty` | typed fields |
+| material | `resolveSignTextMaterial()` exact `sign_text` lookup | typed material table |
+| terrain texture | existing `LevelRenderer::mAtlasTexture` → `TextureVariant` | typed field/value |
+| immediate submit | `MeshHelpers::renderMeshImmediately(ScreenContext&, Tessellator&, MaterialPtr, TextureVariant, ...)` | exported MCAPI |
+
+この監査によりshader whiteとimmediate submissionの双方が26.51 Fake Headersで公開されている。
+Praxis 1.21.132の`ScreenContext +0x30`、MeshHelpers RVA、signature、raw stream offsetは使用しない。
+追加private ABIは0である。
+
+### Compatibility generation / appearance
+
+PraxisCompatはnative layer 3で`begin=true`、`tessellate=false`を使用し、Phase 3B UV remapと
+Phase 3C cullerを同じ順序で適用する。現LHoloの`applyGhostAppearanceAbgr()`はこのpayloadへ
+適用しない。native source colorは`sourceColors`へ保持し、別の`derivedColors`だけをPraxis
+`ExistingCurrent`のMissing契約で生成する。
+
+```text
+intensity = max(source.r, source.g, source.b)
+normalized = source / intensity  (<= 1/255ならwhite)
+missingTint = (0.56, 0.84, 1.00)
+strength = 0.52
+derived.rgb = normalized + (missingTint - normalized) * strength
+derived.a = 255
+```
+
+描画時はsection payloadをScreenContext所有Tessellatorへ公開`color/tex2/vertex` APIでreplayし、
+typed `currentShaderColor`を一時的に`(1,1,1,1)`へ設定してから、exact `sign_text`と既存terrain
+`TextureVariant`を`MeshHelpers::renderMeshImmediately()`へ渡す。submit後は元shader colorを
+復元しdirty flagを立てる。
+
+主要runtime marker:
+
+```text
+PRAXIS_COMPAT_LIQUID_COLOR
+PRAXIS_COMPAT_LIQUID_BUILD
+PRAXIS_COMPAT_LIQUID_TELEMETRY
+```
+
+Compatibility pathのbuild、logic test、Release linkはPASS。Minecraft runtimeおよび視覚結果は
+未確認であり、`PRAXIS_COMPAT_LIQUID_VISUAL_PARITY`はユーザー確認まで未判定とする。

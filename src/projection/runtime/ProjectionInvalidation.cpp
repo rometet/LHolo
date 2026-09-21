@@ -148,6 +148,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& mesh : state.wrongFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.wrongOutlineSectionMeshes) mesh.reset();
         for (auto& mesh : state.nativeLiquidSectionMeshes) mesh.reset();
+        for (auto& data : state.praxisCompatLiquidSections) data.reset();
         for (auto& mesh : state.liquidProxySectionMeshes) mesh.reset();
         std::fill(
             state.nativeLiquidSectionCellCounts.begin(),

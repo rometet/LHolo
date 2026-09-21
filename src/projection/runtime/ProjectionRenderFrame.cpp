@@ -294,6 +294,11 @@ void renderProjection(
         auto const wrongFillMeshes = countValid(state.wrongFillSectionMeshes);
         auto const wrongOutlineMeshes = countValid(state.wrongOutlineSectionMeshes);
         auto const nativeLiquidMeshes = countValid(state.nativeLiquidSectionMeshes);
+        auto const praxisCompatLiquidSections = std::count_if(
+            state.praxisCompatLiquidSections.begin(),
+            state.praxisCompatLiquidSections.end(),
+            [](auto const& data) { return data && data->ready(); }
+        );
         auto const liquidMeshes = countValid(state.liquidProxySectionMeshes);
         auto const placeholderMeshes = countValid(state.blockEntityPlaceholderSectionMeshes);
         if (normalMeshes + warningMeshes + outlineMeshes + wrongFillMeshes
@@ -328,6 +333,31 @@ void renderProjection(
                 telemetry.liquidProxyDrawCells,
                 nativeLiquidMeshes,
                 liquidMeshes
+            );
+            logger().info(
+                "PRAXIS_COMPAT_LIQUID_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} buildSections={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} retainedFallbackDraws={} compatSections={}",
+                ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
+                    ? "PraxisCompat" : "LHoloRetained",
+                telemetry.praxisCompatCellsAttempted,
+                telemetry.praxisCompatTessellationPositive,
+                telemetry.praxisCompatTessellationZero,
+                telemetry.praxisCompatTessellationFailure,
+                telemetry.praxisCompatVertices,
+                telemetry.praxisCompatUvRemappedVertices,
+                telemetry.praxisCompatUvRemapFailures,
+                telemetry.praxisCompatVerticesBeforeCull,
+                telemetry.praxisCompatVerticesCulled,
+                telemetry.praxisCompatVerticesAfterCull,
+                telemetry.praxisCompatFacePairsCulled,
+                telemetry.praxisCompatCullSkipped,
+                telemetry.praxisCompatDerivedColorVertices,
+                telemetry.praxisCompatBuildSections,
+                telemetry.praxisCompatShaderColorWhite,
+                telemetry.praxisCompatSignTextResolved,
+                telemetry.praxisCompatTerrainTextureReady,
+                telemetry.praxisCompatImmediateSubmits,
+                telemetry.praxisCompatRetainedFallbackDraws,
+                praxisCompatLiquidSections
             );
         }
     }

@@ -113,6 +113,7 @@ struct ProjectionState {
     std::vector<std::unique_ptr<mce::Mesh>> wrongFillSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongOutlineSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> nativeLiquidSectionMeshes;
+    std::vector<std::unique_ptr<PraxisCompatLiquidSectionData>> praxisCompatLiquidSections;
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
     std::vector<std::size_t>                nativeLiquidSectionCellCounts;
     std::vector<std::size_t>                liquidProxySectionCellCounts;

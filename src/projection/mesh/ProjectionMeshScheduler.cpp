@@ -221,6 +221,7 @@ void scheduleProjectionMeshBuild(
     snapshot->wrongFillSectionMeshes.resize(1);
     snapshot->wrongOutlineSectionMeshes.resize(1);
     snapshot->nativeLiquidSectionMeshes.resize(1);
+    snapshot->praxisCompatLiquidSections.resize(1);
     snapshot->liquidProxySectionMeshes.resize(1);
     snapshot->nativeLiquidSectionCellCounts.resize(1);
     snapshot->liquidProxySectionCellCounts.resize(1);
@@ -316,6 +317,9 @@ void scheduleProjectionMeshBuild(
                 result.wrongFillMesh = std::move(snapshot->wrongFillSectionMeshes[0]);
                 result.wrongOutlineMesh = std::move(snapshot->wrongOutlineSectionMeshes[0]);
                 result.nativeLiquidMesh = std::move(snapshot->nativeLiquidSectionMeshes[0]);
+                result.praxisCompatLiquidData = std::move(
+                    snapshot->praxisCompatLiquidSections[0]
+                );
                 result.liquidProxyMesh = std::move(snapshot->liquidProxySectionMeshes[0]);
                 result.nativeLiquidCellCount = snapshot->nativeLiquidSectionCellCounts[0];
                 result.liquidProxyCellCount = snapshot->liquidProxySectionCellCounts[0];
