@@ -88,6 +88,21 @@ void mergeNativeLiquidTelemetry(
     destination.praxisCompatDerivedColorVertices
         += source.praxisCompatDerivedColorVertices;
     destination.praxisCompatBuildSections += source.praxisCompatBuildSections;
+    destination.praxisCompatCapturedPositions += source.praxisCompatCapturedPositions;
+    destination.praxisCompatCapturedNormals += source.praxisCompatCapturedNormals;
+    destination.praxisCompatCapturedTangents += source.praxisCompatCapturedTangents;
+    destination.praxisCompatCapturedColors += source.praxisCompatCapturedColors;
+    destination.praxisCompatCapturedBoneIds += source.praxisCompatCapturedBoneIds;
+    destination.praxisCompatCapturedUv0 += source.praxisCompatCapturedUv0;
+    destination.praxisCompatCapturedUv1 += source.praxisCompatCapturedUv1;
+    destination.praxisCompatCapturedUv2 += source.praxisCompatCapturedUv2;
+    destination.praxisCompatCapturedPbrTextureIndices
+        += source.praxisCompatCapturedPbrTextureIndices;
+    destination.praxisCompatCapturedMers += source.praxisCompatCapturedMers;
+    destination.praxisCompatCapturedGeoType += source.praxisCompatCapturedGeoType;
+    destination.praxisCompatCapturedQuadInfo += source.praxisCompatCapturedQuadInfo;
+    destination.praxisCompatDoubleLiquidBuildSections
+        += source.praxisCompatDoubleLiquidBuildSections;
     destination.nativeLiquidColorVertices += source.nativeLiquidColorVertices;
     destination.nativeLiquidAlphaModifiedVertices
         += source.nativeLiquidAlphaModifiedVertices;
@@ -185,6 +200,9 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.praxisCompatLiquidSections[section] = std::move(
                     result.praxisCompatLiquidData
                 );
+                state.praxisCompatLiquidAggregate.reset();
+                state.praxisCompatLiquidAggregateOrder.clear();
+                state.praxisCompatLiquidAggregateDirty = true;
                 state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
                 state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
                 state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;

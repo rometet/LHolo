@@ -406,6 +406,9 @@ void buildNextProjectionSectionSynchronously(
         );
         state.sections[section].uploadedRevision = state.sections[section].requestedRevision;
         state.sections[section].incrementalDirty = false;
+        state.praxisCompatLiquidAggregate.reset();
+        state.praxisCompatLiquidAggregateOrder.clear();
+        state.praxisCompatLiquidAggregateDirty = true;
         state.meshPreflightDone = false;
         break;
     }

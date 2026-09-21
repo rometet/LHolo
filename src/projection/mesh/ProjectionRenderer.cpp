@@ -4,17 +4,23 @@
 #include "projection/mesh/ProjectionRenderer.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
-#include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
+#include <span>
+#include <utility>
 #include <vector>
+
+#include <glm/common.hpp>
 
 #include "mc/client/game/IClientInstance.h"
 #include "mc/client/gui/screens/ScreenContext.h"
@@ -29,7 +35,6 @@
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
-#include "mc/deps/core/math/Vec2.h"
 #include "mc/deps/renderer/ShaderColor.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
 #include "mc/deps/minecraft_renderer/renderer/RenderMaterial.h"
@@ -53,7 +58,7 @@ auto& logger() {
 
 std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
-std::atomic_bool gPraxisCompatBuildLogged{};
+std::atomic_bool gPraxisExactReplayLogged{};
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
@@ -127,40 +132,210 @@ private:
     mce::Color   mSaved;
 };
 
-void submitPraxisCompatLiquidImmediately(
+template <class Value>
+bool appendMatchingNativeField(
+    std::vector<Value>&       destination,
+    std::vector<Value> const& source
+) {
+    if (destination.empty() != source.empty()) return false;
+    destination.insert(destination.end(), source.begin(), source.end());
+    return true;
+}
+
+bool appendPraxisExactReplayStream(
+    PraxisCompatLiquidSectionData&       destination,
+    PraxisCompatLiquidSectionData const& source
+) {
+    if (!destination.ready() || !source.ready()) return false;
+    auto& destinationData = *destination.nativeStream;
+    auto const& sourceData = *source.nativeStream;
+    if (destinationData.mMode != sourceData.mMode
+        || destinationData.mFieldEnabled.get() != sourceData.mFieldEnabled.get()
+        || destination.tessellatorState.isFormatFixed
+            != source.tessellatorState.isFormatFixed
+        || destination.tessellatorState.hasNormals
+            != source.tessellatorState.hasNormals
+        || destination.tessellatorState.indexPhase
+            != source.tessellatorState.indexPhase
+        || destination.tessellatorState.noColor
+            != source.tessellatorState.noColor
+        || destination.tessellatorState.buildFaceData
+            != source.tessellatorState.buildFaceData
+        || destination.tessellatorState.quadInfo.empty()
+            != source.tessellatorState.quadInfo.empty()) {
+        return false;
+    }
+
+    destinationData.mPositions.get().insert(
+        destinationData.mPositions.get().end(),
+        sourceData.mPositions.get().begin(),
+        sourceData.mPositions.get().end()
+    );
+    if (!appendMatchingNativeField(
+            destinationData.mNormals.get(), sourceData.mNormals.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mTangents.get(), sourceData.mTangents.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mColors.get(), sourceData.mColors.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mBoneId0s.get(), sourceData.mBoneId0s.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mTextureUVs[0].get(), sourceData.mTextureUVs[0].get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mTextureUVs[1].get(), sourceData.mTextureUVs[1].get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mTextureUVs[2].get(), sourceData.mTextureUVs[2].get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mPBRTextureIndices.get(),
+            sourceData.mPBRTextureIndices.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mMERS.get(), sourceData.mMERS.get()
+        )
+        || !appendMatchingNativeField(
+            destinationData.mGeoType.get(), sourceData.mGeoType.get()
+        )) {
+        return false;
+    }
+    destination.derivedColors.insert(
+        destination.derivedColors.end(),
+        source.derivedColors.begin(),
+        source.derivedColors.end()
+    );
+    destination.tessellatorState.quadInfo.insert(
+        destination.tessellatorState.quadInfo.end(),
+        source.tessellatorState.quadInfo.begin(),
+        source.tessellatorState.quadInfo.end()
+    );
+    destination.tessellatorState.count = static_cast<std::uint32_t>(
+        destinationData.mPositions.get().size()
+    );
+    destination.tessellatorState.maxVertexCount = std::max(
+        destination.tessellatorState.count,
+        destination.tessellatorState.maxVertexCount
+            + source.tessellatorState.maxVertexCount
+    );
+    return destination.ready();
+}
+
+void refreshPraxisExactReplayBounds(PraxisCompatLiquidSectionData& data) {
+    auto& meshData = *data.nativeStream;
+    auto const& positions = meshData.mPositions.get();
+    auto minimum = positions.front();
+    auto maximum = positions.front();
+    for (auto const& position : positions) {
+        minimum = glm::min(minimum, position);
+        maximum = glm::max(maximum, position);
+    }
+    meshData.mAABB.get() = {minimum, maximum};
+
+    auto const& uv0 = meshData.mTextureUVs[0].get();
+    auto uvMinimum = uv0.front();
+    auto uvMaximum = uv0.front();
+    for (auto const& uv : uv0) {
+        uvMinimum = glm::min(uvMinimum, uv);
+        uvMaximum = glm::max(uvMaximum, uv);
+    }
+    meshData.mUVAABB.get() = {uvMinimum, uvMaximum};
+}
+
+std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
+    ProjectionState const&             state,
+    std::span<std::size_t const>       sections
+) {
+    std::unique_ptr<PraxisCompatLiquidSectionData> result;
+    for (auto const section : sections) {
+        if (section >= state.praxisCompatLiquidSections.size()) return {};
+        auto const& source = state.praxisCompatLiquidSections[section];
+        if (!source || !source->ready()) return {};
+        if (!result) {
+            result = std::make_unique<PraxisCompatLiquidSectionData>();
+            result->nativeStream = std::make_unique<mce::MeshData>(
+                *source->nativeStream
+            );
+            result->derivedColors = source->derivedColors;
+            result->tessellatorState = source->tessellatorState;
+        } else if (!appendPraxisExactReplayStream(*result, *source)) {
+            return {};
+        }
+    }
+    if (!result || !result->ready()) return {};
+    refreshPraxisExactReplayBounds(*result);
+    return result;
+}
+
+struct PraxisExactReplaySubmitResult {
+    std::uint64_t vertices{};
+    std::uint64_t replayMicros{};
+    std::uint64_t submitMicros{};
+};
+
+PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     ScreenContext&                       screenContext,
     PraxisCompatLiquidSectionData const& data,
     mce::MaterialPtr const&              material,
-    TextureVariant const&                terrainTexture
+    mce::TexturePtr const&               terrainTexture
 ) {
+    PraxisExactReplaySubmitResult result{};
+    auto const replayStarted = std::chrono::steady_clock::now();
     Tessellator& tessellator = screenContext.tessellator;
+    auto const vertexCount = data.nativeStream->mPositions.get().size();
     tessellator.begin(
         Tessellator::DebugContextCallback{},
         mce::PrimitiveMode::QuadList,
-        static_cast<int>(data.positions.size()),
+        static_cast<int>(vertexCount),
         true
     );
-    for (std::size_t vertex = 0; vertex < data.positions.size(); ++vertex) {
-        auto const rgba = unpackAbgr(data.derivedColors[vertex]);
-        tessellator.color(
-            static_cast<float>(rgba.red) / 255.0F,
-            static_cast<float>(rgba.green) / 255.0F,
-            static_cast<float>(rgba.blue) / 255.0F,
-            static_cast<float>(rgba.alpha) / 255.0F
-        );
-        auto const& uv = data.uv0[vertex];
-        tessellator.tex2(Vec2{uv.x, uv.y});
-        auto const& position = data.positions[vertex];
-        tessellator.vertex(position.x, position.y, position.z);
-    }
+    mce::MeshData replayData{*data.nativeStream};
+    replayData.mColors.get() = data.derivedColors;
+    tessellator.mMeshData.get() = std::move(replayData);
+    tessellator.mIsFormatFixed = data.tessellatorState.isFormatFixed;
+    tessellator.mHasNormals = data.tessellatorState.hasNormals;
+    tessellator.mIndexPhase = data.tessellatorState.indexPhase;
+    tessellator.mNoColor = data.tessellatorState.noColor;
+    tessellator.mBuildFaceData = data.tessellatorState.buildFaceData;
+    tessellator.mQuadFacing = data.tessellatorState.quadFacing;
+    tessellator.mQuadTwoSided = data.tessellatorState.quadTwoSided;
+    tessellator.mCurQuadVertex = data.tessellatorState.curQuadVertex;
+    tessellator.mCount = static_cast<std::uint32_t>(vertexCount);
+    tessellator.mMaxVertexCount = std::max(
+        static_cast<std::uint32_t>(vertexCount),
+        data.tessellatorState.maxVertexCount
+    );
+    tessellator.mFaceCenterAccumulator =
+        data.tessellatorState.faceCenterAccumulator;
+    tessellator.mQuadInfoList.get() = data.tessellatorState.quadInfo;
+    result.vertices = vertexCount;
+    result.replayMicros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - replayStarted
+        ).count()
+    );
+
+    // This explicit TexturePtr reference-list overload is the typed 26.51
+    // equivalent of the texture-ref MeshHelpers entry used by old Praxis. It
+    // is a different exported overload from TextureVariant + generation mode.
+    auto const submitStarted = std::chrono::steady_clock::now();
     MeshHelpers::renderMeshImmediately(
         screenContext,
         tessellator,
         material,
-        terrainTexture,
-        SupplementaryFieldAutoGenerationMode{1},
+        {std::cref(terrainTexture)},
         emptyOffscreenCaptureDescription()
     );
+    result.submitMicros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - submitStarted
+        ).count()
+    );
+    return result;
 }
 
 } // namespace
@@ -235,19 +410,25 @@ void submitProjectionMeshPass(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // The default 26.51 candidate replays the separately generated Praxis
-    // true/false stream through ScreenContext's own Tessellator and the typed
-    // MeshHelpers immediate entry. The Phase 3C retained mesh remains present
-    // and is used only by the diagnostic switch or an explicit fail-closed
-    // section fallback.
+    // PraxisExactReplay preserves every typed native stream, replaces packed
+    // color only, and submits all compatible sections as one texture-ref batch.
+    // Retained meshes exist only for a section whose exact build failed, or in
+    // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
     bool nativeLiquidDrawnWithSignText{};
     if (renderAlphaLayer) {
+        auto& telemetry = state.nativeLiquidTelemetry;
+        telemetry.praxisCompatImmediateSubmitsPerFrame = 0;
+        telemetry.praxisCompatVerticesReplayedPerFrame = 0;
+        telemetry.praxisCompatReplayMicros = 0;
+        telemetry.praxisCompatSubmitMicros = 0;
         for (std::size_t section = 0;
              section < state.nativeLiquidSectionMeshes.size();
-             ++section) {
+            ++section) {
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
-            auto const& compat = state.praxisCompatLiquidSections[section];
+            auto const* compat = section < state.praxisCompatLiquidSections.size()
+                ? state.praxisCompatLiquidSections[section].get()
+                : nullptr;
             if ((mesh && mesh->isValid()) || (compat && compat->ready())) {
                 nativeLiquidSections.push_back(section);
             }
@@ -261,48 +442,81 @@ void submitProjectionMeshPass(
         );
         if (!nativeLiquidSections.empty()) {
             if (auto const* signText = render::resolveSignTextMaterial()) {
-                state.nativeLiquidTelemetry.nativeLiquidSignTextResolved = 1;
-                state.nativeLiquidTelemetry.praxisCompatSignTextResolved = 1;
+                telemetry.nativeLiquidSignTextResolved = 1;
+                telemetry.praxisCompatSignTextResolved = 1;
                 if (!gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
                     logger().info("NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text");
                 }
-                state.nativeLiquidTelemetry.praxisCompatTerrainTextureReady =
-                    state.terrainTextureVariant ? 1U : 0U;
-                auto const usePraxisCompat =
+                telemetry.praxisCompatTerrainTextureReady =
+                    state.terrainTexture ? 1U : 0U;
+                auto const usePraxisExactReplay =
                     ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
-                    && state.terrainTextureVariant.has_value();
+                    && state.terrainTexture.has_value();
+                std::vector<std::size_t> exactSections;
+                std::vector<std::size_t> retainedSections;
                 for (auto const section : nativeLiquidSections) {
                     auto const& compat = state.praxisCompatLiquidSections[section];
-                    if (usePraxisCompat && compat && compat->ready()) {
+                    if (usePraxisExactReplay && compat && compat->ready()) {
+                        exactSections.push_back(section);
+                    } else {
+                        retainedSections.push_back(section);
+                    }
+                }
+
+                if (!exactSections.empty()) {
+                    if (state.praxisCompatLiquidAggregateDirty
+                        || state.praxisCompatLiquidAggregateOrder != exactSections) {
+                        auto const aggregateStarted = std::chrono::steady_clock::now();
+                        state.praxisCompatLiquidAggregate =
+                            buildPraxisExactReplayAggregate(state, exactSections);
+                        state.praxisCompatLiquidAggregateOrder = exactSections;
+                        state.praxisCompatLiquidAggregateDirty = false;
+                        ++telemetry.praxisCompatAggregateBuilds;
+                        telemetry.praxisCompatReplayMicros +=
+                            static_cast<std::uint64_t>(
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - aggregateStarted
+                                ).count()
+                            );
+                    }
+
+                    auto submitExact = [&](PraxisCompatLiquidSectionData const& data) {
                         ScopedShaderColorWhite shaderColorWhite{
                             renderContext.mScreenContext
                         };
-                        state.nativeLiquidTelemetry.praxisCompatShaderColorWhite = 1;
-                        submitPraxisCompatLiquidImmediately(
+                        telemetry.praxisCompatShaderColorWhite = 1;
+                        auto const submitted = submitPraxisExactReplayImmediately(
                             renderContext.mScreenContext,
-                            *compat,
+                            data,
                             *signText,
-                            *state.terrainTextureVariant
+                            *state.terrainTexture
                         );
-                        ++state.nativeLiquidTelemetry.praxisCompatImmediateSubmits;
-                        if (!gPraxisCompatBuildLogged.exchange(
-                                true,
-                                std::memory_order_acq_rel
-                            )) {
-                            auto const& telemetry = state.nativeLiquidTelemetry;
-                            logger().info(
-                                "PRAXIS_COMPAT_LIQUID_BUILD generationBeginFlag=1 tessellateFlag=0 layer=3 uvRemapped={} culled={} derivedColors={} shaderColorWhite={} submitPath=MeshHelpers::renderMeshImmediately material=sign_text terrainTextureReady={} immediateSubmits={}",
-                                telemetry.praxisCompatUvRemappedVertices,
-                                telemetry.praxisCompatVerticesCulled,
-                                telemetry.praxisCompatDerivedColorVertices,
-                                telemetry.praxisCompatShaderColorWhite,
-                                telemetry.praxisCompatTerrainTextureReady,
-                                telemetry.praxisCompatImmediateSubmits
-                            );
-                        }
-                        continue;
-                    }
+                        ++telemetry.praxisCompatImmediateSubmits;
+                        ++telemetry.praxisCompatImmediateSubmitsPerFrame;
+                        telemetry.praxisCompatVerticesReplayedPerFrame
+                            += submitted.vertices;
+                        telemetry.praxisCompatReplayMicros += submitted.replayMicros;
+                        telemetry.praxisCompatSubmitMicros += submitted.submitMicros;
+                        telemetry.praxisCompatFullNativeStreamsPreserved = 1;
+                        telemetry.praxisCompatTextureRefSubmit = 1;
+                        telemetry.praxisCompatTerrainTextureBound = 1;
+                        nativeLiquidDrawnWithSignText = true;
+                    };
 
+                    if (state.praxisCompatLiquidAggregate
+                        && state.praxisCompatLiquidAggregate->ready()) {
+                        submitExact(*state.praxisCompatLiquidAggregate);
+                    } else {
+                        // Cross-section stream layouts can theoretically differ.
+                        // Fall back to one bulk typed stream copy per section,
+                        // never to per-vertex color/tex2/vertex re-emission.
+                        for (auto const section : exactSections) {
+                            submitExact(*state.praxisCompatLiquidSections[section]);
+                        }
+                    }
+                }
+
+                for (auto const section : retainedSections) {
                     auto const& mesh = state.nativeLiquidSectionMeshes[section];
                     if (!mesh || !mesh->isValid()) continue;
                     mesh->renderMesh(
@@ -314,12 +528,36 @@ void submitProjectionMeshPass(
                         emptyOffscreenCaptureDescription(),
                         nullptr
                     );
-                    ++state.nativeLiquidTelemetry.nativeLiquidSignTextDraws;
+                    ++telemetry.nativeLiquidSignTextDraws;
                     if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
-                        ++state.nativeLiquidTelemetry.praxisCompatRetainedFallbackDraws;
+                        ++telemetry.praxisCompatRetainedFallbackDraws;
                     }
+                    nativeLiquidDrawnWithSignText = true;
                 }
-                nativeLiquidDrawnWithSignText = true;
+
+                if (!exactSections.empty()
+                    && !gPraxisExactReplayLogged.exchange(
+                        true,
+                        std::memory_order_acq_rel
+                    )) {
+                    logger().info(
+                        "PRAXIS_EXACT_REPLAY path=PraxisExactReplay generationBeginFlag=1 tessellateFlag=0 layer=3 uvRemapped={} culled={} derivedColors={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} submitPath=MeshHelpers::renderMeshImmediately(texture-refs) material=sign_text submitPerFrame={} verticesReplayed={} replayMicros={} submitMicros={} retainedFallbackDraws={}",
+                        telemetry.praxisCompatUvRemappedVertices,
+                        telemetry.praxisCompatVerticesCulled,
+                        telemetry.praxisCompatDerivedColorVertices,
+                        telemetry.praxisCompatFullNativeStreamsPreserved,
+                        telemetry.praxisCompatTextureRefSubmit,
+                        telemetry.praxisCompatTerrainTextureBound,
+                        telemetry.praxisCompatPerVertexReemit,
+                        telemetry.praxisCompatDoubleLiquidBuildSections,
+                        telemetry.praxisCompatShaderColorWhite,
+                        telemetry.praxisCompatImmediateSubmitsPerFrame,
+                        telemetry.praxisCompatVerticesReplayedPerFrame,
+                        telemetry.praxisCompatReplayMicros,
+                        telemetry.praxisCompatSubmitMicros,
+                        telemetry.praxisCompatRetainedFallbackDraws
+                    );
+                }
             } else if (!gSignTextUnavailableLogged.exchange(
                            true,
                            std::memory_order_acq_rel

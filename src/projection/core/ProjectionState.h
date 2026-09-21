@@ -114,6 +114,9 @@ struct ProjectionState {
     std::vector<std::unique_ptr<mce::Mesh>> wrongOutlineSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> nativeLiquidSectionMeshes;
     std::vector<std::unique_ptr<PraxisCompatLiquidSectionData>> praxisCompatLiquidSections;
+    std::unique_ptr<PraxisCompatLiquidSectionData> praxisCompatLiquidAggregate;
+    std::vector<std::size_t>                       praxisCompatLiquidAggregateOrder;
+    bool                                           praxisCompatLiquidAggregateDirty{true};
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
     std::vector<std::size_t>                nativeLiquidSectionCellCounts;
     std::vector<std::size_t>                liquidProxySectionCellCounts;

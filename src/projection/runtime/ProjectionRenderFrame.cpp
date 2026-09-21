@@ -302,7 +302,8 @@ void renderProjection(
         auto const liquidMeshes = countValid(state.liquidProxySectionMeshes);
         auto const placeholderMeshes = countValid(state.blockEntityPlaceholderSectionMeshes);
         if (normalMeshes + warningMeshes + outlineMeshes + wrongFillMeshes
-            + wrongOutlineMeshes + nativeLiquidMeshes + liquidMeshes + placeholderMeshes != 0) {
+            + wrongOutlineMeshes + nativeLiquidMeshes + praxisCompatLiquidSections
+            + liquidMeshes + placeholderMeshes != 0) {
             state.meshPreflightDone = true;
             auto const& telemetry = state.nativeLiquidTelemetry;
             logger().info(
@@ -335,9 +336,9 @@ void renderProjection(
                 liquidMeshes
             );
             logger().info(
-                "PRAXIS_COMPAT_LIQUID_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} buildSections={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} retainedFallbackDraws={} compatSections={}",
+                "PRAXIS_EXACT_REPLAY_TELEMETRY path={} attempted={} positive={} zero={} failure={} vertices={} uvRemapped={} uvFailures={} beforeCull={} culled={} afterCull={} facePairs={} cullSkipped={} derivedColors={} buildSections={} positions={} normals={} tangents={} colors={} boneIds={} uv0={} uv1={} uv2={} pbr={} mers={} geoType={} quadInfo={} fullNativeStreamsPreserved={} textureRefSubmit={} terrainTextureBound={} perVertexReemit={} doubleLiquidBuild={} shaderColorWhite={} signTextResolved={} terrainTextureReady={} immediateSubmits={} submitPerFrame={} verticesReplayedPerFrame={} replayMicros={} submitMicros={} aggregateBuilds={} retainedFallbackDraws={} compatSections={}",
                 ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
-                    ? "PraxisCompat" : "LHoloRetained",
+                    ? "PraxisExactReplay" : "LHoloRetained",
                 telemetry.praxisCompatCellsAttempted,
                 telemetry.praxisCompatTessellationPositive,
                 telemetry.praxisCompatTessellationZero,
@@ -352,10 +353,32 @@ void renderProjection(
                 telemetry.praxisCompatCullSkipped,
                 telemetry.praxisCompatDerivedColorVertices,
                 telemetry.praxisCompatBuildSections,
+                telemetry.praxisCompatCapturedPositions,
+                telemetry.praxisCompatCapturedNormals,
+                telemetry.praxisCompatCapturedTangents,
+                telemetry.praxisCompatCapturedColors,
+                telemetry.praxisCompatCapturedBoneIds,
+                telemetry.praxisCompatCapturedUv0,
+                telemetry.praxisCompatCapturedUv1,
+                telemetry.praxisCompatCapturedUv2,
+                telemetry.praxisCompatCapturedPbrTextureIndices,
+                telemetry.praxisCompatCapturedMers,
+                telemetry.praxisCompatCapturedGeoType,
+                telemetry.praxisCompatCapturedQuadInfo,
+                telemetry.praxisCompatFullNativeStreamsPreserved,
+                telemetry.praxisCompatTextureRefSubmit,
+                telemetry.praxisCompatTerrainTextureBound,
+                telemetry.praxisCompatPerVertexReemit,
+                telemetry.praxisCompatDoubleLiquidBuildSections,
                 telemetry.praxisCompatShaderColorWhite,
                 telemetry.praxisCompatSignTextResolved,
                 telemetry.praxisCompatTerrainTextureReady,
                 telemetry.praxisCompatImmediateSubmits,
+                telemetry.praxisCompatImmediateSubmitsPerFrame,
+                telemetry.praxisCompatVerticesReplayedPerFrame,
+                telemetry.praxisCompatReplayMicros,
+                telemetry.praxisCompatSubmitMicros,
+                telemetry.praxisCompatAggregateBuilds,
                 telemetry.praxisCompatRetainedFallbackDraws,
                 praxisCompatLiquidSections
             );

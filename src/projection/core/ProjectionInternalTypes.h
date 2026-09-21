@@ -1,8 +1,9 @@
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
-// Internal value types shared by projection implementation units. These types
-// own no game or rendering resources and contain no behavior.
+// Internal value types shared by projection implementation units. The exact
+// replay payload owns a CPU-side copy of native MeshData; GPU ownership remains
+// with Minecraft's immediate submission path.
 
 #pragma once
 
@@ -14,9 +15,9 @@
 #include <tuple>
 #include <vector>
 
-#include <glm/vec2.hpp>
-#include <glm/vec3.hpp>
-
+#include "mc/client/renderer/TessellatorQuadInfo.h"
+#include "mc/deps/core/math/Vec3.h"
+#include "mc/deps/minecraft_renderer/renderer/MeshData.h"
 #include "mc/world/level/BlockPos.h"
 
 class Block;
@@ -38,24 +39,59 @@ inline constexpr NativeLiquidRenderPath ActiveNativeLiquidRenderPath =
     NativeLiquidRenderPath::PraxisCompat;
 #endif
 
+struct PraxisCompatTessellatorState {
+    bool                                  isFormatFixed{};
+    bool                                  hasNormals{};
+    bool                                  indexPhase{};
+    bool                                  noColor{};
+    bool                                  buildFaceData{};
+    unsigned char                         quadFacing{};
+    bool                                  quadTwoSided{};
+    int                                   curQuadVertex{};
+    std::uint32_t                         count{};
+    std::uint32_t                         maxVertexCount{};
+    Vec3                                  faceCenterAccumulator{};
+    std::vector<TessellatorQuadInfo>       quadInfo;
+};
+
+// The native MeshData copy is the canonical stream. In particular, its
+// mColors remain the untouched BlockTessellator output. Only derivedColors is
+// LHolo-owned, so exact replay can replace packed color without reconstructing
+// positions, normals, tangents, UVs or supplementary streams vertex-by-vertex.
 struct PraxisCompatLiquidSectionData {
-    std::vector<glm::vec3> positions;
-    std::vector<glm::vec2> uv0;
-    std::vector<std::uint32_t> sourceColors;
+    std::unique_ptr<mce::MeshData> nativeStream;
     std::vector<std::uint32_t> derivedColors;
+    PraxisCompatTessellatorState tessellatorState;
 
     [[nodiscard]] bool ready() const noexcept {
-        return !positions.empty()
-            && positions.size() % 4U == 0U
-            && uv0.size() == positions.size()
-            && sourceColors.size() == positions.size()
-            && derivedColors.size() == positions.size();
+        if (!nativeStream) return false;
+        auto const vertexCount = nativeStream->mPositions.get().size();
+        auto const fullOrEmpty = [vertexCount](std::size_t count) {
+            return count == 0U || count == vertexCount;
+        };
+        auto const& quadInfo = tessellatorState.quadInfo;
+        return vertexCount != 0U
+            && vertexCount % 4U == 0U
+            && nativeStream->mMode == mce::PrimitiveMode::QuadList
+            && nativeStream->mIndices.get().empty()
+            && nativeStream->mColors.get().size() == vertexCount
+            && nativeStream->mTextureUVs[0].get().size() == vertexCount
+            && fullOrEmpty(nativeStream->mNormals.get().size())
+            && fullOrEmpty(nativeStream->mTangents.get().size())
+            && fullOrEmpty(nativeStream->mBoneId0s.get().size())
+            && fullOrEmpty(nativeStream->mTextureUVs[1].get().size())
+            && fullOrEmpty(nativeStream->mTextureUVs[2].get().size())
+            && fullOrEmpty(nativeStream->mPBRTextureIndices.get().size())
+            && fullOrEmpty(nativeStream->mMERS.get().size())
+            && fullOrEmpty(nativeStream->mGeoType.get().size())
+            && (quadInfo.empty() || quadInfo.size() == vertexCount / 4U)
+            && derivedColors.size() == vertexCount;
     }
 };
 
-// Cumulative Phase-2 counters. Async section builds accumulate into their
-// snapshot and merge into the active state only after a matching revision is
-// accepted, so discarded worker results never claim a native-liquid success.
+// Native-liquid counters. Build counters accumulate in worker snapshots and
+// merge only after a matching revision is accepted; the explicit PerFrame and
+// timing fields are refreshed by the active render owner.
 struct NativeLiquidTelemetry {
     std::uint64_t nativeLiquidCellsAttempted{};
     std::uint64_t nativeLiquidTessellationPositive{};
@@ -85,11 +121,33 @@ struct NativeLiquidTelemetry {
     std::uint64_t praxisCompatCullSkipped{};
     std::uint64_t praxisCompatDerivedColorVertices{};
     std::uint64_t praxisCompatBuildSections{};
+    std::uint64_t praxisCompatCapturedPositions{};
+    std::uint64_t praxisCompatCapturedNormals{};
+    std::uint64_t praxisCompatCapturedTangents{};
+    std::uint64_t praxisCompatCapturedColors{};
+    std::uint64_t praxisCompatCapturedBoneIds{};
+    std::uint64_t praxisCompatCapturedUv0{};
+    std::uint64_t praxisCompatCapturedUv1{};
+    std::uint64_t praxisCompatCapturedUv2{};
+    std::uint64_t praxisCompatCapturedPbrTextureIndices{};
+    std::uint64_t praxisCompatCapturedMers{};
+    std::uint64_t praxisCompatCapturedGeoType{};
+    std::uint64_t praxisCompatCapturedQuadInfo{};
+    std::uint64_t praxisCompatDoubleLiquidBuildSections{};
     std::uint64_t praxisCompatShaderColorWhite{};
     std::uint64_t praxisCompatSignTextResolved{};
     std::uint64_t praxisCompatTerrainTextureReady{};
     std::uint64_t praxisCompatImmediateSubmits{};
     std::uint64_t praxisCompatRetainedFallbackDraws{};
+    std::uint64_t praxisCompatFullNativeStreamsPreserved{};
+    std::uint64_t praxisCompatTextureRefSubmit{};
+    std::uint64_t praxisCompatTerrainTextureBound{};
+    std::uint64_t praxisCompatPerVertexReemit{};
+    std::uint64_t praxisCompatImmediateSubmitsPerFrame{};
+    std::uint64_t praxisCompatVerticesReplayedPerFrame{};
+    std::uint64_t praxisCompatReplayMicros{};
+    std::uint64_t praxisCompatSubmitMicros{};
+    std::uint64_t praxisCompatAggregateBuilds{};
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};

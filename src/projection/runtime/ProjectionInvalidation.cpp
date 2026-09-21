@@ -149,6 +149,9 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& mesh : state.wrongOutlineSectionMeshes) mesh.reset();
         for (auto& mesh : state.nativeLiquidSectionMeshes) mesh.reset();
         for (auto& data : state.praxisCompatLiquidSections) data.reset();
+        state.praxisCompatLiquidAggregate.reset();
+        state.praxisCompatLiquidAggregateOrder.clear();
+        state.praxisCompatLiquidAggregateDirty = true;
         for (auto& mesh : state.liquidProxySectionMeshes) mesh.reset();
         std::fill(
             state.nativeLiquidSectionCellCounts.begin(),

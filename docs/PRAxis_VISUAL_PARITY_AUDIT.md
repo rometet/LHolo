@@ -456,8 +456,8 @@ LiquidProxyがfail-closed fallbackとして残る。
 | face cull | Phase 3C `mce::MeshData` stable compaction | typed fields |
 | shader color | `ScreenContext` → public `mce::MeshContext::currentShaderColor`; `ShaderColor::color/dirty` | typed fields |
 | material | `resolveSignTextMaterial()` exact `sign_text` lookup | typed material table |
-| terrain texture | existing `LevelRenderer::mAtlasTexture` → `TextureVariant` | typed field/value |
-| immediate submit | `MeshHelpers::renderMeshImmediately(ScreenContext&, Tessellator&, MaterialPtr, TextureVariant, ...)` | exported MCAPI |
+| terrain texture | existing `LevelRenderer::mAtlasTexture` → live `mce::TexturePtr` | typed field/value |
+| immediate submit | `MeshHelpers::renderMeshImmediately(..., initializer_list<reference_wrapper<TexturePtr const>>, ...)` | exported MCAPI texture-ref overload |
 
 この監査によりshader whiteとimmediate submissionの双方が26.51 Fake Headersで公開されている。
 Praxis 1.21.132の`ScreenContext +0x30`、MeshHelpers RVA、signature、raw stream offsetは使用しない。
@@ -467,8 +467,8 @@ Praxis 1.21.132の`ScreenContext +0x30`、MeshHelpers RVA、signature、raw stre
 
 PraxisCompatはnative layer 3で`begin=true`、`tessellate=false`を使用し、Phase 3B UV remapと
 Phase 3C cullerを同じ順序で適用する。現LHoloの`applyGhostAppearanceAbgr()`はこのpayloadへ
-適用しない。native source colorは`sourceColors`へ保持し、別の`derivedColors`だけをPraxis
-`ExistingCurrent`のMissing契約で生成する。
+適用しない。native `mce::MeshData::mColors`をcanonical sourceとして保持し、別の
+`derivedColors`だけをPraxis `ExistingCurrent`のMissing契約で生成する。
 
 ```text
 intensity = max(source.r, source.g, source.b)
@@ -479,18 +479,72 @@ derived.rgb = normalized + (missingTint - normalized) * strength
 derived.a = 255
 ```
 
-描画時はsection payloadをScreenContext所有Tessellatorへ公開`color/tex2/vertex` APIでreplayし、
-typed `currentShaderColor`を一時的に`(1,1,1,1)`へ設定してから、exact `sign_text`と既存terrain
-`TextureVariant`を`MeshHelpers::renderMeshImmediately()`へ渡す。submit後は元shader colorを
-復元しdirty flagを立てる。
+### Compatibility runtime結果とExact Replayへの更新
+
+最初のCompatibility candidateはruntimeでtessellation/UV/cull/color/shader/materialを通過したが、
+terrain water textureは灰色面となり、20 sectionを毎frame `color/tex2/vertex`で再emitしたため
+`immediateSubmits=374`まで増加してperformance regressionが確認された。この経路はproduction
+candidateから退役した。
+
+Exact ReplayはPhase 3C後の`mce::MeshData` copy constructorで以下をまとめて保持する。
+
+```text
+mPositions / mNormals / mTangents / mIndices / mColors / mBoneId0s
+mTextureUVs[0..2] / mPBRTextureIndices / mMERS / mGeoType
+mFieldEnabled / mAABB / mUVAABB
+mQuadInfoList
+replayに必要なtyped Tessellator state
+```
+
+native `mColors`は変更せず、ScreenContext Tessellatorへ全`MeshData`を一括copyした後、そのcopyの
+`mColors`だけを`derivedColors`へ差し替える。per-vertex `color/tex2/vertex`呼出は0である。
+同じprojection origin local-spaceのready sectionはback-to-front section orderで1つのaggregateへ
+連結し、通常1 frame / 1 immediate submitとする。field layoutがsection間で一致しない場合だけ、
+各sectionの全stream一括copyへfail-closedする。
+
+default PraxisExactReplay buildではcompat streamを先に1回だけ生成し、成功sectionについて旧
+retained liquid tessellationを実行しない。compat失敗sectionだけ旧retained/proxyへfallbackする。
+診断defineでは従来どおりretainedだけを生成する。
+
+### Texture-ref overload監査
+
+26.51 Fake Headersには`renderMeshImmediately`が6 overload公開されている。旧candidateが使用した
+`TextureVariant + SupplementaryFieldAutoGenerationMode` overloadから、次の明示的texture-ref
+overloadへ変更した。
+
+```cpp
+MeshHelpers::renderMeshImmediately(
+    ScreenContext&,
+    Tessellator&,
+    MaterialPtr const&,
+    std::initializer_list<std::reference_wrapper<mce::TexturePtr const>>,
+    OffscreenCaptureDescription const&
+);
+```
+
+Release DLLのimport tableで次の26.51 symbolを確認した。
+
+```text
+?renderMeshImmediately@MeshHelpers@@YAXAEAVScreenContext@@AEAVTessellator@@
+AEBVMaterialPtr@mce@@V?$initializer_list@V?$reference_wrapper@$$CBVTexturePtr@
+mce@@@std@@@std@@AEBUOffscreenCaptureDescription@@@Z
+```
+
+これは`TexturePtr`参照リストを直接受ける公開entryであり、旧Praxisが手作業で接続した
+texture-ref entryと同じ引数意味論である。`TextureVariant`が内部でtexture-ref listへ変換される
+とは仮定しない。live terrain atlas `TexturePtr`をこのoverloadへ直接渡す。sign_textによる実際の
+UV0 sampling結果はruntime視覚確認事項であり、静的監査だけではPASSとしない。
+
+typed `currentShaderColor`をsubmit中だけ`(1,1,1,1)`へ設定し、submit後は元値を復元してdirty flagを
+立てる。追加private ABI、RVA、signature scanは0である。
 
 主要runtime marker:
 
 ```text
 PRAXIS_COMPAT_LIQUID_COLOR
-PRAXIS_COMPAT_LIQUID_BUILD
-PRAXIS_COMPAT_LIQUID_TELEMETRY
+PRAXIS_EXACT_REPLAY
+PRAXIS_EXACT_REPLAY_TELEMETRY
 ```
 
-Compatibility pathのbuild、logic test、Release linkはPASS。Minecraft runtimeおよび視覚結果は
-未確認であり、`PRAXIS_COMPAT_LIQUID_VISUAL_PARITY`はユーザー確認まで未判定とする。
+Exact Replayのbuild、logic test、Release linkはPASS。Minecraft runtime、terrain textureの視覚、
+frame performanceは未確認であり、`PRAXIS_EXACT_REPLAY_VISUAL_PARITY`はユーザー確認まで未判定とする。

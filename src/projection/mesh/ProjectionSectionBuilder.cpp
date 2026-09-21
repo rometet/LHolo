@@ -623,25 +623,51 @@ void buildProjectionSection(
         failedTessellationIndices.end()
     );
 
-    auto nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
-        state,
-        tessellator,
-        blockTessellator,
-        region,
-        section,
-        uploadMode,
-        sectionBuildSettings
-    );
-    auto praxisCompatLiquidSucceeded = detail::buildPraxisCompatLiquidSectionData(
-        state,
-        tessellator,
-        blockTessellator,
-        section,
-        sectionBuildSettings
-    );
-    auto const& liquidOwnership =
-        ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat
-            && state.praxisCompatLiquidSections[section]
+    std::vector<std::size_t> nativeLiquidSucceeded;
+    std::vector<std::size_t> praxisCompatLiquidSucceeded;
+    if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
+        auto const compatAttemptsBefore =
+            state.nativeLiquidTelemetry.praxisCompatCellsAttempted;
+        praxisCompatLiquidSucceeded = detail::buildPraxisCompatLiquidSectionData(
+            state,
+            tessellator,
+            blockTessellator,
+            section,
+            sectionBuildSettings
+        );
+        if (state.praxisCompatLiquidSections[section]) {
+            // The exact replay stream owns this section. Do not spend a second
+            // BlockTessellator pass building the retained comparison mesh.
+            state.nativeLiquidSectionMeshes[section].reset();
+            state.nativeLiquidSectionCellCounts[section] = 0U;
+        } else if (state.nativeLiquidTelemetry.praxisCompatCellsAttempted
+                   != compatAttemptsBefore) {
+            // Build the old route only as a section-local fail-closed fallback.
+            // Successful PraxisExactReplay sections never enter this branch.
+            ++state.nativeLiquidTelemetry.praxisCompatDoubleLiquidBuildSections;
+            nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
+                state,
+                tessellator,
+                blockTessellator,
+                region,
+                section,
+                uploadMode,
+                sectionBuildSettings
+            );
+        }
+    } else {
+        state.praxisCompatLiquidSections[section].reset();
+        nativeLiquidSucceeded = detail::buildNativeLiquidSectionMesh(
+            state,
+            tessellator,
+            blockTessellator,
+            region,
+            section,
+            uploadMode,
+            sectionBuildSettings
+        );
+    }
+    auto const& liquidOwnership = state.praxisCompatLiquidSections[section]
         ? praxisCompatLiquidSucceeded
         : nativeLiquidSucceeded;
     detail::buildLiquidProxySectionMesh(
@@ -1232,19 +1258,47 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
-    auto compat = std::make_unique<PraxisCompatLiquidSectionData>();
-    compat->positions = positions;
-    compat->uv0 = uvs;
-    compat->sourceColors = colors;
-    compat->derivedColors.reserve(colors.size());
-    for (auto const source : colors) {
-        compat->derivedColors.push_back(applyPraxisCompatMissingAbgr(source));
-    }
-    for (auto& vertex : compat->positions) {
+    // Convert the complete native stream into projection-origin local space.
+    // Supplementary vectors remain byte-for-byte/native-value copies.
+    for (auto& vertex : positions) {
         vertex.x -= static_cast<float>(origin.x);
         vertex.y -= static_cast<float>(origin.y);
         vertex.z -= static_cast<float>(origin.z);
     }
+    for (auto& quad : tessellator.mQuadInfoList.get()) {
+        auto& centroid = quad.centroid.get();
+        centroid.x -= static_cast<float>(origin.x);
+        centroid.y -= static_cast<float>(origin.y);
+        centroid.z -= static_cast<float>(origin.z);
+    }
+    auto minimum = positions.front();
+    auto maximum = positions.front();
+    for (auto const& position : positions) {
+        minimum = glm::min(minimum, position);
+        maximum = glm::max(maximum, position);
+    }
+    meshData.mAABB.get() = {minimum, maximum};
+
+    auto compat = std::make_unique<PraxisCompatLiquidSectionData>();
+    compat->derivedColors.reserve(colors.size());
+    for (auto const source : colors) {
+        compat->derivedColors.push_back(applyPraxisCompatMissingAbgr(source));
+    }
+    compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
+    compat->tessellatorState = {
+        .isFormatFixed        = tessellator.mIsFormatFixed,
+        .hasNormals           = tessellator.mHasNormals,
+        .indexPhase           = tessellator.mIndexPhase,
+        .noColor              = tessellator.mNoColor,
+        .buildFaceData        = tessellator.mBuildFaceData,
+        .quadFacing           = tessellator.mQuadFacing,
+        .quadTwoSided         = tessellator.mQuadTwoSided,
+        .curQuadVertex        = tessellator.mCurQuadVertex,
+        .count                = tessellator.mCount,
+        .maxVertexCount       = tessellator.mMaxVertexCount,
+        .faceCenterAccumulator = tessellator.mFaceCenterAccumulator,
+        .quadInfo             = tessellator.mQuadInfoList.get()
+    };
     if (!compat->ready()) {
         ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
         tessellator.end(
@@ -1257,9 +1311,10 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     }
 
     if (!gPraxisCompatLiquidColorLogged.exchange(true, std::memory_order_acq_rel)) {
-        auto const sampleCount = std::min<std::size_t>(4U, compat->sourceColors.size());
+        auto const& sourceColors = compat->nativeStream->mColors.get();
+        auto const sampleCount = std::min<std::size_t>(4U, sourceColors.size());
         for (std::size_t sample = 0; sample < sampleCount; ++sample) {
-            auto const source = unpackAbgr(compat->sourceColors[sample]);
+            auto const source = unpackAbgr(sourceColors[sample]);
             auto const derived = unpackAbgr(compat->derivedColors[sample]);
             logger().info(
                 "PRAXIS_COMPAT_LIQUID_COLOR vertex={} sourceRGBA=({}, {}, {}, {}) derivedRGBA=({}, {}, {}, {})",
@@ -1278,6 +1333,27 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
 
     state.nativeLiquidTelemetry.praxisCompatDerivedColorVertices
         += compat->derivedColors.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedPositions += positions.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedNormals
+        += meshData.mNormals.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedTangents
+        += meshData.mTangents.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedColors += colors.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedBoneIds
+        += meshData.mBoneId0s.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv0 += uvs.size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv1
+        += meshData.mTextureUVs[1].get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedUv2
+        += meshData.mTextureUVs[2].get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedPbrTextureIndices
+        += meshData.mPBRTextureIndices.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedMers
+        += meshData.mMERS.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedGeoType
+        += meshData.mGeoType.get().size();
+    state.nativeLiquidTelemetry.praxisCompatCapturedQuadInfo
+        += compat->tessellatorState.quadInfo.size();
     ++state.nativeLiquidTelemetry.praxisCompatBuildSections;
     std::sort(succeeded.begin(), succeeded.end());
     tessellator.end(
