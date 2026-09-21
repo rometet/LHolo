@@ -546,5 +546,25 @@ PRAXIS_EXACT_REPLAY
 PRAXIS_EXACT_REPLAY_TELEMETRY
 ```
 
-Exact Replayのbuild、logic test、Release linkはPASS。Minecraft runtime、terrain textureの視覚、
-frame performanceは未確認であり、`PRAXIS_EXACT_REPLAY_VISUAL_PARITY`はユーザー確認まで未判定とする。
+Exact ReplayはMinecraft runtimeでもtexture sampling、`submitPerFrame=1`、`doubleLiquidBuild=0`、
+`perVertexReemit=0`を確認済みで、以前のFPS regressionは解消した。ただし水本体はPraxisより
+不透明に見えるため、`PRAXIS_EXACT_REPLAY_VISUAL_PARITY`は未達である。
+
+## Phase 4A: Blend-state parity
+
+Phase 4Aはgeometry、UV、packed RGB、vertex alpha=255、face cull、tessellator flags、texture-ref
+submit、shader color white、aggregate replayを固定し、Exact Replay submit中のblend stateだけを
+A/Bする。exact `sign_text`の`mce::RenderMaterial::blendStateDescription`を保存し、
+`ItemInHandRenderer::mMatBlendBlock`の同descriptionを型付き代入してsubmitした直後に完全復元する。
+`depthStencilStateDescription`を含む他のmaterial stateは変更しない。
+
+比較ログは`BlendStateDescription`の公開7フィールドだけから生成し、raw memory dumpは使わない。
+主要runtime markerは次のとおり。
+
+```text
+PRAXIS_LIQUID_BLEND_PARITY
+PRAXIS_LIQUID_BLEND_STATE_COMPARE
+```
+
+Phase 4Aのbuildとlogic testはPASS。水の透過差に対する因果はユーザーの同一fixture視覚確認まで
+未判定とし、`PHASE4A_BLEND_CAUSALITY`を先行してPASSにはしない。
