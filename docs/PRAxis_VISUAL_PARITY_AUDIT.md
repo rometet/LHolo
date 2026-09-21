@@ -184,7 +184,7 @@ Fake Headersには`RenderChunkBuilder::mQueues`がtyped fieldとして見える�
 
 ## 検証記録
 
-- `LHoloLogicTests`: 3677 checks、0 failures
+- `LHoloLogicTests`: 3721 checks、0 failures（Phase 3B UV remap casesを含む）
 - Release DLL build: success
 - Minecraft runtime telemetry: PASS（2026-09-21 14:39、正常終了）
 - GPU capture: NOT PERFORMED
@@ -273,4 +273,60 @@ Phase 3A runtime marker:
 NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text
 NATIVE_LIQUID_SIGN_TEXT_UNAVAILABLE material=sign_text
 PHASE3A_NATIVE_LIQUID_TELEMETRY
+```
+
+2026-09-21 23:26の同一fixture実機結果:
+
+```text
+PHASE3A_MATERIAL_CAUSALITY = SUPPORTED
+PHASE3A_VISIBILITY = PASS
+PHASE3A_TEXTURE_MAPPING = FAIL
+
+attempted=2972
+positive=2972
+vertices=59440
+uv0=59440
+signTextResolved=1
+signTextDraws=1190
+terrainBlendDraws=0
+legacyMaterialDraws=0
+proxyFallbackCells=0
+```
+
+native geometryが可視になったためmaterial因果は支持されたが、terrain atlas上の正しい
+liquid tileへUV0が対応していない。現在の問題を
+`NATIVE_LIQUID_UV_CONTRACT = FAIL` とする。
+
+## Phase 3B: typed liquid atlas UV remap
+
+Phase 3Bは各native liquid cellのtransformed `expectedLiquid`から
+`BlockGraphics::getForBlock()`、`getTexture(0, 0)`を呼び、公開
+`TextureUVCoordinateSet::_u0/_v0/_u1/_v1`だけをatlas rect authorityとする。
+water/lava名やtexture keyはhardcodeせず、raw atlas scanも行わない。
+
+各`BlockTessellator::tessellateInWorld()` callが追加したUV0 suffixだけを4頂点単位で
+source min/maxから正規化し、typed atlas rectへremapする。U/Vの頂点順は保持し、
+degenerate axisだけcanonical cornerへfallbackする。atlas rect、UV値、quad countの
+いずれかがinvalidならそのcellのtyped Tessellator suffixを巻き戻し、native success
+receiptを発行せず既存`LHoloLiquidProxy`へownershipを戻す。
+
+Phase 3Bで変更しない契約:
+
+```text
+sign_text material                  unchanged
+terrain TextureVariant             unchanged
+Tessellator::begin fifth flag       false
+tessellateInWorld final bool        true
+mRenderingLayer                     unchanged
+positions / colors / ghost alpha    unchanged
+sorting / upload / worker lifecycle unchanged
+internal face culling               not implemented
+```
+
+Phase 3B runtime marker:
+
+```text
+NATIVE_LIQUID_UV_REMAP
+NATIVE_LIQUID_UV_REMAP_FAILURE
+PHASE3B_NATIVE_LIQUID_TELEMETRY
 ```

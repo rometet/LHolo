@@ -9,6 +9,7 @@
 #include "projection/mesh/ProjectionSectionBuilder.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -26,9 +27,11 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "mc/client/renderer/SupplementaryFieldAutoGenerationMode.h"
+#include "mc/client/renderer/TessellatorQuadInfo.h"
 #include "mc/client/renderer/block/BlockGraphics.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
 #include "mc/client/renderer/texture/TextureUVCoordinateSet.h"
@@ -55,6 +58,92 @@ auto& logger() {
 }
 
 std::atomic_bool gNativeLiquidPositiveLogged{};
+std::atomic_bool gNativeLiquidUvRemapLogged{};
+std::atomic_bool gNativeLiquidUvFailureLogged{};
+
+// A UV failure must return the cell to LiquidProxy ownership. Restore every
+// typed Tessellator stream and the small amount of public builder state that
+// the rejected call advanced, without touching raw offsets or private ABI.
+struct TessellatorSuffixCheckpoint {
+    std::size_t positions{};
+    std::size_t normals{};
+    std::size_t tangents{};
+    std::size_t indices{};
+    std::size_t colors{};
+    std::size_t boneIds{};
+    std::array<std::size_t, 3> textureUvs{};
+    std::size_t pbrTextureIndices{};
+    std::size_t mers{};
+    std::size_t geoType{};
+    std::size_t quadInfo{};
+    std::uint32_t count{};
+    int curQuadVertex{};
+    bool hasNormals{};
+    bool indexPhase{};
+    bool noColor{};
+    unsigned char quadFacing{};
+    bool quadTwoSided{};
+    Vec3 faceCenterAccumulator{};
+    std::pair<glm::vec3, glm::vec3> aabb{};
+    std::pair<glm::vec2, glm::vec2> uvAabb{};
+    std::array<bool, 15> fieldEnabled{};
+
+    explicit TessellatorSuffixCheckpoint(Tessellator& tessellator) {
+        auto const& data = tessellator.mMeshData.get();
+        positions = data.mPositions.get().size();
+        normals = data.mNormals.get().size();
+        tangents = data.mTangents.get().size();
+        indices = data.mIndices.get().size();
+        colors = data.mColors.get().size();
+        boneIds = data.mBoneId0s.get().size();
+        for (std::size_t uv = 0; uv < textureUvs.size(); ++uv) {
+            textureUvs[uv] = data.mTextureUVs[uv].get().size();
+        }
+        pbrTextureIndices = data.mPBRTextureIndices.get().size();
+        mers = data.mMERS.get().size();
+        geoType = data.mGeoType.get().size();
+        quadInfo = tessellator.mQuadInfoList.get().size();
+        count = tessellator.mCount;
+        curQuadVertex = tessellator.mCurQuadVertex;
+        hasNormals = tessellator.mHasNormals;
+        indexPhase = tessellator.mIndexPhase;
+        noColor = tessellator.mNoColor;
+        quadFacing = tessellator.mQuadFacing;
+        quadTwoSided = tessellator.mQuadTwoSided;
+        faceCenterAccumulator = tessellator.mFaceCenterAccumulator;
+        aabb = data.mAABB.get();
+        uvAabb = data.mUVAABB.get();
+        fieldEnabled = data.mFieldEnabled.get();
+    }
+
+    void restore(Tessellator& tessellator) const {
+        auto& data = tessellator.mMeshData.get();
+        data.mPositions.get().resize(positions);
+        data.mNormals.get().resize(normals);
+        data.mTangents.get().resize(tangents);
+        data.mIndices.get().resize(indices);
+        data.mColors.get().resize(colors);
+        data.mBoneId0s.get().resize(boneIds);
+        for (std::size_t uv = 0; uv < textureUvs.size(); ++uv) {
+            data.mTextureUVs[uv].get().resize(textureUvs[uv]);
+        }
+        data.mPBRTextureIndices.get().resize(pbrTextureIndices);
+        data.mMERS.get().resize(mers);
+        data.mGeoType.get().resize(geoType);
+        tessellator.mQuadInfoList.get().resize(quadInfo);
+        tessellator.mCount = count;
+        tessellator.mCurQuadVertex = curQuadVertex;
+        tessellator.mHasNormals = hasNormals;
+        tessellator.mIndexPhase = indexPhase;
+        tessellator.mNoColor = noColor;
+        tessellator.mQuadFacing = quadFacing;
+        tessellator.mQuadTwoSided = quadTwoSided;
+        tessellator.mFaceCenterAccumulator = faceCenterAccumulator;
+        data.mAABB.get() = aabb;
+        data.mUVAABB.get() = uvAabb;
+        data.mFieldEnabled.get() = fieldEnabled;
+    }
+};
 
 // Litematica's default schematic overlay palette, converted from ARGB to the
 // ABGR byte order of the tessellator vertex color buffer.
@@ -496,6 +585,26 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                 }
             }
         }
+        NativeLiquidAtlasRect atlasRect{};
+        if (graphics) {
+            auto const& texture = graphics->getTexture(0, 0);
+            atlasRect = {texture._u0, texture._v0, texture._u1, texture._v1};
+        }
+        if (!graphics || !isValidNativeLiquidAtlasRect(atlasRect)) {
+            ++state.nativeLiquidTelemetry.nativeLiquidUvRemapFailures;
+            if (!gNativeLiquidUvFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().warn(
+                    "NATIVE_LIQUID_UV_REMAP_FAILURE type={} reason=invalid_atlas_rect atlas=({}, {}, {}, {})",
+                    expectedLiquid->getTypeName(),
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1
+                );
+            }
+            continue;
+        }
+        ++state.nativeLiquidTelemetry.nativeLiquidUvAtlasResolvedCells;
         logger().debug(
             "NATIVE_LIQUID_RENDER_LAYERS type={} pos=({}, {}, {}) primary={} mask=0x{:X}",
             expectedLiquid->getTypeName(),
@@ -506,8 +615,14 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
             layerMask
         );
 
+        TessellatorSuffixCheckpoint const cellCheckpoint{tessellator};
         bool cellPositive{};
         bool cellFailure{};
+        bool cellUvFailure{};
+        std::uint64_t cellVertices{};
+        std::uint64_t cellUvVertices{};
+        std::uint64_t cellColorVertices{};
+        std::uint64_t cellAlphaModifiedVertices{};
         bool lastReturned{};
         std::size_t lastPositionsBefore{};
         std::size_t lastPositionsAfter{};
@@ -578,6 +693,48 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
             lastLayer = layerValue;
             if (!geometryAdded) continue;
 
+            auto const added = positionsAfter - positionsBefore;
+            auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+            NativeLiquidUvRemapDiagnostics uvDiagnostics{};
+            auto const uvRemapped = addedUvs == added
+                && remapNativeLiquidUvToAtlas(
+                    std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
+                    atlasRect,
+                    &uvDiagnostics
+                );
+            if (!uvRemapped) {
+                cellCheckpoint.restore(tessellator);
+                cellPositive = false;
+                cellUvFailure = true;
+                if (!gNativeLiquidUvFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                    logger().warn(
+                        "NATIVE_LIQUID_UV_REMAP_FAILURE type={} reason=invalid_uv_suffix positions={} uv0={}",
+                        expectedLiquid->getTypeName(),
+                        added,
+                        addedUvs
+                    );
+                }
+                break;
+            }
+            if (!gNativeLiquidUvRemapLogged.exchange(true, std::memory_order_acq_rel)) {
+                logger().info(
+                    "NATIVE_LIQUID_UV_REMAP type={} atlas=({}, {}, {}, {}) vertices={} rawUvMinMax=({}, {}, {}, {}) mappedAtlasRect=({}, {}, {}, {})",
+                    expectedLiquid->getTypeName(),
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1,
+                    uvDiagnostics.remappedVertices,
+                    uvDiagnostics.firstQuadMinU,
+                    uvDiagnostics.firstQuadMaxU,
+                    uvDiagnostics.firstQuadMinV,
+                    uvDiagnostics.firstQuadMaxV,
+                    atlasRect.u0,
+                    atlasRect.v0,
+                    atlasRect.u1,
+                    atlasRect.v1
+                );
+            }
             for (std::size_t colorIndex = colorsBefore; colorIndex < colorsAfter; ++colorIndex) {
                 auto const before = colors[colorIndex];
                 auto const after = applyGhostAppearanceAbgr(
@@ -585,15 +742,11 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                     settings.structureOpacity
                 );
                 colors[colorIndex] = after;
-                state.nativeLiquidTelemetry.nativeLiquidAlphaModifiedVertices
-                    += (before >> 24U) != (after >> 24U);
+                cellAlphaModifiedVertices += (before >> 24U) != (after >> 24U);
             }
-            auto const added = positionsAfter - positionsBefore;
-            state.nativeLiquidTelemetry.nativeLiquidVertices += added;
-            state.nativeLiquidTelemetry.nativeLiquidUvVertices
-                += uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0;
-            state.nativeLiquidTelemetry.nativeLiquidColorVertices
-                += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
+            cellVertices += added;
+            cellUvVertices += addedUvs;
+            cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
             cellPositive = true;
             if (!gNativeLiquidPositiveLogged.exchange(true, std::memory_order_acq_rel)) {
                 logger().info(
@@ -615,8 +768,16 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                 );
             }
         }
-        if (cellPositive) {
+        if (cellUvFailure) {
+            ++state.nativeLiquidTelemetry.nativeLiquidUvRemapFailures;
+        } else if (cellPositive) {
             ++state.nativeLiquidTelemetry.nativeLiquidTessellationPositive;
+            state.nativeLiquidTelemetry.nativeLiquidVertices += cellVertices;
+            state.nativeLiquidTelemetry.nativeLiquidUvVertices += cellUvVertices;
+            state.nativeLiquidTelemetry.nativeLiquidUvRemappedVertices += cellUvVertices;
+            state.nativeLiquidTelemetry.nativeLiquidColorVertices += cellColorVertices;
+            state.nativeLiquidTelemetry.nativeLiquidAlphaModifiedVertices
+                += cellAlphaModifiedVertices;
             succeeded.push_back(index);
         } else if (cellFailure) {
             ++state.nativeLiquidTelemetry.nativeLiquidTessellationFailure;

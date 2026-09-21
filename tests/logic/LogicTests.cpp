@@ -1,9 +1,13 @@
 // LHolo logic tests: pure projection rules and progress publication.
 // Run with: xmake r LHoloLogicTests
 
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <cctype>
 #include <fstream>
+#include <limits>
+#include <span>
 #include <sstream>
 #include <string_view>
 
@@ -12,6 +16,7 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "settings/SettingsStore.h"
@@ -42,6 +47,66 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+struct TestUv {
+    float x{};
+    float y{};
+};
+
+bool nearlyEqual(float lhs, float rhs) {
+    return std::abs(lhs - rhs) < 0.00001f;
+}
+
+void testNativeLiquidUvRemap() {
+    NativeLiquidAtlasRect const atlas{0.25f, 0.5f, 0.5f, 0.75f};
+    auto checkUv = [](TestUv const& uv, float u, float v) {
+        LHOLO_CHECK(nearlyEqual(uv.x, u));
+        LHOLO_CHECK(nearlyEqual(uv.y, v));
+    };
+
+    std::array<TestUv, 4> normal{{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{normal}, atlas));
+    checkUv(normal[0], 0.25f, 0.5f);
+    checkUv(normal[1], 0.5f, 0.5f);
+    checkUv(normal[2], 0.5f, 0.75f);
+    checkUv(normal[3], 0.25f, 0.75f);
+
+    std::array<TestUv, 4> reversedU{{{1, 0}, {0, 0}, {0, 1}, {1, 1}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{reversedU}, atlas));
+    checkUv(reversedU[0], 0.5f, 0.5f);
+    checkUv(reversedU[1], 0.25f, 0.5f);
+    checkUv(reversedU[2], 0.25f, 0.75f);
+    checkUv(reversedU[3], 0.5f, 0.75f);
+
+    std::array<TestUv, 4> reversedV{{{0, 1}, {1, 1}, {1, 0}, {0, 0}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{reversedV}, atlas));
+    checkUv(reversedV[0], 0.25f, 0.75f);
+    checkUv(reversedV[1], 0.5f, 0.75f);
+    checkUv(reversedV[2], 0.5f, 0.5f);
+    checkUv(reversedV[3], 0.25f, 0.5f);
+
+    std::array<TestUv, 4> arbitrary{{{-2, 10}, {6, 10}, {6, 14}, {-2, 14}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{arbitrary}, atlas));
+    checkUv(arbitrary[0], 0.25f, 0.5f);
+    checkUv(arbitrary[2], 0.5f, 0.75f);
+
+    std::array<TestUv, 4> degenerate{{{4, 4}, {4, 4}, {4, 4}, {4, 4}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{degenerate}, atlas));
+    checkUv(degenerate[0], 0.25f, 0.5f);
+    checkUv(degenerate[1], 0.5f, 0.5f);
+    checkUv(degenerate[2], 0.5f, 0.75f);
+    checkUv(degenerate[3], 0.25f, 0.75f);
+
+    auto invalidAtlasUvs = normal;
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(
+        std::span{invalidAtlasUvs}, NativeLiquidAtlasRect{0.5f, 0.5f, 0.5f, 0.75f}
+    ));
+    auto nonFinite = normal;
+    nonFinite[2].x = std::numeric_limits<float>::infinity();
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{nonFinite}, atlas));
+    std::array<TestUv, 3> incompleteQuad{{{0, 0}, {1, 0}, {1, 1}}};
+    LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
 }
 
 void testLayoutRules() {
@@ -941,6 +1006,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    testNativeLiquidUvRemap();
     testLayoutRules();
     testProgress();
     testSettingsStore();

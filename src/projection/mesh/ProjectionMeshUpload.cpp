@@ -52,6 +52,11 @@ void mergeNativeLiquidTelemetry(
     destination.nativeLiquidTessellationFailure += source.nativeLiquidTessellationFailure;
     destination.nativeLiquidVertices += source.nativeLiquidVertices;
     destination.nativeLiquidUvVertices += source.nativeLiquidUvVertices;
+    destination.nativeLiquidUvAtlasResolvedCells
+        += source.nativeLiquidUvAtlasResolvedCells;
+    destination.nativeLiquidUvRemappedVertices
+        += source.nativeLiquidUvRemappedVertices;
+    destination.nativeLiquidUvRemapFailures += source.nativeLiquidUvRemapFailures;
     destination.nativeLiquidColorVertices += source.nativeLiquidColorVertices;
     destination.nativeLiquidAlphaModifiedVertices
         += source.nativeLiquidAlphaModifiedVertices;

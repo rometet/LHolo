@@ -35,6 +35,9 @@ struct NativeLiquidTelemetry {
     std::uint64_t nativeLiquidTessellationFailure{};
     std::uint64_t nativeLiquidVertices{};
     std::uint64_t nativeLiquidUvVertices{};
+    std::uint64_t nativeLiquidUvAtlasResolvedCells{};
+    std::uint64_t nativeLiquidUvRemappedVertices{};
+    std::uint64_t nativeLiquidUvRemapFailures{};
     std::uint64_t nativeLiquidColorVertices{};
     std::uint64_t nativeLiquidAlphaModifiedVertices{};
     std::uint64_t virtualLiquidQueryHits{};
