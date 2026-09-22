@@ -9,6 +9,7 @@
 #include "place/PlaceHelper.h"
 #include "plugin/LHolo.h"
 #include "projection/ProjectionController.h"
+#include "projection/mesh/ProjectionMeshWorker.h"
 #include "structure/capture/StructureCapture.h"
 #include "structure/MaterialTracker.h"
 #include "structure/StructureLoader.h"
@@ -30,6 +31,8 @@ bool AppKernel::load() {
 
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
+
+    projection::detail::resetMeshWorkerForSession();
 
     if (!projection::detail::projectionController().installHooks()) {
         logger.error("Failed to install projection hooks");

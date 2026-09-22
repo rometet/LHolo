@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "mc/world/level/BlockPos.h"
@@ -30,6 +31,7 @@ void attachProjectionWorldEvents(Level& level, BlockSource& blockSource);
 // Level listener attached so a later world exit still reaches normal cleanup.
 void detachProjectionDimensionEvents();
 void detachProjectionWorldEvents();
+std::mutex& projectionWorldLifecycleMutex();
 bool consumeWorldExitRequest();
 
 std::vector<PendingBlockChange> takePendingBlockChanges(std::size_t limit);

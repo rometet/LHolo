@@ -21,6 +21,7 @@ namespace lholo::projection::detail {
 namespace {
 
 std::mutex                                      gMeshWorkerMutex;
+std::mutex                                      gMeshWorkerLifecycleMutex;
 std::deque<AsyncSectionBuildResult>             gCompletedSectionBuilds;
 std::unique_ptr<ll::thread::ThreadPoolExecutor> gMeshWorkerExecutor;
 std::atomic_bool                                gMeshWorkerBusy{};
@@ -30,6 +31,7 @@ std::atomic_bool                                gMeshWorkerDisabledForSession{};
 } // namespace
 
 std::uint64_t startMeshWorker() {
+    std::lock_guard lifecycleLock(gMeshWorkerLifecycleMutex);
     if (!gMeshWorkerExecutor) {
         gMeshWorkerExecutor = std::make_unique<ll::thread::ThreadPoolExecutor>(
             "LHoloProjectionMesh", 1
@@ -40,6 +42,7 @@ std::uint64_t startMeshWorker() {
 }
 
 void stopMeshWorker() {
+    std::lock_guard lifecycleLock(gMeshWorkerLifecycleMutex);
     auto const nextGeneration = gMeshWorkerGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     (void)nextGeneration;
     if (gMeshWorkerExecutor) {
@@ -58,6 +61,10 @@ bool submitMeshWorkerTask(
     std::uint64_t workerGeneration,
     std::function<AsyncSectionBuildResult()> task
 ) {
+    // Keep the executor alive through the execute() call. The world listener
+    // may stop the worker from another engine thread while the render thread
+    // is submitting its next section.
+    std::lock_guard lifecycleLock(gMeshWorkerLifecycleMutex);
     if (!gMeshWorkerExecutor
         || workerGeneration != gMeshWorkerGeneration.load(std::memory_order_acquire)) {
         return false;
@@ -118,6 +125,10 @@ bool meshWorkerIsDisabledForSession() {
 
 void disableMeshWorkerForSession() {
     gMeshWorkerDisabledForSession.store(true, std::memory_order_release);
+}
+
+void resetMeshWorkerForSession() {
+    gMeshWorkerDisabledForSession.store(false, std::memory_order_release);
 }
 
 } // namespace lholo::projection::detail

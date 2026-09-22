@@ -93,6 +93,7 @@ std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
+std::mutex       gInputStateMutex;
 std::mutex       gInstallMutex;
 std::atomic_ullong gInstallRetryAt{};
 bool             gImGuiInitialized{};
@@ -264,21 +265,24 @@ void loadFonts() {
 }
 
 LRESULT forwardToGame(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && wParam < gGameKeysDown.size()) {
-        gGameKeysDown[static_cast<std::size_t>(wParam)] = true;
-    } else if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam < gGameKeysDown.size()) {
-        gGameKeysDown[static_cast<std::size_t>(wParam)] = false;
-    }
-    switch (message) {
-    case WM_LBUTTONDOWN: gGameMouseButtonsDown[0] = true; break;
-    case WM_LBUTTONUP: gGameMouseButtonsDown[0] = false; break;
-    case WM_RBUTTONDOWN: gGameMouseButtonsDown[1] = true; break;
-    case WM_RBUTTONUP: gGameMouseButtonsDown[1] = false; break;
-    case WM_MBUTTONDOWN: gGameMouseButtonsDown[2] = true; break;
-    case WM_MBUTTONUP: gGameMouseButtonsDown[2] = false; break;
-    case WM_XBUTTONDOWN: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = true; break;
-    case WM_XBUTTONUP: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = false; break;
-    default: break;
+    {
+        std::lock_guard lock(gInputStateMutex);
+        if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && wParam < gGameKeysDown.size()) {
+            gGameKeysDown[static_cast<std::size_t>(wParam)] = true;
+        } else if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam < gGameKeysDown.size()) {
+            gGameKeysDown[static_cast<std::size_t>(wParam)] = false;
+        }
+        switch (message) {
+        case WM_LBUTTONDOWN: gGameMouseButtonsDown[0] = true; break;
+        case WM_LBUTTONUP: gGameMouseButtonsDown[0] = false; break;
+        case WM_RBUTTONDOWN: gGameMouseButtonsDown[1] = true; break;
+        case WM_RBUTTONUP: gGameMouseButtonsDown[1] = false; break;
+        case WM_MBUTTONDOWN: gGameMouseButtonsDown[2] = true; break;
+        case WM_MBUTTONUP: gGameMouseButtonsDown[2] = false; break;
+        case WM_XBUTTONDOWN: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = true; break;
+        case WM_XBUTTONUP: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = false; break;
+        default: break;
+        }
     }
     return gOriginalWndProc ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
                             : DefWindowProcW(window, message, wParam, lParam);
@@ -289,8 +293,15 @@ void releaseGameInput(HWND window) {
     // before the menu starts swallowing input, otherwise movement/use remains
     // latched after the physical key is released while ImGui is open.
     input::MenuInputHandoffScope inputHandoff;
-    for (std::size_t key = 0; key < gGameKeysDown.size(); ++key) {
-        if (!gGameKeysDown[key]) continue;
+    std::array<bool, 256> keysDown{};
+    std::array<bool, 5> mouseButtonsDown{};
+    {
+        std::lock_guard lock(gInputStateMutex);
+        keysDown = gGameKeysDown;
+        mouseButtonsDown = gGameMouseButtonsDown;
+    }
+    for (std::size_t key = 0; key < keysDown.size(); ++key) {
+        if (!keysDown[key]) continue;
         auto const virtualKey = static_cast<UINT>(key);
         auto scanCode = MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC);
         auto const extended = virtualKey == VK_LEFT || virtualKey == VK_UP
@@ -312,8 +323,8 @@ void releaseGameInput(HWND window) {
     constexpr std::array<UINT, 5> upMessages{
         WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP, WM_XBUTTONUP
     };
-    for (std::size_t button = 0; button < gGameMouseButtonsDown.size(); ++button) {
-        if (!gGameMouseButtonsDown[button]) continue;
+    for (std::size_t button = 0; button < mouseButtonsDown.size(); ++button) {
+        if (!mouseButtonsDown[button]) continue;
         WPARAM buttonParam{};
         if (button == 3) buttonParam = MAKEWPARAM(0, XBUTTON1);
         if (button == 4) buttonParam = MAKEWPARAM(0, XBUTTON2);
@@ -349,7 +360,10 @@ void prepareMouseHandoff(HWND window) {
         io.MouseWheelH = 0.0f;
         io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     }
-    gGameMouseButtonsDown.fill(false);
+    {
+        std::lock_guard lock(gInputStateMutex);
+        gGameMouseButtonsDown.fill(false);
+    }
 
     // A full-screen menu can leave the absolute OS cursor anywhere. Bedrock
     // converts that absolute position back to relative-look input when it
@@ -998,6 +1012,12 @@ void shutdownLocked() {
     if (gGameQueue) gGameQueue->Release();
     gGameQueue = nullptr;
     gActiveSwapChain = nullptr;
+    {
+        std::lock_guard inputLock(gInputStateMutex);
+        gGameKeysDown.fill(false);
+        gGameMouseButtonsDown.fill(false);
+    }
+    gConsumeEscapeRelease.store(false, std::memory_order_release);
     gGraphicsResumeAt.store(0, std::memory_order_release);
     gInstallRetryAt.store(0, std::memory_order_release);
     gGuiVisibleLastFrame = false;

@@ -30,6 +30,7 @@ namespace lholo::projection::detail {
 namespace {
 
 std::mutex                gPendingEventsMutex;
+std::mutex                gWorldLifecycleMutex;
 std::deque<PendingBlockChange> gIncomingBlockChanges;
 std::deque<SubChunkKey>   gIncomingLoadedSubChunks;
 std::atomic<BlockSource*> gAttachedBlockSource{};
@@ -51,7 +52,7 @@ public:
     }
 
     void onBlockChanged(
-        BlockSource&,
+        BlockSource& source,
         BlockPos const&              pos,
         uint                           layer,
         Block const&                  block,
@@ -66,6 +67,10 @@ public:
         // auto-placement suppression window.
         bool const destroyed = layer == 0 && !oldBlock.isAir() && block.isAir();
         std::lock_guard lock(gPendingEventsMutex);
+        // Keep the source check under the same lock as the queue mutation. A
+        // callback that started just before world teardown must not append an
+        // old-world event after onLevelDestruction() has cleared the queue.
+        if (&source != gAttachedBlockSource.load(std::memory_order_acquire)) return;
         gIncomingBlockChanges.push_back(PendingBlockChange{
             pos,
             destroyed ? GetTickCount64() : 0,
@@ -83,9 +88,11 @@ public:
         short        absoluteSubChunkIndex,
         bool
     ) override {
-        if (&source != gAttachedChunkSource.load(std::memory_order_acquire)) return;
         auto const& chunkPosition = chunk.mPosition.get();
         std::lock_guard lock(gPendingEventsMutex);
+        // See onBlockChanged(): source validation and queue insertion must be
+        // ordered with teardown's queue clear.
+        if (&source != gAttachedChunkSource.load(std::memory_order_acquire)) return;
         gIncomingLoadedSubChunks.emplace_back(
             chunkPosition.x,
             static_cast<int>(absoluteSubChunkIndex),
@@ -94,6 +101,10 @@ public:
     }
 
     void onLevelDestruction(std::string const&) override {
+        std::lock_guard lifecycleLock(gWorldLifecycleMutex);
+        // Publish before waiting for the worker barrier so the render path
+        // stops using the old session while engine teardown is in progress.
+        gWorldExitPending.store(true, std::memory_order_release);
         // Worker tasks retain non-owning Level/Dimension/ChunkView pointers.
         // Join them before the engine starts destroying the level; deferring
         // this barrier until Present leaves a use-after-free window.
@@ -103,9 +114,13 @@ public:
         // not retain or later call removeListener through a dying object.
         gAttachedBlockSource.store(nullptr, std::memory_order_release);
         gAttachedChunkSource.store(nullptr, std::memory_order_release);
-        // Only publish a fact here. Projection shutdown waits for workers and
-        // belongs on the next normal overlay frame, outside engine teardown.
-        gWorldExitPending.store(true, std::memory_order_release);
+        {
+            std::lock_guard lock(gPendingEventsMutex);
+            gIncomingBlockChanges.clear();
+            gIncomingLoadedSubChunks.clear();
+        }
+        // Projection shutdown waits for workers and belongs on the next normal
+        // overlay/render frame, outside engine teardown.
     }
 };
 
@@ -143,6 +158,7 @@ void detachProjectionDimensionEvents() {
 }
 
 void detachProjectionWorldEvents() {
+    std::lock_guard lifecycleLock(gWorldLifecycleMutex);
     if (auto* level = gAttachedLevel.exchange(nullptr, std::memory_order_acq_rel)) {
         level->removeListener(gProjectionLevelListener);
     }
@@ -150,9 +166,16 @@ void detachProjectionWorldEvents() {
     gWorldExitPending.store(false, std::memory_order_release);
 }
 
+std::mutex& projectionWorldLifecycleMutex() {
+    return gWorldLifecycleMutex;
+}
+
 bool consumeWorldExitRequest() {
-    if (!gWorldExitPending.load(std::memory_order_acquire)) return false;
-    return gWorldExitPending.exchange(false, std::memory_order_acq_rel);
+    // Keep the signal sticky until detachProjectionWorldEvents() has completed
+    // the world-state cleanup. Both the Present and render paths may observe
+    // it; clearing it at the first observer allowed the other path to activate
+    // the old StructureSession in the new world.
+    return gWorldExitPending.load(std::memory_order_acquire);
 }
 
 std::vector<PendingBlockChange> takePendingBlockChanges(std::size_t limit) {

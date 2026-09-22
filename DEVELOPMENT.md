@@ -312,7 +312,7 @@ LHolo/
 3. 安装菜单输入保护：`MouseDevice::feed` 与 `HIDControllerGameCoreDesktop::$onKeyDown/$onKeyUp` 在游戏和原生 UI 处理前取得输入所有权。三项 Hook 状态独立告警，不阻断菜单启用。
 4. 尝试安装 ImGui/DXGI Hook；图形环境尚未可用时允许后续 `Present` 重试。
 
-配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。当前没有单独依赖世界退出事件；投影渲染入口通过 `client/level/dimension` 身份变化检测世界切换，并在上下文失效时调用 `projection::disable()` 等价的状态清理和 `structure::clear()`。
+配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。世界退出由 `LevelListener::onLevelDestruction()` 发布轻量信号；投影渲染入口和 Overlay Present 都能观察该信号，真正的结构、辅助放置、捕获和投影清理在引擎回调之外执行。投影渲染入口仍通过 `client/level/dimension` 身份变化检测世界/维度切换，并在上下文失效时清理投影。
 
 投影启用入口只有 `enableStructureProjection()`。它要求：
 
@@ -326,12 +326,11 @@ LHolo/
 当前关闭顺序：
 
 1. 保存配置。
-2. 投影停止接收网格任务，提升 Worker generation，清空待处理结果并等待 in-flight Worker 退出；随后清理投影状态和 GPU 网格。
+2. 清理辅助放置、结构、菜单、捕获和投影状态；投影停止接收网格任务，提升 Worker generation，清空待处理结果并等待 in-flight Worker 退出。
 3. 卸载菜单鼠标/HID 输入源 Hook。
 4. 卸载辅助放置的 tick/build Hook。
-5. 关闭 ImGui 图形后端、恢复原 WndProc、移除 MinHook。
-6. 清除已加载结构、菜单和快捷键运行态。
-7. 卸载投影 Hook。
+5. 卸载投影 Hook，防止渲染路径再次触发 Overlay 安装重试。
+6. 关闭 ImGui 图形后端、恢复原 WndProc、移除 MinHook，并清空 Overlay 输入缓存。
 
 ### 3.3 世界切换
 

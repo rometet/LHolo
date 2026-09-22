@@ -56,5 +56,6 @@ std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limi
 bool meshWorkerIsBusy();
 bool meshWorkerIsDisabledForSession();
 void disableMeshWorkerForSession();
+void resetMeshWorkerForSession();
 
 } // namespace lholo::projection::detail

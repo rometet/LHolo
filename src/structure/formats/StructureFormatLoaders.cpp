@@ -499,6 +499,10 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         error = "block_indices 不是有效的双层索引";
         return nullptr;
     }
+    if (blockIndices->size() > 2) {
+        error = "block_indices 包含过多索引层";
+        return nullptr;
+    }
     // format 1: List<List<Int>>（主层 + 可选副层）。
     // format 2 (1.26.5x 起): List<IntArray>——每层一个 IntArray，副层取消
     // （含水内联为方块状态，通常只有一个 IntArray）。两种形状都接受，缺失的

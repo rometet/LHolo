@@ -45,8 +45,9 @@ bool getMissingSeeThrough();
 void setMissingSeeThrough(bool enabled);
 void requestNextStructureAnchor(int x, int y, int z);
 void cancelNextStructureAnchorRequest();
-// Consumes the lightweight signal produced by the existing LevelListener when
-// the active world is destroyed. Heavy cleanup runs outside the callback.
+// Reports the sticky signal produced by the LevelListener when the active
+// world is destroyed. It remains set until world-state cleanup detaches the
+// listener, so both Present and the projection render path can observe it.
 bool consumeWorldExitRequest();
 bool isDimensionSuspended();
 BuildProgress getBuildProgress();
