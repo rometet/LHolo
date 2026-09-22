@@ -102,6 +102,10 @@ DimensionActivationStatus ProjectionSession::prepareDimensionActivation(
     }
     if (mSuspendedStructureGeneration.load(std::memory_order_relaxed) != structureGeneration) {
         mDimensionSuspended.store(false, std::memory_order_release);
+        // Do not touch the pending anchor here. Ordinary file loads cancel an
+        // old request before replacing the structure, while restoreSavedProjection
+        // deliberately installs a new request after loading it. Clearing it at
+        // this point would erase that restore anchor on the next frame.
         return DimensionActivationStatus::Ready;
     }
     if (mSuspendedDimensionId.load(std::memory_order_relaxed) != dimensionId) {

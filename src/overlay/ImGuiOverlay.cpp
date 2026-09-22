@@ -93,6 +93,8 @@ std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
+std::mutex       gInstallMutex;
+std::atomic_ullong gInstallRetryAt{};
 bool             gImGuiInitialized{};
 bool             gGraphicsInitialized{};
 bool             gGuiVisibleLastFrame{};
@@ -120,6 +122,7 @@ std::atomic_bool      gConsumeEscapeRelease{false};
 
 constexpr ULONGLONG kFullscreenGraphicsResumeDelayMs = 750;
 constexpr ULONGLONG kResizeGraphicsResumeDelayMs     = 100;
+constexpr ULONGLONG kInstallRetryIntervalMs          = 1000;
 constexpr size_t    kPresentVtableIndex              = 8;
 constexpr size_t    kResizeBuffersVtableIndex        = 13;
 constexpr size_t    kPresent1VtableIndex             = 22;
@@ -868,13 +871,34 @@ void removeHook(void*& target) {
 
 } // namespace
 
+namespace {
+
+void shutdownLocked();
+
+} // namespace
+
 bool ensureInstalled() {
     if (gInstalled.load(std::memory_order_acquire)) return true;
+    auto const now = GetTickCount64();
+    if (now < gInstallRetryAt.load(std::memory_order_acquire)) return false;
+    std::lock_guard installLock(gInstallMutex);
+    if (gInstalled.load(std::memory_order_acquire)) return true;
+    if (GetTickCount64() < gInstallRetryAt.load(std::memory_order_acquire)) return false;
+
+    auto failInstall = [&]() {
+        shutdownLocked();
+        gInstallRetryAt.store(
+            GetTickCount64() + kInstallRetryIntervalMs,
+            std::memory_order_release
+        );
+        return false;
+    };
+
     gShuttingDown.store(false, std::memory_order_release);
     auto window = findProcessWindow();
-    if (!window) return false;
+    if (!window) return failInstall();
     auto const status = MH_Initialize();
-    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
+    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return failInstall();
 
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
     DXGI_SWAP_CHAIN_DESC description{};
@@ -891,7 +915,7 @@ bool ensureInstalled() {
     if (FAILED(D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &featureLevel, 1, D3D11_SDK_VERSION,
             &description, &dummySwapChain, &dummyDevice, nullptr, &dummyContext
-        ))) return false;
+        ))) return failInstall();
 
     auto** swapVtable = *reinterpret_cast<void***>(dummySwapChain);
     gPresentTarget = swapVtable[kPresentVtableIndex];
@@ -936,15 +960,17 @@ bool ensureInstalled() {
 
 
     if (!ok) {
-        shutdown();
-        return false;
+        return failInstall();
     }
     gInstalled.store(true, std::memory_order_release);
+    gInstallRetryAt.store(0, std::memory_order_release);
     logger().info("Injected ImGui DXGI hooks installed");
     return true;
 }
 
-void shutdown() {
+namespace {
+
+void shutdownLocked() {
     gShuttingDown.store(true, std::memory_order_release);
     gMouseHandoffActive.store(false, std::memory_order_release);
     // Best effort: leave the cursor exactly where Minecraft expects it if the
@@ -972,8 +998,18 @@ void shutdown() {
     if (gGameQueue) gGameQueue->Release();
     gGameQueue = nullptr;
     gActiveSwapChain = nullptr;
+    gGraphicsResumeAt.store(0, std::memory_order_release);
+    gInstallRetryAt.store(0, std::memory_order_release);
+    gGuiVisibleLastFrame = false;
     gWindow = nullptr;
     gInstalled.store(false, std::memory_order_release);
+}
+
+} // namespace
+
+void shutdown() {
+    std::lock_guard installLock(gInstallMutex);
+    shutdownLocked();
 }
 
 } // namespace lholo::overlay

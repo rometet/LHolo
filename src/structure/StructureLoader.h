@@ -86,6 +86,9 @@ void processPendingActions();
 // Invalidates world-derived HUD snapshots after a dimension change while
 // preserving the loaded structure and all HUD preferences.
 void resetDimensionSession();
+// Clears transient projection, UI and input state owned by the current world
+// while preserving user configuration such as HUD layout and hotkeys.
+void resetWorldSession();
 bool hasHudInfo();
 void renderHud();
 // Current-visible-range material HUD: missing projected cells vs. inventory.

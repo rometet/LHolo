@@ -24,6 +24,8 @@
 #include "mc/world/level/block/Block.h"
 #include "mc/world/level/chunk/LevelChunk.h"
 
+#include "projection/mesh/ProjectionMeshWorker.h"
+
 namespace lholo::projection::detail {
 namespace {
 
@@ -92,6 +94,10 @@ public:
     }
 
     void onLevelDestruction(std::string const&) override {
+        // Worker tasks retain non-owning Level/Dimension/ChunkView pointers.
+        // Join them before the engine starts destroying the level; deferring
+        // this barrier until Present leaves a use-after-free window.
+        stopMeshWorker();
         gAttachedLevel.store(nullptr, std::memory_order_release);
         // The level owns this block source and is already tearing it down. Do
         // not retain or later call removeListener through a dying object.
@@ -141,6 +147,7 @@ void detachProjectionWorldEvents() {
         level->removeListener(gProjectionLevelListener);
     }
     detachProjectionDimensionEvents();
+    gWorldExitPending.store(false, std::memory_order_release);
 }
 
 bool consumeWorldExitRequest() {
