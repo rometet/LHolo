@@ -100,6 +100,7 @@ void rebuildProjectionPlacement(
         static_cast<std::size_t>(state.structure->secondaryBlocks)
     );
     state.projectedBlockActors.clear();
+    state.meshBlockActorRendererSnapshot.reset();
     std::fill(
         state.blockActorRendererAvailable.begin(),
         state.blockActorRendererAvailable.end(),
