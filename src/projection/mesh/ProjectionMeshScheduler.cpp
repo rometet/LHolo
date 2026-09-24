@@ -135,50 +135,40 @@ void scheduleProjectionMeshBuild(
 
     auto const snapshotStarted = std::chrono::steady_clock::now();
     auto const section = *selected;
+    // A projection section is a fixed local 16^3 cell. Build its transformed
+    // world-space bounds from the eight section corners instead of rescanning
+    // every projected block each time the section becomes dirty.
     BlockPos minimum{INT_MAX, INT_MAX, INT_MAX};
     BlockPos maximum{INT_MIN, INT_MIN, INT_MIN};
-    for (auto const index : state.sectionBlockIndices[section]) {
-        auto const local = transformStructurePosition(
-            state.structure->renderBlocks[index], *state.structure, settings.mirrorMode,
-            settings.rotationTurns
-        );
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + local.x,
-            state.anchor.y + settings.offsetY + local.y,
-            state.anchor.z + settings.offsetZ + local.z
-        };
-        minimum.x = std::min(minimum.x, world.x);
-        minimum.y = std::min(minimum.y, world.y);
-        minimum.z = std::min(minimum.z, world.z);
-        maximum.x = std::max(maximum.x, world.x);
-        maximum.y = std::max(maximum.y, world.y);
-        maximum.z = std::max(maximum.z, world.z);
-    }
-    for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
-        auto const local = transformStructurePosition(
-            BlockPos{x, y, z}, *state.structure, settings.mirrorMode, settings.rotationTurns
-        );
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + local.x,
-            state.anchor.y + settings.offsetY + local.y,
-            state.anchor.z + settings.offsetZ + local.z
-        };
-        minimum.x = std::min(minimum.x, world.x);
-        minimum.y = std::min(minimum.y, world.y);
-        minimum.z = std::min(minimum.z, world.z);
-        maximum.x = std::max(maximum.x, world.x);
-        maximum.y = std::max(maximum.y, world.y);
-        maximum.z = std::max(maximum.z, world.z);
-    }
-    if (minimum.x == INT_MAX) {
-        auto const& center = state.sections[section].center;
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + static_cast<int>(center.x),
-            state.anchor.y + settings.offsetY + static_cast<int>(center.y),
-            state.anchor.z + settings.offsetZ + static_cast<int>(center.z),
-        };
-        minimum = world;
-        maximum = world;
+    auto const [sectionX, sectionY, sectionZ] = state.localSectionKeys[section];
+    BlockPos const localMinimum{sectionX * 16, sectionY * 16, sectionZ * 16};
+    BlockPos const localMaximum{
+        localMinimum.x + 15, localMinimum.y + 15, localMinimum.z + 15
+    };
+    for (int xSide = 0; xSide < 2; ++xSide) {
+        for (int ySide = 0; ySide < 2; ++ySide) {
+            for (int zSide = 0; zSide < 2; ++zSide) {
+                BlockPos const local{
+                    xSide ? localMaximum.x : localMinimum.x,
+                    ySide ? localMaximum.y : localMinimum.y,
+                    zSide ? localMaximum.z : localMinimum.z,
+                };
+                auto const transformed = transformStructurePosition(
+                    local, *state.structure, settings.mirrorMode, settings.rotationTurns
+                );
+                BlockPos const world{
+                    state.anchor.x + settings.offsetX + transformed.x,
+                    state.anchor.y + settings.offsetY + transformed.y,
+                    state.anchor.z + settings.offsetZ + transformed.z
+                };
+                minimum.x = std::min(minimum.x, world.x);
+                minimum.y = std::min(minimum.y, world.y);
+                minimum.z = std::min(minimum.z, world.z);
+                maximum.x = std::max(maximum.x, world.x);
+                maximum.y = std::max(maximum.y, world.y);
+                maximum.z = std::max(maximum.z, world.z);
+            }
+        }
     }
     minimum = BlockPos{minimum.x - 2, minimum.y - 2, minimum.z - 2};
     maximum = BlockPos{maximum.x + 2, maximum.y + 2, maximum.z + 2};
@@ -194,6 +184,7 @@ void scheduleProjectionMeshBuild(
     snapshot->correctionStates = state.correctionStates;
     snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
+    snapshot->sectionLiquidBlockIndices = {state.sectionLiquidBlockIndices[section]};
     snapshot->sectionExtraBlockPositions = {state.sectionExtraBlockPositions[section]};
     // Correction face culling only needs extras in this section and its six
     // direct neighbors. Avoid copying the complete sparse set for every async
