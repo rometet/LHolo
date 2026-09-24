@@ -30,9 +30,12 @@ namespace {
 void markSectionDirty(ProjectionState& state, std::size_t section) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    // Once a section is dirty, further changes are already coalesced into the
+    // next build. Only the transition from clean -> dirty needs a new revision
+    // to invalidate an in-flight result.
+    if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
     sectionState.incrementalDirty = true;
-    ++sectionState.requestedRevision;
 }
 
 SubChunkKey localSectionKey(BlockPos const& position) {
@@ -63,6 +66,7 @@ std::size_t ensureCorrectionSection(
     state.localSectionIndices.emplace(key, section);
     state.localSectionKeys.push_back(key);
     state.sectionBlockIndices.emplace_back();
+    state.sectionLiquidBlockIndices.emplace_back();
     state.sectionExtraBlockPositions.emplace_back();
     SectionState sectionState;
     sectionState.center = Vec3{
@@ -207,19 +211,9 @@ CorrectionProgressChanges updateCorrectionTracker(
     };
 
     auto const hasExpectedLocalCell = [&](BlockPos const& localPosition) {
-        auto const found = std::lower_bound(
-            state.structure->renderBlocks.begin(),
-            state.structure->renderBlocks.end(),
-            localPosition,
-            [](structure::LoadedStructure::RenderBlock const& entry, BlockPos const& position) {
-                return std::tie(entry.x, entry.y, entry.z)
-                    < std::tie(position.x, position.y, position.z);
-            }
-        );
-        return found != state.structure->renderBlocks.end()
-            && found->x == localPosition.x
-            && found->y == localPosition.y
-            && found->z == localPosition.z;
+        return state.expectedLocalCells.contains(SubChunkKey{
+            localPosition.x, localPosition.y, localPosition.z
+        });
     };
 
     auto const updateExtra = [&](
