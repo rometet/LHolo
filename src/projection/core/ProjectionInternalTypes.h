@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <array>
 #include <functional>
+#include <map>
 #include <unordered_map>
 #include <memory>
 #include <tuple>
@@ -212,7 +213,7 @@ struct ProjectedBlockActor {
 
 using ExpectedBlockMap      = std::unordered_map<SubChunkKey, Block const*, SubChunkKeyHash>;
 using ExpectedLiquidMap     = std::unordered_map<SubChunkKey, Block const*, SubChunkKeyHash>;
-using ExpectedBlockActorMap = std::unordered_map<SubChunkKey, std::shared_ptr<BlockActor>, SubChunkKeyHash>;
+using ExpectedBlockActorMap = std::map<SubChunkKey, std::shared_ptr<BlockActor>>;
 using ExpectedBlockIndexMap = std::unordered_map<SubChunkKey, std::size_t, SubChunkKeyHash>;
 
 } // namespace lholo::projection::detail
