@@ -626,6 +626,13 @@ void submitProjectionMeshPass(
         return dx * dx + dy * dy + dz * dz;
     };
 
+    // Distance is shared by liquid ordering and normal bucket ordering. Compute
+    // it once per section instead of repeatedly inside O(N log N) comparators.
+    std::vector<float> sectionDistances(state.sections.size());
+    for (std::size_t section = 0; section < state.sections.size(); ++section) {
+        sectionDistances[section] = distanceSquared(worldCenter(section));
+    }
+
     // PraxisExactReplay preserves every typed native stream, replaces packed
     // color only, and submits all compatible sections as one texture-ref batch.
     // Retained meshes exist only for a section whose exact build failed, or in
@@ -653,7 +660,7 @@ void submitProjectionMeshPass(
             nativeLiquidSections.begin(),
             nativeLiquidSections.end(),
             [&](std::size_t lhs, std::size_t rhs) {
-                return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
+                return sectionDistances[lhs] > sectionDistances[rhs];
             }
         );
         if (!nativeLiquidSections.empty()) {
@@ -877,7 +884,7 @@ void submitProjectionMeshPass(
     std::array<std::vector<VisibleMesh>, bucketCount> visibleByBucket;
     for (auto& bucket : visibleByBucket) bucket.reserve(state.sections.size() / bucketCount + 1U);
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        auto const sectionDistance = distanceSquared(worldCenter(section));
+        auto const sectionDistance = sectionDistances[section];
         for (std::size_t bucket = 0; bucket < bucketCount; ++bucket) {
             auto const& mesh = state.sections[section].meshes[bucket];
             if (mesh && mesh->isValid()) {
