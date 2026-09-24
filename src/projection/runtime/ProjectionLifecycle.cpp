@@ -131,6 +131,10 @@ bool prepareProjectionState(
         }
     }
     initializeSectionStates(state.sections, centers);
+    state.dirtySections.reserve(state.sections.size());
+    for (std::size_t section = 0; section < state.sections.size(); ++section) {
+        state.dirtySections.insert(section);
+    }
     state.warningFillSectionMeshes.resize(state.sectionBlockIndices.size());
     state.correctionOutlineSectionMeshes.resize(state.sectionBlockIndices.size());
     state.wrongFillSectionMeshes.resize(state.sectionBlockIndices.size());
