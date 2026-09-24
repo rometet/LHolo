@@ -197,6 +197,7 @@ CorrectionProgressChanges updateCorrectionTracker(
         if (!visible) return;
         if (state.correctionStates[index] != nextState) {
             state.correctionStates[index] = nextState;
+            ++state.correctionStateRevision;
             markSectionDirty(state, state.blockToSection[index]);
             // A missing-cell shell omits faces shared with adjacent missing
             // cells. If either side changes, both section meshes may need an
