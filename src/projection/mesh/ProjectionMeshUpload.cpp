@@ -132,8 +132,10 @@ void mergeNativeLiquidTelemetry(
 void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessellator) {
     if (auto bufferService = tessellator.mBufferResourceService.lock()) {
         auto const uploadStarted = std::chrono::steady_clock::now();
-        for (std::size_t uploaded = 0; uploaded < 2; ++uploaded) {
-            if (std::chrono::steady_clock::now() - uploadStarted >= std::chrono::milliseconds(1)) break;
+        constexpr std::size_t kMaxUploadsPerFrame = 8;
+        constexpr auto kUploadBudget = std::chrono::milliseconds(1);
+        for (std::size_t uploaded = 0; uploaded < kMaxUploadsPerFrame; ++uploaded) {
+            if (std::chrono::steady_clock::now() - uploadStarted >= kUploadBudget) break;
             auto completed = takeCompletedSectionBuilds(1);
             if (completed.empty()) break;
             auto result = std::move(completed.front());
@@ -167,6 +169,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
             }
             if (result.revision != state.sections[section].requestedRevision) {
                 state.sections[section].dirty = true;
+                state.dirtySections.insert(section);
                 continue;
             }
     
