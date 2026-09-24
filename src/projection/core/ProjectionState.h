@@ -79,6 +79,7 @@ struct ProjectionState {
     // Updating one byte and two counters keeps the HUD O(1) per frame.
     std::vector<uchar>              progressErrorKind;
     std::vector<uchar>              blockActorRendererAvailable;
+    std::shared_ptr<std::vector<uchar> const> meshBlockActorRendererSnapshot;
     std::uint64_t                   progressCorrectCount{};
     std::uint64_t                   progressVisibleCorrectCount{};
     std::uint64_t                   progressWrongTypeCount{};
@@ -182,6 +183,19 @@ inline void markProjectionSectionDirty(
     sectionState.dirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
     state.dirtySections.insert(section);
+}
+
+[[nodiscard]] inline bool blockActorRendererAvailableForMeshBuild(
+    ProjectionState const& state,
+    std::size_t            index
+) noexcept {
+    if (!state.blockActorRendererAvailable.empty()) {
+        return index < state.blockActorRendererAvailable.size()
+            && state.blockActorRendererAvailable[index] != 0;
+    }
+    return state.meshBlockActorRendererSnapshot
+        && index < state.meshBlockActorRendererSnapshot->size()
+        && (*state.meshBlockActorRendererSnapshot)[index] != 0;
 }
 
 [[nodiscard]] inline CorrectionState correctionStateForMeshBuild(
