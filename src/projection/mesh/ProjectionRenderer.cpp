@@ -611,25 +611,23 @@ void submitProjectionMeshPass(
     auto& itemRenderer = renderContext.mItemInHandRenderer;
     auto const& blendMaterial = itemRenderer.mMatBlendBlock.get();
 
-    auto worldCenter = [&](std::size_t section) {
-        return Vec3{
-            static_cast<float>(renderOrigin.x) + state.sections[section].center.x,
-            static_cast<float>(renderOrigin.y) + state.sections[section].center.y,
-            static_cast<float>(renderOrigin.z) + state.sections[section].center.z
-        };
-    };
-    auto distanceSquared = [&](Vec3 const& point) {
-        auto const dx = point.x - camera.x;
-        auto const dy = point.y - camera.y;
-        auto const dz = point.z - camera.z;
-        return dx * dx + dy * dy + dz * dz;
-    };
+    // Distance is used by both liquid and translucent ordering. Compute it once
+    // per section/pass instead of repeatedly inside O(N log N) sort comparators.
+    std::vector<float> sectionDistanceSquared(state.sections.size());
+    for (std::size_t section = 0; section < state.sections.size(); ++section) {
+        auto const& center = state.sections[section].center;
+        auto const dx = static_cast<float>(renderOrigin.x) + center.x - camera.x;
+        auto const dy = static_cast<float>(renderOrigin.y) + center.y - camera.y;
+        auto const dz = static_cast<float>(renderOrigin.z) + center.z - camera.z;
+        sectionDistanceSquared[section] = dx * dx + dy * dy + dz * dz;
+    }
 
     // PraxisExactReplay preserves every typed native stream, replaces packed
     // color only, and submits all compatible sections as one texture-ref batch.
     // Retained meshes exist only for a section whose exact build failed, or in
     // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
+    nativeLiquidSections.reserve(state.nativeLiquidSectionMeshes.size());
     bool nativeLiquidDrawnWithSelectedMaterial{};
     if (renderAlphaLayer) {
         auto& telemetry = state.nativeLiquidTelemetry;
@@ -652,7 +650,7 @@ void submitProjectionMeshPass(
             nativeLiquidSections.begin(),
             nativeLiquidSections.end(),
             [&](std::size_t lhs, std::size_t rhs) {
-                return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
+                return sectionDistanceSquared[lhs] > sectionDistanceSquared[rhs];
             }
         );
         if (!nativeLiquidSections.empty()) {
@@ -689,6 +687,8 @@ void submitProjectionMeshPass(
                     && exactReplayMaterialReady;
                 std::vector<std::size_t> exactSections;
                 std::vector<std::size_t> retainedSections;
+                exactSections.reserve(nativeLiquidSections.size());
+                retainedSections.reserve(nativeLiquidSections.size());
                 for (auto const section : nativeLiquidSections) {
                     auto const& compat = state.praxisCompatLiquidSections[section];
                     if (usePraxisExactReplay && compat && compat->ready()) {
@@ -848,8 +848,8 @@ void submitProjectionMeshPass(
     };
     auto sortBackToFront = [&](std::vector<VisibleMesh>& meshes) {
         std::sort(meshes.begin(), meshes.end(), [&](VisibleMesh const& lhs, VisibleMesh const& rhs) {
-            return distanceSquared(worldCenter(lhs.section))
-                > distanceSquared(worldCenter(rhs.section));
+            return sectionDistanceSquared[lhs.section]
+                > sectionDistanceSquared[rhs.section];
         });
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
