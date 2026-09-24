@@ -98,12 +98,14 @@ bool prepareProjectionState(
     state.blockToSection.resize(state.structure->renderBlocks.size());
     for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
         auto const& entry = state.structure->renderBlocks[index];
-        auto const key = std::tuple{entry.x / 16, entry.y / 16, entry.z / 16};
+        BlockPos const localPosition{entry.x, entry.y, entry.z};
+        auto const key = projectionSectionKey(localPosition);
         auto [found, inserted] = state.localSectionIndices.try_emplace(
             key, state.sectionBlockIndices.size()
         );
         if (inserted) {
             state.sectionBlockIndices.emplace_back();
+            state.sectionOccupancy.emplace_back();
             state.localSectionKeys.push_back(key);
             auto const [sx, sy, sz] = key;
             centers.emplace_back(
@@ -114,6 +116,7 @@ bool prepareProjectionState(
         }
         state.blockToSection[index] = found->second;
         state.sectionBlockIndices[found->second].push_back(index);
+        markProjectionSectionOccupied(state.sectionOccupancy[found->second], localPosition);
     }
     initializeSectionStates(state.sections, centers);
     state.warningFillSectionMeshes.resize(state.sectionBlockIndices.size());
