@@ -15,6 +15,7 @@
 #include "structure/StructureLoader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -110,6 +111,11 @@ CorrectionProgressChanges updateCorrectionTracker(
     // incremental block notifications.
     constexpr std::size_t kCorrectionChecksPerFrame = 4096;
     constexpr std::size_t kSubChunkEventsPerFrame    = 64;
+    constexpr auto kCorrectionScanBudget = std::chrono::microseconds(800);
+    auto const correctionDeadline = std::chrono::steady_clock::now() + kCorrectionScanBudget;
+    auto const scanBudgetExpired = [&] {
+        return std::chrono::steady_clock::now() >= correctionDeadline;
+    };
     bool const identityTransform = mirrorMode == 0 && rotationTurns == 0;
 
     auto const updateCorrection = [&](std::size_t index) {
@@ -319,17 +325,18 @@ CorrectionProgressChanges updateCorrectionTracker(
     auto const loadedSubChunks = takePendingLoadedSubChunks(kSubChunkEventsPerFrame);
     state.pendingLoadedSubChunks.insert(loadedSubChunks.begin(), loadedSubChunks.end());
 
-    auto const scanRemaining = totalBlocks - state.correctionScanCursor;
-    auto const checks = std::min(scanRemaining, kCorrectionChecksPerFrame - correctionChecks);
-    for (std::size_t checked = 0; checked < checks; ++checked) {
+    while (state.correctionScanCursor < totalBlocks
+        && correctionChecks < kCorrectionChecksPerFrame
+        && !scanBudgetExpired()) {
         updateCorrection(state.correctionScanCursor++);
+        ++correctionChecks;
     }
-    correctionChecks += checks;
 
     // Air cells have no render-block index, so discover extras with a separate
     // cursor while sharing the same fixed per-frame correction budget. Region
     // boxes preserve litematic gaps and avoid scanning their merged bounds.
     while (correctionChecks < kCorrectionChecksPerFrame
+        && !scanBudgetExpired()
         && state.extraScanRegion < state.structure->regions.size()) {
         auto const& box = state.structure->regions[state.extraScanRegion];
         auto const regionVolume = static_cast<std::uint64_t>(box.sizeX)
