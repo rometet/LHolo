@@ -19,6 +19,7 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <utility>
@@ -626,11 +627,25 @@ void submitProjectionMeshPass(
         return dx * dx + dy * dy + dz * dz;
     };
 
-    // Distance is shared by liquid ordering and normal bucket ordering. Compute
-    // it once per section instead of repeatedly inside O(N log N) comparators.
-    std::vector<float> sectionDistances(state.sections.size());
-    for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        sectionDistances[section] = distanceSquared(worldCenter(section));
+    // Every translucent projection path needs the same back-to-front section
+    // order. Build it once in the alpha pass and reuse it for native liquids,
+    // normal blend meshes and liquid proxies instead of sorting each list.
+    std::vector<float> sectionDistances;
+    std::vector<std::size_t> backToFrontSections;
+    if (renderAlphaLayer) {
+        sectionDistances.resize(state.sections.size());
+        backToFrontSections.resize(state.sections.size());
+        std::iota(backToFrontSections.begin(), backToFrontSections.end(), std::size_t{0});
+        for (std::size_t section = 0; section < state.sections.size(); ++section) {
+            sectionDistances[section] = distanceSquared(worldCenter(section));
+        }
+        std::sort(
+            backToFrontSections.begin(),
+            backToFrontSections.end(),
+            [&](std::size_t lhs, std::size_t rhs) {
+                return sectionDistances[lhs] > sectionDistances[rhs];
+            }
+        );
     }
 
     // PraxisExactReplay preserves every typed native stream, replaces packed
@@ -645,9 +660,8 @@ void submitProjectionMeshPass(
         telemetry.praxisCompatVerticesReplayedPerFrame = 0;
         telemetry.praxisCompatReplayMicros = 0;
         telemetry.praxisCompatSubmitMicros = 0;
-        for (std::size_t section = 0;
-             section < state.nativeLiquidSectionMeshes.size();
-            ++section) {
+        for (auto const section : backToFrontSections) {
+            if (section >= state.nativeLiquidSectionMeshes.size()) continue;
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
             auto const* compat = section < state.praxisCompatLiquidSections.size()
                 ? state.praxisCompatLiquidSections[section].get()
@@ -656,13 +670,6 @@ void submitProjectionMeshPass(
                 nativeLiquidSections.push_back(section);
             }
         }
-        std::sort(
-            nativeLiquidSections.begin(),
-            nativeLiquidSections.end(),
-            [&](std::size_t lhs, std::size_t rhs) {
-                return sectionDistances[lhs] > sectionDistances[rhs];
-            }
-        );
         if (!nativeLiquidSections.empty()) {
             if (auto const* signText = render::resolveSignTextMaterial()) {
                 auto const signTextReady = tryRenderMaterial(*signText) != nullptr;
@@ -853,12 +860,6 @@ void submitProjectionMeshPass(
     struct VisibleMesh {
         std::size_t bucket;
         std::size_t section;
-        float       distanceSquared;
-    };
-    auto sortBackToFront = [](std::vector<VisibleMesh>& meshes) {
-        std::sort(meshes.begin(), meshes.end(), [](VisibleMesh const& lhs, VisibleMesh const& rhs) {
-            return lhs.distanceSquared > rhs.distanceSquared;
-        });
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
         if (!materialExists(material)) return;
@@ -884,11 +885,10 @@ void submitProjectionMeshPass(
     std::array<std::vector<VisibleMesh>, bucketCount> visibleByBucket;
     for (auto& bucket : visibleByBucket) bucket.reserve(state.sections.size() / bucketCount + 1U);
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        auto const sectionDistance = sectionDistances[section];
         for (std::size_t bucket = 0; bucket < bucketCount; ++bucket) {
             auto const& mesh = state.sections[section].meshes[bucket];
             if (mesh && mesh->isValid()) {
-                visibleByBucket[bucket].push_back({bucket, section, sectionDistance});
+                visibleByBucket[bucket].push_back({bucket, section});
             }
         }
     }
@@ -897,8 +897,6 @@ void submitProjectionMeshPass(
         auto& opaqueMeshes = visibleByBucket[opaqueBucket];
         auto& alphaMeshes = visibleByBucket[alphaBucket];
         auto& alphaOneSidedMeshes = visibleByBucket[alphaOneSidedBucket];
-        auto& transparentMeshes = visibleByBucket[blendBucket];
-        sortBackToFront(transparentMeshes);
 
         // Biome-tinted blocks (leaves, grass tops) carry their color in vertex
         // data, but the plain block materials' shaders have no COLOR input on
@@ -930,21 +928,31 @@ void submitProjectionMeshPass(
                     : (materialExists(alphaMaterial) ? alphaMaterial : blendMaterial)
             );
         } else {
+            std::vector<VisibleMesh> transparentMeshes;
+            transparentMeshes.reserve(visibleByBucket[blendBucket].size());
+            for (auto const section : backToFrontSections) {
+                auto const& mesh = state.sections[section].meshes[blendBucket];
+                if (mesh && mesh->isValid()) {
+                    transparentMeshes.push_back({blendBucket, section});
+                }
+            }
             renderMeshes(transparentMeshes, blendMaterial);
         }
     } else if (renderAlphaLayer) {
         // True projection transparency needs a blending material even for
-        // normally opaque/cutout blocks. Sort every bucket together.
+        // normally opaque/cutout blocks. Reuse the common section order.
         std::vector<VisibleMesh> transparentMeshes;
         std::size_t transparentMeshCount{};
         for (auto const& bucket : visibleByBucket) transparentMeshCount += bucket.size();
         transparentMeshes.reserve(transparentMeshCount);
-        for (auto const& bucket : visibleByBucket) {
-            transparentMeshes.insert(
-                transparentMeshes.end(), bucket.begin(), bucket.end()
-            );
+        for (auto const section : backToFrontSections) {
+            for (std::size_t bucket = 0; bucket < bucketCount; ++bucket) {
+                auto const& mesh = state.sections[section].meshes[bucket];
+                if (mesh && mesh->isValid()) {
+                    transparentMeshes.push_back({bucket, section});
+                }
+            }
         }
-        sortBackToFront(transparentMeshes);
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
@@ -974,22 +982,11 @@ void submitProjectionMeshPass(
     // Textured liquid hulls travel the proven glass path: blend-block material
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
-        std::vector<std::size_t> liquidSections;
-        for (std::size_t liquidSection = 0;
-             liquidSection < state.liquidProxySectionMeshes.size();
-             ++liquidSection) {
-            auto const& mesh = state.liquidProxySectionMeshes[liquidSection];
-            if (mesh && mesh->isValid()) liquidSections.push_back(liquidSection);
-        }
-        std::sort(
-            liquidSections.begin(),
-            liquidSections.end(),
-            [&](std::size_t lhs, std::size_t rhs) {
-                return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
-            }
-        );
-        for (auto const liquidSection : liquidSections) {
-            auto& mesh = *state.liquidProxySectionMeshes[liquidSection];
+        for (auto const liquidSection : backToFrontSections) {
+            if (liquidSection >= state.liquidProxySectionMeshes.size()) continue;
+            auto const& proxyMesh = state.liquidProxySectionMeshes[liquidSection];
+            if (!proxyMesh || !proxyMesh->isValid()) continue;
+            auto& mesh = *proxyMesh;
             mesh.renderMesh(
                 renderContext.mScreenContext,
                 blendMaterial,
