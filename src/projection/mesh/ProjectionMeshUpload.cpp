@@ -39,6 +39,7 @@ void markSectionDirty(ProjectionState& state, std::size_t section, bool incremen
     auto& sectionState = state.sections[section];
     if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
+    state.dirtySections.insert(section);
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
 }
 
