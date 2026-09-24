@@ -189,7 +189,6 @@ void scheduleProjectionMeshBuild(
     // Correction face culling only needs extras in this section and its six
     // direct neighbors. Avoid copying the complete sparse set for every async
     // section build on large projections.
-    auto const [sectionX, sectionY, sectionZ] = state.localSectionKeys[section];
     constexpr int neighborSections[7][3] = {
         {0, 0, 0}, {-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
         {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
