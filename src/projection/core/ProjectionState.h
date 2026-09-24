@@ -136,6 +136,9 @@ struct ProjectionState {
     std::unique_ptr<mce::Mesh>              structureBoundsMesh;
     std::vector<SectionState>               sections;
     std::vector<std::size_t>                blockToSection;
+    // Exact set of dirty sections. The scheduler can prioritize only pending
+    // work instead of rescanning every section for each worker submission.
+    std::unordered_set<std::size_t>          dirtySections;
     std::size_t                             dirtySectionCursor{};
     std::uint64_t                           meshWorkerGeneration{};
     int                                     consecutiveMeshWorkerFailures{};
