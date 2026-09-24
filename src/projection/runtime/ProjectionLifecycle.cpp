@@ -94,10 +94,6 @@ bool prepareProjectionState(
     state.cachedRotation = -1;
     state.cachedMirror = -1;
 
-    auto const floorDiv16 = [](int value) {
-        return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
-    };
-
     std::vector<Vec3> centers;
     state.blockToSection.resize(state.structure->renderBlocks.size());
     state.expectedLocalCells.reserve(state.structure->renderBlocks.size());
@@ -108,7 +104,9 @@ bool prepareProjectionState(
         auto const& entry = state.structure->renderBlocks[index];
         state.expectedLocalCells.emplace(entry.x, entry.y, entry.z);
         auto const key = std::tuple{
-            floorDiv16(entry.x), floorDiv16(entry.y), floorDiv16(entry.z)
+            projectionSectionCoordinate(entry.x),
+            projectionSectionCoordinate(entry.y),
+            projectionSectionCoordinate(entry.z)
         };
         auto [found, inserted] = state.localSectionIndices.try_emplace(
             key, state.sectionBlockIndices.size()
