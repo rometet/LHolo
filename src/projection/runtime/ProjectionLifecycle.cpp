@@ -94,16 +94,28 @@ bool prepareProjectionState(
     state.cachedRotation = -1;
     state.cachedMirror = -1;
 
+    auto const floorDiv16 = [](int value) {
+        return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
+    };
+
     std::vector<Vec3> centers;
     state.blockToSection.resize(state.structure->renderBlocks.size());
+    state.expectedLocalCells.reserve(state.structure->renderBlocks.size());
+    state.localSectionIndices.reserve(
+        std::max<std::size_t>(state.structure->renderBlocks.size() / 64U, 16U)
+    );
     for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
         auto const& entry = state.structure->renderBlocks[index];
-        auto const key = std::tuple{entry.x / 16, entry.y / 16, entry.z / 16};
+        state.expectedLocalCells.emplace(entry.x, entry.y, entry.z);
+        auto const key = std::tuple{
+            floorDiv16(entry.x), floorDiv16(entry.y), floorDiv16(entry.z)
+        };
         auto [found, inserted] = state.localSectionIndices.try_emplace(
             key, state.sectionBlockIndices.size()
         );
         if (inserted) {
             state.sectionBlockIndices.emplace_back();
+            state.sectionLiquidBlockIndices.emplace_back();
             state.localSectionKeys.push_back(key);
             auto const [sx, sy, sz] = key;
             centers.emplace_back(
@@ -114,6 +126,9 @@ bool prepareProjectionState(
         }
         state.blockToSection[index] = found->second;
         state.sectionBlockIndices[found->second].push_back(index);
+        if (entry.liquid) {
+            state.sectionLiquidBlockIndices[found->second].push_back(index);
+        }
     }
     initializeSectionStates(state.sections, centers);
     state.warningFillSectionMeshes.resize(state.sectionBlockIndices.size());
