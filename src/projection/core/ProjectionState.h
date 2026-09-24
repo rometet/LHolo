@@ -16,6 +16,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
+#include <set>
 #include <variant>
 #include <vector>
 
@@ -115,7 +116,7 @@ struct ProjectionState {
     std::vector<SubChunkKey>              localSectionKeys;
     std::unordered_set<SubChunkKey, SubChunkKeyHash> detectedExtraBlockPositions;
     std::unordered_set<SubChunkKey, SubChunkKeyHash> extraBlockPositions;
-    std::vector<std::unordered_set<SubChunkKey, SubChunkKeyHash>> sectionExtraBlockPositions;
+    std::vector<std::set<SubChunkKey>>    sectionExtraBlockPositions;
     // Correction meshes are split by category so the see-through (X-ray) option
     // can apply to the wrong-type/wrong-state markers only, never to the many
     // "missing" outlines. warningFill/correctionOutline hold the MISSING cells;
