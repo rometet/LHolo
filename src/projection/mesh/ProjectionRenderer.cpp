@@ -11,6 +11,7 @@
 #include "plugin/LHolo.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -845,11 +846,11 @@ void submitProjectionMeshPass(
     struct VisibleMesh {
         std::size_t bucket;
         std::size_t section;
+        float       distanceSquared;
     };
-    auto sortBackToFront = [&](std::vector<VisibleMesh>& meshes) {
-        std::sort(meshes.begin(), meshes.end(), [&](VisibleMesh const& lhs, VisibleMesh const& rhs) {
-            return distanceSquared(worldCenter(lhs.section))
-                > distanceSquared(worldCenter(rhs.section));
+    auto sortBackToFront = [](std::vector<VisibleMesh>& meshes) {
+        std::sort(meshes.begin(), meshes.end(), [](VisibleMesh const& lhs, VisibleMesh const& rhs) {
+            return lhs.distanceSquared > rhs.distanceSquared;
         });
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
@@ -867,27 +868,29 @@ void submitProjectionMeshPass(
             );
         }
     };
-    auto collectBucket = [&](std::size_t bucket) {
-        std::vector<VisibleMesh> result;
-        result.reserve(state.sections.size());
-        for (std::size_t section = 0; section < state.sections.size(); ++section) {
-            auto const& mesh = state.sections[section].meshes[bucket];
-            if (mesh && mesh->isValid()) {
-                result.push_back({bucket, section});
-            }
-        }
-        return result;
-    };
 
     auto const opaqueBucket = static_cast<std::size_t>(RenderBucket::Opaque);
     auto const alphaBucket = static_cast<std::size_t>(RenderBucket::Alpha);
     auto const alphaOneSidedBucket = static_cast<std::size_t>(RenderBucket::AlphaOneSided);
     auto const blendBucket = static_cast<std::size_t>(RenderBucket::Blend);
+    constexpr auto bucketCount = static_cast<std::size_t>(RenderBucket::Count);
+    std::array<std::vector<VisibleMesh>, bucketCount> visibleByBucket;
+    for (auto& bucket : visibleByBucket) bucket.reserve(state.sections.size() / bucketCount + 1U);
+    for (std::size_t section = 0; section < state.sections.size(); ++section) {
+        auto const sectionDistance = distanceSquared(worldCenter(section));
+        for (std::size_t bucket = 0; bucket < bucketCount; ++bucket) {
+            auto const& mesh = state.sections[section].meshes[bucket];
+            if (mesh && mesh->isValid()) {
+                visibleByBucket[bucket].push_back({bucket, section, sectionDistance});
+            }
+        }
+    }
+
     if (structureOpacity >= 0.999f) {
-        auto opaqueMeshes = collectBucket(opaqueBucket);
-        auto alphaMeshes = collectBucket(alphaBucket);
-        auto alphaOneSidedMeshes = collectBucket(alphaOneSidedBucket);
-        auto transparentMeshes = collectBucket(blendBucket);
+        auto& opaqueMeshes = visibleByBucket[opaqueBucket];
+        auto& alphaMeshes = visibleByBucket[alphaBucket];
+        auto& alphaOneSidedMeshes = visibleByBucket[alphaOneSidedBucket];
+        auto& transparentMeshes = visibleByBucket[blendBucket];
         sortBackToFront(transparentMeshes);
 
         // Biome-tinted blocks (leaves, grass tops) carry their color in vertex
@@ -926,12 +929,12 @@ void submitProjectionMeshPass(
         // True projection transparency needs a blending material even for
         // normally opaque/cutout blocks. Sort every bucket together.
         std::vector<VisibleMesh> transparentMeshes;
-        for (std::size_t bucket = 0;
-             bucket < static_cast<std::size_t>(RenderBucket::Count);
-             ++bucket) {
-            auto bucketMeshes = collectBucket(bucket);
+        std::size_t transparentMeshCount{};
+        for (auto const& bucket : visibleByBucket) transparentMeshCount += bucket.size();
+        transparentMeshes.reserve(transparentMeshCount);
+        for (auto const& bucket : visibleByBucket) {
             transparentMeshes.insert(
-                transparentMeshes.end(), bucketMeshes.begin(), bucketMeshes.end()
+                transparentMeshes.end(), bucket.begin(), bucket.end()
             );
         }
         sortBackToFront(transparentMeshes);
