@@ -70,13 +70,12 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     if (result.placementMoved && !result.geometryTransformChanged) {
         // Local geometry survives an XYZ move, but a task already sampling the
         // previous world position must not be accepted.
-        for (auto& sectionState : state.sections) {
+        for (std::size_t section = 0; section < state.sections.size(); ++section) {
+            auto& sectionState = state.sections[section];
             ++sectionState.requestedRevision;
             if (sectionState.buildInFlight) {
                 sectionState.dirty = true;
-                state.dirtySections.insert(
-                    static_cast<std::size_t>(&sectionState - state.sections.data())
-                );
+                state.dirtySections.insert(section);
             }
         }
     }
