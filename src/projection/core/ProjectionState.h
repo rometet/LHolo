@@ -16,7 +16,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
-#include <set>
 #include <variant>
 #include <vector>
 
@@ -88,7 +87,7 @@ struct ProjectionState {
     std::size_t                     correctionScanCursor{};
     std::size_t                     extraScanRegion{};
     std::uint64_t                   extraScanCell{};
-    std::set<SubChunkKey>           pendingLoadedSubChunks;
+    std::unordered_set<SubChunkKey, SubChunkKeyHash> pendingLoadedSubChunks;
     std::vector<BrokenProjectionCell> pendingBrokenCells;
     int                             cachedRotation{-1};
     int                             cachedMirror{-1};
