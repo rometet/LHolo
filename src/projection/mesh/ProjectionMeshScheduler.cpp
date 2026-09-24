@@ -179,9 +179,18 @@ void scheduleProjectionMeshBuild(
     snapshot->structureGeneration = state.structureGeneration;
     snapshot->anchor = state.anchor;
     // Structure data and the virtual projected world are immutable for one
-    // placement generation. Only correction bytes need a task-local copy.
+    // placement generation. Share one immutable correction snapshot across all
+    // section tasks until a correction revision changes.
     snapshot->structure = state.structure;
-    snapshot->correctionStates = state.correctionStates;
+    if (!state.meshCorrectionSnapshot
+        || state.meshCorrectionSnapshotRevision != state.correctionStateRevision) {
+        state.meshCorrectionSnapshot =
+            std::make_shared<std::vector<CorrectionState>>(state.correctionStates);
+        state.meshCorrectionSnapshotRevision = state.correctionStateRevision;
+    }
+    snapshot->meshCorrectionSnapshot = state.meshCorrectionSnapshot;
+    snapshot->meshCorrectionSnapshotRevision = state.meshCorrectionSnapshotRevision;
+    snapshot->correctionStateRevision = state.correctionStateRevision;
     snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
     snapshot->sectionLiquidBlockIndices = {state.sectionLiquidBlockIndices[section]};
