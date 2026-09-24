@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <memory>
@@ -70,7 +69,7 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
 
     Vec3 const camera{impl[10], impl[11], impl[12]};
     constexpr float kSaneCoordinateLimit = 100'000'000.0f;
-    auto const sane = [](float value) {
+    auto const sane = [kSaneCoordinateLimit](float value) {
         return std::isfinite(value) && std::abs(value) <= kSaneCoordinateLimit;
     };
     if (sane(camera.x) && sane(camera.y) && sane(camera.z)) return camera;
