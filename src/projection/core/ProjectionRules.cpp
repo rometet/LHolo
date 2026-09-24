@@ -22,6 +22,7 @@
 #include "mc/world/level/block/BlockType.h"
 #include "mc/world/level/block/NeighborDirection.h"
 #include "mc/world/level/block/VanillaStates.h"
+#include "mc/world/level/block/states/BuiltInBlockStates.h"
 #include "mc/world/level/block/states/VanillaBlockStateTransformUtils.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
 
@@ -85,11 +86,21 @@ Block const& withFlattenedConnections(
     BlockPos const& position
 ) {
     auto const& blockType = block.getBlockType();
-    if (!blockType.isFenceBlock() && !blockType.isThinFenceBlock()) return block;
+    // v1_26_20 data-driven connection archetypes can carry flattened connection
+    // state without reporting one of the legacy C++ fence predicates. Keep the
+    // legacy predicates as a compatibility fallback, but also admit any block
+    // that exposes ConnectionNorth so panes/bars/tripwire cannot regress to a
+    // bare post before the vanilla connection update gets a chance to run.
+    auto const hasFlattenedConnectionState =
+        block.getState<bool>(BuiltInBlockStates::ConnectionNorth()).has_value();
+    if (!hasFlattenedConnectionState
+        && !blockType.isFenceBlock()
+        && !blockType.isThinFenceBlock()) {
+        return block;
+    }
     // The vanilla connection update knows every family's connection rules,
-    // including the data-driven ones (glass panes, iron bars) whose arms are
-    // not stored in the builtin Connection states, so deriving states by hand
-    // cannot cover them. It also APPLIES the recomputed block to the region
+    // including data-driven archetypes, so deriving states by hand cannot
+    // cover them reliably. It also APPLIES the recomputed block to the region
     // it is given — that filled the real world with ghost blocks — so run it
     // with region writes suppressed and use only its return value. Neighbor
     // reads still answer with the projected blocks while a tessellation scope
