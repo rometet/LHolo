@@ -28,18 +28,6 @@
 namespace lholo::projection::detail {
 namespace {
 
-void markSectionDirty(ProjectionState& state, std::size_t section) {
-    if (section >= state.sections.size()) return;
-    auto& sectionState = state.sections[section];
-    // Once a section is dirty, further changes are already coalesced into the
-    // next build. Only the transition from clean -> dirty needs a new revision
-    // to invalidate an in-flight result.
-    if (!sectionState.dirty) ++sectionState.requestedRevision;
-    sectionState.dirty = true;
-    state.dirtySections.insert(section);
-    sectionState.incrementalDirty = true;
-}
-
 SubChunkKey localSectionKey(BlockPos const& position) {
     return {
         projectionSectionCoordinate(position.x),
@@ -201,7 +189,7 @@ CorrectionProgressChanges updateCorrectionTracker(
         if (state.correctionStates[index] != nextState) {
             state.correctionStates[index] = nextState;
             ++state.correctionStateRevision;
-            markSectionDirty(state, state.blockToSection[index]);
+            markProjectionSectionDirty(state, state.blockToSection[index], true);
             // A missing-cell shell omits faces shared with adjacent missing
             // cells. If either side changes, both section meshes may need an
             // exposed face added or removed (including across 16^3 borders).
@@ -214,7 +202,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                     position.x + delta[0], position.y + delta[1], position.z + delta[2]
                 });
                 if (neighbor != state.expectedWorldBlockIndices->end()) {
-                    markSectionDirty(state, state.blockToSection[neighbor->second]);
+                    markProjectionSectionDirty(state, state.blockToSection[neighbor->second], true);
                 }
             }
         }
@@ -264,7 +252,7 @@ CorrectionProgressChanges updateCorrectionTracker(
             state.extraBlockPositions.erase(rendered);
             state.sectionExtraBlockPositions[section].erase(key);
         }
-        markSectionDirty(state, section);
+        markProjectionSectionDirty(state, section, true);
         constexpr int neighbors[6][3] = {
             {-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
             {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
@@ -276,7 +264,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                 localPosition.z + delta[2],
             };
             auto const found = state.localSectionIndices.find(localSectionKey(neighbor));
-            if (found != state.localSectionIndices.end()) markSectionDirty(state, found->second);
+            if (found != state.localSectionIndices.end()) markProjectionSectionDirty(state, found->second, true);
         }
     };
 
