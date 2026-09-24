@@ -461,7 +461,7 @@ void buildProjectionSection(
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correctionState = state.correctionStates[index];
+        auto const correctionState = correctionStateForMeshBuild(state, index);
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
         // only their red/yellow outline below. This removes the
@@ -804,7 +804,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     std::vector<std::size_t> candidates;
     candidates.reserve(state.sectionLiquidBlockIndices[section].size());
     for (auto const index : state.sectionLiquidBlockIndices[section]) {
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (correctionStateForMeshBuild(state, index) != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
 
@@ -1166,7 +1166,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     std::vector<PraxisCompatLiquidKind> liquidKinds;
     candidates.reserve(state.sectionLiquidBlockIndices[section].size());
     for (auto const index : state.sectionLiquidBlockIndices[section]) {
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (correctionStateForMeshBuild(state, index) != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
     std::vector<std::size_t> succeeded;
@@ -1532,7 +1532,7 @@ void buildLiquidProxySectionMesh(
     std::vector<std::size_t> liquidProxyIndices;
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (correctionStateForMeshBuild(state, index) != CorrectionState::Missing) continue;
         if (std::binary_search(
                 nativeLiquidSucceeded.begin(),
                 nativeLiquidSucceeded.end(),
@@ -1702,7 +1702,7 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (correctionStateForMeshBuild(state, index) != CorrectionState::Missing) continue;
         if (state.blockActorRendererAvailable[index]) continue;
         blockEntityIndices.push_back(index);
     }
@@ -1803,7 +1803,7 @@ void buildCorrectionSectionMeshes(
     std::size_t missingCount{};
     std::size_t wrongCount{};
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correction = state.correctionStates[index];
+        auto const correction = correctionStateForMeshBuild(state, index);
         if (isWrongState(correction)) ++wrongCount;
         else if (correction == CorrectionState::Missing) ++missingCount;
     }
@@ -1835,7 +1835,7 @@ void buildCorrectionSectionMeshes(
             false
         );
         for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.correctionStates[index];
+            auto const correction = correctionStateForMeshBuild(state, index);
             auto const priority = correctionPriority(correction);
             if (priority == 0) continue;
             if (isWrongState(correction) != wantWrong) continue;
@@ -1923,7 +1923,7 @@ void buildCorrectionSectionMeshes(
                 worldPosition.x, worldPosition.y, worldPosition.z
             });
             auto priority = expected == state.expectedWorldBlockIndices->end()
-                ? 0 : correctionPriority(state.correctionStates[expected->second]);
+                ? 0 : correctionPriority(correctionStateForMeshBuild(state, expected->second));
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
                 *state.structure,
@@ -1938,7 +1938,7 @@ void buildCorrectionSectionMeshes(
             return priority;
         };
         for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.correctionStates[index];
+            auto const correction = correctionStateForMeshBuild(state, index);
             auto const priority = correctionPriority(correction);
             if (priority == 0) continue;
             if (isWrongState(correction) != wantWrong) continue;
