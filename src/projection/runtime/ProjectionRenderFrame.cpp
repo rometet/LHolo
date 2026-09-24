@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cmath>
 #include <cstddef>
 #include <exception>
 #include <memory>
@@ -66,7 +67,22 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
     // for both the ScreenContext camera and IClientInstance::getCamera().
     auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
     if (!impl) return {};
-    return {impl[10], impl[11], impl[12]};
+
+    Vec3 const camera{impl[10], impl[11], impl[12]};
+    constexpr float kSaneCoordinateLimit = 100'000'000.0f;
+    auto const sane = [](float value) {
+        return std::isfinite(value) && std::abs(value) <= kSaneCoordinateLimit;
+    };
+    if (sane(camera.x) && sane(camera.y) && sane(camera.z)) return camera;
+
+    // Fail closed on a future layout change instead of feeding NaN/garbage
+    // into matrix translation and distance sorting. The player position is not
+    // a perfect eye position, but is a safe typed fallback until a public
+    // BaseActorRenderContext camera accessor is available again.
+    if (auto* player = renderContext.mClientInstance.getLocalPlayer()) {
+        return player->getPosition();
+    }
+    return {};
 }
 
 auto& logger() {
