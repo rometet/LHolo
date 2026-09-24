@@ -10,7 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
-#include <map>
+#include <functional>
+#include <unordered_map>
 #include <memory>
 #include <tuple>
 #include <vector>
@@ -26,6 +27,26 @@ class BlockActor;
 namespace lholo::projection::detail {
 
 using SubChunkKey = std::tuple<int, int, int>;
+
+struct SubChunkKeyHash {
+    [[nodiscard]] std::size_t operator()(SubChunkKey const& key) const noexcept {
+        auto const [x, y, z] = key;
+        // 64-bit mix of signed block/section coordinates. Converting through
+        // uint32_t preserves the full two's-complement bit pattern for negative
+        // coordinates and keeps world lookups O(1) on large projections.
+        auto mix = [](std::size_t seed, std::uint32_t value) {
+            seed ^= static_cast<std::size_t>(value)
+                + static_cast<std::size_t>(0x9e3779b9U)
+                + (seed << 6U) + (seed >> 2U);
+            return seed;
+        };
+        std::size_t seed = static_cast<std::size_t>(0xcbf29ce484222325ULL);
+        seed = mix(seed, static_cast<std::uint32_t>(x));
+        seed = mix(seed, static_cast<std::uint32_t>(y));
+        seed = mix(seed, static_cast<std::uint32_t>(z));
+        return seed;
+    }
+};
 
 enum class CorrectionState : std::uint8_t { Unknown, Missing, Correct, WrongType, WrongState };
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
@@ -185,9 +206,9 @@ struct ProjectedBlockActor {
     std::size_t  structureIndex{};
 };
 
-using ExpectedBlockMap      = std::map<SubChunkKey, Block const*>;
-using ExpectedLiquidMap     = std::map<SubChunkKey, Block const*>;
-using ExpectedBlockActorMap = std::map<SubChunkKey, std::shared_ptr<BlockActor>>;
-using ExpectedBlockIndexMap = std::map<SubChunkKey, std::size_t>;
+using ExpectedBlockMap      = std::unordered_map<SubChunkKey, Block const*, SubChunkKeyHash>;
+using ExpectedLiquidMap     = std::unordered_map<SubChunkKey, Block const*, SubChunkKeyHash>;
+using ExpectedBlockActorMap = std::unordered_map<SubChunkKey, std::shared_ptr<BlockActor>, SubChunkKeyHash>;
+using ExpectedBlockIndexMap = std::unordered_map<SubChunkKey, std::size_t, SubChunkKeyHash>;
 
 } // namespace lholo::projection::detail
