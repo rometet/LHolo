@@ -28,6 +28,10 @@ namespace lholo::projection::detail {
 
 using SubChunkKey = std::tuple<int, int, int>;
 
+[[nodiscard]] inline constexpr int projectionSectionCoordinate(int value) noexcept {
+    return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
+}
+
 struct SubChunkKeyHash {
     [[nodiscard]] std::size_t operator()(SubChunkKey const& key) const noexcept {
         auto const [x, y, z] = key;
