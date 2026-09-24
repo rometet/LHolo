@@ -77,11 +77,11 @@ void testSectionOccupancy() {
     BlockPos const negativeBoundary{-16, -16, -16};
     BlockPos const nextNegativeSection{-17, -17, -17};
 
-    LHOLO_CHECK(projectionSectionKey(first) == SubChunkKey{0, 0, 0});
-    LHOLO_CHECK(projectionSectionKey(edge) == SubChunkKey{0, 0, 0});
-    LHOLO_CHECK(projectionSectionKey(negative) == SubChunkKey{-1, -1, -1});
-    LHOLO_CHECK(projectionSectionKey(negativeBoundary) == SubChunkKey{-1, -1, -1});
-    LHOLO_CHECK(projectionSectionKey(nextNegativeSection) == SubChunkKey{-2, -2, -2});
+    LHOLO_CHECK((projectionSectionKey(first) == SubChunkKey{0, 0, 0}));
+    LHOLO_CHECK((projectionSectionKey(edge) == SubChunkKey{0, 0, 0}));
+    LHOLO_CHECK((projectionSectionKey(negative) == SubChunkKey{-1, -1, -1}));
+    LHOLO_CHECK((projectionSectionKey(negativeBoundary) == SubChunkKey{-1, -1, -1}));
+    LHOLO_CHECK((projectionSectionKey(nextNegativeSection) == SubChunkKey{-2, -2, -2}));
 
     LHOLO_CHECK(!projectionSectionOccupied(occupancy, first));
     markProjectionSectionOccupied(occupancy, first);
