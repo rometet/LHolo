@@ -192,7 +192,11 @@ void scheduleProjectionMeshBuild(
     snapshot->meshCorrectionSnapshot = state.meshCorrectionSnapshot;
     snapshot->meshCorrectionSnapshotRevision = state.meshCorrectionSnapshotRevision;
     snapshot->correctionStateRevision = state.correctionStateRevision;
-    snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
+    if (!state.meshBlockActorRendererSnapshot) {
+        state.meshBlockActorRendererSnapshot =
+            std::make_shared<std::vector<uchar>>(state.blockActorRendererAvailable);
+    }
+    snapshot->meshBlockActorRendererSnapshot = state.meshBlockActorRendererSnapshot;
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
     snapshot->sectionLiquidBlockIndices = {state.sectionLiquidBlockIndices[section]};
     snapshot->sectionExtraBlockPositions = {state.sectionExtraBlockPositions[section]};
