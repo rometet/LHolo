@@ -60,6 +60,9 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         || opacityChanged || correctionStyleChanged) {
         state.meshPreflightDone = false;
     }
+    if (result.geometryTransformChanged || result.layerChanged) {
+        ++state.correctionStateRevision;
+    }
     if (result.geometryTransformChanged || opacityChanged || correctionStyleChanged) {
         markAllSectionsDirty(state, false);
     }
