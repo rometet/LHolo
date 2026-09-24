@@ -34,15 +34,6 @@ auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
 }
 
-void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
-    if (section >= state.sections.size()) return;
-    auto& sectionState = state.sections[section];
-    if (!sectionState.dirty) ++sectionState.requestedRevision;
-    sectionState.dirty = true;
-    state.dirtySections.insert(section);
-    sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
-}
-
 void mergeNativeLiquidTelemetry(
     NativeLiquidTelemetry&       destination,
     NativeLiquidTelemetry const& source
@@ -148,7 +139,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
             auto const section = result.section;
             state.sections[section].buildInFlight = false;
             if (!result.success) {
-                markSectionDirty(state, section, true);
+                markProjectionSectionDirty(state, section, true);
                 logger().warn(
                     "Projection mesh worker section {} revision {} failed: {} (expected {}, actual {}; snapshot {} us, build {} us)",
                     section,
@@ -280,7 +271,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     "Projection mesh upload for section {} revision {} failed: {}",
                     section, result.revision, exception.what()
                 );
-                markSectionDirty(state, section, true);
+                markProjectionSectionDirty(state, section, true);
                 if (++state.consecutiveMeshWorkerFailures >= 3) {
                     state.asyncMeshBuildingEnabled = false;
                     disableMeshWorkerForSession();
@@ -292,7 +283,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     "Projection mesh upload for section {} revision {} failed with a non-standard exception",
                     section, result.revision
                 );
-                markSectionDirty(state, section, true);
+                markProjectionSectionDirty(state, section, true);
                 if (++state.consecutiveMeshWorkerFailures >= 3) {
                     state.asyncMeshBuildingEnabled = false;
                     disableMeshWorkerForSession();
