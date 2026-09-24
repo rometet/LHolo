@@ -53,7 +53,8 @@ std::optional<std::size_t> selectNextDirtySection(
     std::optional<std::size_t> selected;
     bool                       selectedIncremental{};
     float                      selectedDistance = std::numeric_limits<float>::max();
-    for (std::size_t section = 0; section < state.sections.size(); ++section) {
+    for (auto const section : state.dirtySections) {
+        if (section >= state.sections.size()) continue;
         auto const& sectionState = state.sections[section];
         if (!sectionState.dirty || sectionState.buildInFlight) continue;
         auto const incremental = sectionState.incrementalDirty;
@@ -369,6 +370,7 @@ void scheduleProjectionMeshBuild(
     if (submitted) {
         state.sections[section].buildInFlight = true;
         state.sections[section].dirty = false;
+        state.dirtySections.erase(section);
     } else if (++state.consecutiveMeshWorkerFailures >= 3) {
         state.asyncMeshBuildingEnabled = false;
         disableMeshWorkerForSession();
@@ -389,10 +391,14 @@ void buildNextProjectionSectionSynchronously(
     if (state.asyncMeshBuildingEnabled) return;
 
     // Compatibility path: preserve one synchronous section per frame when
-    // worker creation or three consecutive worker operations fail.
-    for (std::size_t attempt = 0; attempt < state.sections.size(); ++attempt) {
-        auto const section = state.dirtySectionCursor++ % state.sections.size();
-        if (!state.sections[section].dirty) continue;
+    // worker creation or repeated worker operations fail.
+    while (!state.dirtySections.empty()) {
+        auto const section = *state.dirtySections.begin();
+        state.dirtySections.erase(section);
+        if (section >= state.sections.size() || !state.sections[section].dirty
+            || state.sections[section].buildInFlight) {
+            continue;
+        }
         state.sections[section].dirty = false;
         buildProjectionSection(
             state,
