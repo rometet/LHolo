@@ -13,7 +13,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <set>
 #include <variant>
@@ -96,14 +97,20 @@ struct ProjectionState {
     float                           cachedCorrectionFillOpacity{-1.0f};
     float                           cachedCorrectionOutlineOpacity{-1.0f};
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
+    // Liquid-only indices avoid rescanning every block in a section for both
+    // the retained and Praxis-compatible liquid builders.
+    std::vector<std::vector<std::size_t>> sectionLiquidBlockIndices;
+    // Local occupied cells are immutable for the projection generation and
+    // make extra-block discovery O(1) instead of lower_bound over renderBlocks.
+    std::unordered_set<SubChunkKey, SubChunkKeyHash> expectedLocalCells;
     // Extra blocks occupy cells that have no render-block index. The detected
     // set covers the whole source region for HUD counting; the render set and
     // per-section sets contain only the current visible range. All stay sparse.
-    std::map<SubChunkKey, std::size_t>    localSectionIndices;
+    std::unordered_map<SubChunkKey, std::size_t, SubChunkKeyHash> localSectionIndices;
     std::vector<SubChunkKey>              localSectionKeys;
-    std::set<SubChunkKey>                 detectedExtraBlockPositions;
-    std::set<SubChunkKey>                 extraBlockPositions;
-    std::vector<std::set<SubChunkKey>>    sectionExtraBlockPositions;
+    std::unordered_set<SubChunkKey, SubChunkKeyHash> detectedExtraBlockPositions;
+    std::unordered_set<SubChunkKey, SubChunkKeyHash> extraBlockPositions;
+    std::vector<std::unordered_set<SubChunkKey, SubChunkKeyHash>> sectionExtraBlockPositions;
     // Correction meshes are split by category so the see-through (X-ray) option
     // can apply to the wrong-type/wrong-state markers only, never to the many
     // "missing" outlines. warningFill/correctionOutline hold the MISSING cells;
