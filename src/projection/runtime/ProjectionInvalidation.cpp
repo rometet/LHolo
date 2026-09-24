@@ -22,6 +22,7 @@ void markSectionDirty(ProjectionState& state, std::size_t section, bool incremen
     auto& sectionState = state.sections[section];
     if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
+    state.dirtySections.insert(section);
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
 }
 
@@ -71,7 +72,12 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         // previous world position must not be accepted.
         for (auto& sectionState : state.sections) {
             ++sectionState.requestedRevision;
-            if (sectionState.buildInFlight) sectionState.dirty = true;
+            if (sectionState.buildInFlight) {
+                sectionState.dirty = true;
+                state.dirtySections.insert(
+                    static_cast<std::size_t>(&sectionState - state.sections.data())
+                );
+            }
         }
     }
 
