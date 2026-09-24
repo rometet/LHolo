@@ -36,6 +36,7 @@ void markSectionDirty(ProjectionState& state, std::size_t section) {
     // to invalidate an in-flight result.
     if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
+    state.dirtySections.insert(section);
     sectionState.incrementalDirty = true;
 }
 
@@ -78,6 +79,7 @@ std::size_t ensureCorrectionSection(
     sectionState.dirty = true;
     sectionState.requestedRevision = 1;
     state.sections.push_back(std::move(sectionState));
+    state.dirtySections.insert(section);
     state.warningFillSectionMeshes.emplace_back();
     state.correctionOutlineSectionMeshes.emplace_back();
     state.wrongFillSectionMeshes.emplace_back();
