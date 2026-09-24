@@ -17,18 +17,9 @@
 namespace lholo::projection::detail {
 namespace {
 
-void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
-    if (section >= state.sections.size()) return;
-    auto& sectionState = state.sections[section];
-    if (!sectionState.dirty) ++sectionState.requestedRevision;
-    sectionState.dirty = true;
-    state.dirtySections.insert(section);
-    sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
-}
-
 void markAllSectionsDirty(ProjectionState& state, bool incremental) {
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        markSectionDirty(state, section, incremental);
+        markProjectionSectionDirty(state, section, incremental);
     }
 }
 
@@ -106,7 +97,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             auto const& entry = state.structure->renderBlocks[index];
             auto const visible = layerIsVisible(entry);
             if (oldLayerVisible(entry) == visible) continue;
-            markSectionDirty(state, state.blockToSection[index], false);
+            markProjectionSectionDirty(state, state.blockToSection[index], false);
             state.correctionStates[index] = visible
                 ? CorrectionState::Unknown
                 : CorrectionState::Correct;
