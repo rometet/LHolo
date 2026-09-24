@@ -20,9 +20,9 @@ namespace {
 void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
-    ++sectionState.requestedRevision;
 }
 
 void markAllSectionsDirty(ProjectionState& state, bool incremental) {
