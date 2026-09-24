@@ -18,6 +18,7 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
@@ -66,6 +67,21 @@ struct TestPosition {
 
 bool nearlyEqual(float lhs, float rhs) {
     return std::abs(lhs - rhs) < 0.00001f;
+}
+
+void testProjectionSectionCoordinates() {
+    LHOLO_CHECK(projectionSectionCoordinate(0) == 0);
+    LHOLO_CHECK(projectionSectionCoordinate(15) == 0);
+    LHOLO_CHECK(projectionSectionCoordinate(16) == 1);
+    LHOLO_CHECK(projectionSectionCoordinate(-1) == -1);
+    LHOLO_CHECK(projectionSectionCoordinate(-16) == -1);
+    LHOLO_CHECK(projectionSectionCoordinate(-17) == -2);
+
+    std::unordered_map<SubChunkKey, int, SubChunkKeyHash> cells;
+    cells.emplace(SubChunkKey{-1, 0, 1}, 7);
+    cells.emplace(SubChunkKey{15, -16, 32}, 9);
+    LHOLO_CHECK(cells.at(SubChunkKey{-1, 0, 1}) == 7);
+    LHOLO_CHECK(cells.at(SubChunkKey{15, -16, 32}) == 9);
 }
 
 void testNativeLiquidUvRemap() {
@@ -1208,6 +1224,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    testProjectionSectionCoordinates();
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();
