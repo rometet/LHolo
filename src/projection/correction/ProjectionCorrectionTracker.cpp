@@ -41,10 +41,11 @@ void markSectionDirty(ProjectionState& state, std::size_t section) {
 }
 
 SubChunkKey localSectionKey(BlockPos const& position) {
-    auto const floorDiv16 = [](int value) {
-        return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
+    return {
+        projectionSectionCoordinate(position.x),
+        projectionSectionCoordinate(position.y),
+        projectionSectionCoordinate(position.z)
     };
-    return {floorDiv16(position.x), floorDiv16(position.y), floorDiv16(position.z)};
 }
 
 std::size_t ensureCorrectionSection(
