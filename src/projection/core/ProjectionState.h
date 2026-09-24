@@ -169,6 +169,21 @@ struct ProjectionState {
     bool                                    meshPreflightDone{};
 };
 
+inline void markProjectionSectionDirty(
+    ProjectionState& state,
+    std::size_t      section,
+    bool             incremental
+) {
+    if (section >= state.sections.size()) return;
+    auto& sectionState = state.sections[section];
+    // A clean -> dirty transition invalidates an in-flight revision. Further
+    // changes are coalesced into the already-pending rebuild.
+    if (!sectionState.dirty) ++sectionState.requestedRevision;
+    sectionState.dirty = true;
+    sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
+    state.dirtySections.insert(section);
+}
+
 [[nodiscard]] inline CorrectionState correctionStateForMeshBuild(
     ProjectionState const& state,
     std::size_t            index
