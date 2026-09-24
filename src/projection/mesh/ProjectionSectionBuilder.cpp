@@ -1703,7 +1703,7 @@ void buildBlockEntityPlaceholderSectionMesh(
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
         if (correctionStateForMeshBuild(state, index) != CorrectionState::Missing) continue;
-        if (state.blockActorRendererAvailable[index]) continue;
+        if (blockActorRendererAvailableForMeshBuild(state, index)) continue;
         blockEntityIndices.push_back(index);
     }
     if (!blockEntityIndices.empty()) {
