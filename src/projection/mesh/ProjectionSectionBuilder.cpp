@@ -802,10 +802,9 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
         BoundingBox{}
     };
     std::vector<std::size_t> candidates;
-    candidates.reserve(state.sectionBlockIndices[section].size());
-    for (auto const index : state.sectionBlockIndices[section]) {
-        auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+    candidates.reserve(state.sectionLiquidBlockIndices[section].size());
+    for (auto const index : state.sectionLiquidBlockIndices[section]) {
+        if (state.correctionStates[index] != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
 
@@ -1165,10 +1164,9 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     };
     std::vector<std::size_t> candidates;
     std::vector<PraxisCompatLiquidKind> liquidKinds;
-    candidates.reserve(state.sectionBlockIndices[section].size());
-    for (auto const index : state.sectionBlockIndices[section]) {
-        auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+    candidates.reserve(state.sectionLiquidBlockIndices[section].size());
+    for (auto const index : state.sectionLiquidBlockIndices[section]) {
+        if (state.correctionStates[index] != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
     std::vector<std::size_t> succeeded;
