@@ -17,7 +17,6 @@ add_repositories("levimc-repo " .. (get_config("levimc_repo") or "https://github
 add_requires("levilamina 26.51.0", {configs = {target_type = get_config("target_type") or "client"}})
 add_requires("levibuildscript")
 add_requires("imgui v1.91.9", {configs = {shared = false, win32 = true, dx11 = true, no_demo_windows = true}})
-add_requires("minhook", {configs = {shared = false}})
 add_requires("zlib")
 
 if not has_config("vs_runtime") then
@@ -144,7 +143,7 @@ target("LHolo")
     )
     add_defines("NOMINMAX", "UNICODE")
     add_syslinks("user32", "comdlg32", "d3d11", "d3d12", "dxgi", "delayimp")
-    add_packages("levilamina", "imgui", "minhook", "zlib")
+    add_packages("levilamina", "imgui", "zlib")
 
     set_kind("shared")
     set_languages("c++20")
