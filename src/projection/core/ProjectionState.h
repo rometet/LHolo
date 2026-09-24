@@ -64,6 +64,11 @@ struct ProjectionState {
     std::uint64_t                   activationGeneration{};
     std::unique_ptr<BlockTessellator> blockTessellator;
     std::vector<CorrectionState>    correctionStates;
+    // Async builders keep an immutable revision snapshot instead of copying
+    // the entire correction vector for every section task.
+    std::uint64_t                   correctionStateRevision{1};
+    std::shared_ptr<std::vector<CorrectionState> const> meshCorrectionSnapshot;
+    std::uint64_t                   meshCorrectionSnapshotRevision{};
     // One byte per structure block. This is updated by the existing bounded
     // correction scan, so the HUD never performs its own world-block queries.
     std::vector<uchar>              progressCorrect;
@@ -161,5 +166,20 @@ struct ProjectionState {
     NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
 };
+
+[[nodiscard]] inline CorrectionState correctionStateForMeshBuild(
+    ProjectionState const& state,
+    std::size_t            index
+) noexcept {
+    if (!state.correctionStates.empty()) {
+        return index < state.correctionStates.size()
+            ? state.correctionStates[index]
+            : CorrectionState::Unknown;
+    }
+    if (state.meshCorrectionSnapshot && index < state.meshCorrectionSnapshot->size()) {
+        return (*state.meshCorrectionSnapshot)[index];
+    }
+    return CorrectionState::Unknown;
+}
 
 } // namespace lholo::projection::detail
