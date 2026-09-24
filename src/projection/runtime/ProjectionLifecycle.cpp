@@ -11,9 +11,9 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
-#include <map>
 #include <tuple>
 #include <utility>
 
