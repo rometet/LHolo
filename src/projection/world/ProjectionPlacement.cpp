@@ -93,6 +93,12 @@ void rebuildProjectionPlacement(
     state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
     state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
     state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
+    state.expectedWorldBlocks->reserve(
+        static_cast<std::size_t>(state.structure->primaryBlocks)
+    );
+    state.expectedWorldLiquids->reserve(
+        static_cast<std::size_t>(state.structure->secondaryBlocks)
+    );
     state.projectedBlockActors.clear();
     std::fill(
         state.blockActorRendererAvailable.begin(),
@@ -100,6 +106,7 @@ void rebuildProjectionPlacement(
         0
     );
     state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
+    state.expectedWorldBlockIndices->reserve(state.structure->renderBlocks.size());
     std::vector<Vec3> centerSums(state.sections.size(), Vec3{});
     std::vector<std::size_t> centerCounts(state.sections.size(), 0);
 
