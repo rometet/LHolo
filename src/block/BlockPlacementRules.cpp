@@ -19,6 +19,18 @@ ItemStack makePlacementItem(Block const& block) {
     // remaining route is default construction followed by reinit().
     ItemStack item;
     item.reinit(name, 1, 0);
+    if (!item.isNull()) return item;
+
+    // A runtime block is not necessarily registered as an inventory item under
+    // the same name (wall-mounted/connection-derived forms are common cases).
+    // The material tracker already used this native conversion, but placement
+    // did not, so a present material could be reported as missing. Preserve the
+    // working neutral-name path above, and use Bedrock's item id/aux only when
+    // it cannot resolve. Do not copy world block-state/NBT into the held item.
+    ItemInstance const gameItem{block};
+    if (!gameItem.isNull()) {
+        item.reinit(gameItem.getTypeName(), 1, gameItem.getAuxValue());
+    }
     return item;
 }
 
