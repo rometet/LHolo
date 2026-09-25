@@ -601,6 +601,20 @@ bool placementPredictionMatches(
     if (!serializedState(ghost, "pillar_axis").empty()) {
         return sameSerializedState(predicted, ghost, "pillar_axis");
     }
+    // Trapdoors are placement-controlled: direction comes from the clicked
+    // face/player orientation and upside_down_bit from the hit face/height.
+    // BlockType::allowStateMismatchOnPlacement() can be more permissive than
+    // LHolo needs here, so never let it accept a wrong-facing trapdoor.
+    // In manual mode an open projected trapdoor may be placed closed and opened
+    // afterwards, but its direction and top/bottom half must already be exact.
+    if (name == "minecraft:trapdoor" || name.ends_with("_trapdoor")) {
+        bool const orientationMatches =
+            sameSerializedState(predicted, ghost, "direction")
+            && sameSerializedState(predicted, ghost, "upside_down_bit");
+        if (!orientationMatches) return false;
+        return placementState().manualMode()
+            || sameSerializedState(predicted, ghost, "open_bit");
+    }
     // Walls, fences, glass panes and iron bars derive every connection state from
     // their neighbours after placement (nothing is chosen at placement), so accept
     // the placement on block identity alone — the connections resolve as the
