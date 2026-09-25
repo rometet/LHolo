@@ -93,8 +93,6 @@ std::filesystem::path settingsPath() {
     return LHolo::getInstance().getSelf().getConfigDir() / "config.json";
 }
 
-void resetWorldSession();
-
 unsigned int currentHotkeyModifiers() {
     return uiState().currentHotkeyModifiers();
 }
@@ -1022,12 +1020,12 @@ void clearProjectionSession(i18n::Message status) {
     resetJavaBlockMappingCache();
 }
 
+} // namespace
+
 void resetWorldSession() {
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusWorldExited});
     uiState().resetWorldSession();
 }
-
-} // namespace
 
 void clear() {
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusProjectionClosed});

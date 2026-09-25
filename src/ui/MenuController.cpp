@@ -312,8 +312,13 @@ MenuActions buildStructureMenuActions(bool& refreshModel) {
         auto const renderBlocks = loaded->renderBlocks.size();
         auto const status = structure::makeLoadedStatusMessage(*loaded);
         // A normal file load is a new user intent. Do not let an unconsumed
-        // restore request from an earlier failed/pending activation move it.
+        // restore request from an earlier failed/pending activation move it,
+        // and do not inherit the previous structure's manual transform —
+        // without this reset the new file lands where the old projection was
+        // moved to instead of at the player's feet. Restore-last-projection
+        // re-applies its saved transform explicitly, so it is unaffected.
         projection::cancelNextStructureAnchorRequest();
+        session.resetTransform();
         session.replaceLoaded(std::move(loaded), pathText, status);
         structure::detail::invalidateMaterialList();
         structure::saveSettings();

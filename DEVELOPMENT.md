@@ -20,7 +20,7 @@ LHolo 的投影、纠错、HUD 和菜单都只存在于客户端，不产生碰�
 正式版功能：
 
 - 从任意用户选择的路径加载 `.mcstructure` 或 `.litematic`，导入目录不写死。
-- 以加载时玩家脚下的整数方块坐标作为投影锚点；恢复记录时使用保存的锚点。
+- 以加载时玩家脚下的整数方块坐标作为投影锚点；恢复记录时使用保存的锚点。加载新文件是全新放置意图：重置旋转/镜像/偏移与分层（否则新结构会继承上一个结构被手动挪出的位置）；"恢复上次投影"不受影响，它显式应用保存的变换。
 - 支持 X/Y/Z 结构偏移、0°/90°/180°/270°旋转、X 或 Z 镜像。
 - 支持 Y 轴水平分层、X 轴纵向切片和按材料分层；材料分组按用量从多到少排序。
 - 显示范围支持“完整结构”“单层”“当前层及以下”“当前层及以上”；分层轴为“按材料”时上述范围按材料分组划分。
@@ -312,7 +312,7 @@ LHolo/
 3. 安装菜单输入保护：`MouseDevice::feed` 与 `HIDControllerGameCoreDesktop::$onKeyDown/$onKeyUp` 在游戏和原生 UI 处理前取得输入所有权。三项 Hook 状态独立告警，不阻断菜单启用。
 4. 尝试安装 ImGui/DXGI Hook；图形环境尚未可用时允许后续 `Present` 重试。
 
-配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。当前没有单独依赖世界退出事件；投影渲染入口通过 `client/level/dimension` 身份变化检测世界切换，并在上下文失效时调用 `projection::disable()` 等价的状态清理和 `structure::clear()`。
+配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。世界退出由 `LevelListener::onLevelDestruction()` 发布轻量信号；投影渲染入口和 Overlay Present 都能观察该信号，真正的结构、辅助放置、捕获和投影清理在引擎回调之外执行。投影渲染入口仍通过 `client/level/dimension` 身份变化检测世界/维度切换，并在上下文失效时清理投影。
 
 投影启用入口只有 `enableStructureProjection()`。它要求：
 
@@ -326,12 +326,11 @@ LHolo/
 当前关闭顺序：
 
 1. 保存配置。
-2. 投影停止接收网格任务，提升 Worker generation，清空待处理结果并等待 in-flight Worker 退出；随后清理投影状态和 GPU 网格。
+2. 清理辅助放置、结构、菜单、捕获和投影状态；投影停止接收网格任务，提升 Worker generation，清空待处理结果并等待 in-flight Worker 退出。
 3. 卸载菜单鼠标/HID 输入源 Hook。
 4. 卸载辅助放置的 tick/build Hook。
-5. 关闭 ImGui 图形后端、恢复原 WndProc、移除 MinHook。
-6. 清除已加载结构、菜单和快捷键运行态。
-7. 卸载投影 Hook。
+5. 卸载投影 Hook，防止渲染路径再次触发 Overlay 安装重试。
+6. 关闭 ImGui 图形后端、恢复原 WndProc、移除 MinHook，并清空 Overlay 输入缓存。
 
 ### 3.3 世界切换
 
@@ -370,11 +369,15 @@ LHolo/
 1. 读取文件，单文件上限 512 MiB。
 2. 使用 Bedrock little-endian binary NBT 解析。
 3. 校验 `size`、`structure.block_indices`、`palette.default.block_palette`。
-4. 校验两个 block index layer 的长度等于结构体积。
+4. 校验每个 block index layer 的长度等于结构体积。
 5. 使用客户端 Level 的 unknown-block registry 构造原版 `StructureTemplate`，再把完整根 NBT 交给 `StructureTemplate::load()`。不要逐项调用 `Block::tryGetFromRegistry()`：那条捷径会绕开格式版本升级、世界方块调色板和 unknown-block registry，旧状态可能被错误解析成未知方块。
 6. 从加载后的 `StructureTemplateData` 取得原版已升级的主/副索引数组和 `StructureBlockPalette`，用 `StructureBlockPalette::tryGetBlock()` 解析方块。不要用 `StructureTemplate::tryGetBlockAtPos()` 遍历文件：26.20 客户端该接口的坐标访问约定与 `.mcstructure` 的线性索引布局不一致，曾导致门上下半块错位和水取成错误方块。26.51 起 `mExtraBlockIndices` 是 `std::optional`：副层没有任何方块（全部为原版 `NO_BLOCK_INDEX_VALUE`，即结构不含水/含水方块）时，原版加载器会把整层收成空值，这不是损坏，按全空索引处理；仅当副层为空但文件自身第二层仍统计出占用格子（数据自相矛盾），或层有值但长度不等于体积时，才按“索引数量与结构体积不一致”拒绝。
-7. 依照格式文档的 ZYX 顺序还原线性索引：`index = x * (sizeY * sizeZ) + y * sizeZ + z`。主副层分别解析后，同一坐标的非液体写入实体层、液体写入液体层。
-8. 门的上下半块本来就是两个坐标、两个完整 palette state，不做合并；格式升级后的上下半块、铰链、朝向和开关状态由原版加载器保留。
+7. `block_indices` 有两种已知的文件形状（`format_version` 1 与 2），预校验必须都接受：
+   - format 1（旧）：`List<List<Int>>`——两个 Int 列表，主层 + 可选副层（水）。
+   - format 2（1.26.5x 起游戏导出）：`List<IntArray>`——每层一个 `TAG_Int_Array`，副层取消（含水内联为方块状态），通常只有一个 IntArray，长度等于体积。
+   - 差异仅在预校验与层读取（`inspectBlockLayer` 有 List/IntArray 两个重载）；真正的解析仍交给原版 `StructureTemplate::load()`，它把两种形状规范化为 `mBlockIndices` + `optional<mExtraBlockIndices>`。
+8. 依照格式文档的 ZYX 顺序还原线性索引：`index = x * (sizeY * sizeZ) + y * sizeZ + z`。主副层分别解析后，同一坐标的非液体写入实体层、液体写入液体层。
+9. 门的上下半块本来就是两个坐标、两个完整 palette state，不做合并；格式升级后的上下半块、铰链、朝向和开关状态由原版加载器保留。
 9. 原版加载失败、原版尺寸与文件尺寸不一致时直接拒绝加载，不再带着未知方块继续渲染。
 
 适配新版本时重点检查：`StructureTemplate` 构造与 `load()`、`StructureTemplateData` 索引访问、`StructureBlockPalette::tryGetBlock` 的符号及语义、NBT 标签路径和两个 block index 的格式。固定回归门的上下相邻坐标与水坐标；不要退化回手工注册表解析，也不要未经验证改用 `tryGetBlockAtPos()` 遍历。

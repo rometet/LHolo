@@ -117,7 +117,7 @@ rule_end()
 target("LHolo")
     add_rules("lholo.i18n.resources")
     add_rules("@levibuildscript/linkrule")
-    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.1-ja.1"})
+    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.2-ja.1"})
     add_shflags("/DELAYLOAD:bedrock_runtime.dll", {force = true})
     add_cxflags(
         "/utf-8",

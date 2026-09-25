@@ -69,6 +69,16 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
     return {impl[10], impl[11], impl[12]};
 }
 
+void resetWorldAfterExit() {
+    place::resetWorldSession();
+    structure::capture::clear();
+    structure::resetWorldSession();
+    structure::showActionHint(
+        i18n::Message{i18n::TextKey::ActionHintWorldExited},
+        structure::kProjectionLifecycleHintDurationMs
+    );
+}
+
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
 }
@@ -472,6 +482,11 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
 
 void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlphaLayer) {
     bool clearStructure = false;
+    bool worldExitPending = consumeWorldExitRequest();
+    if (worldExitPending) {
+        resetWorldAfterExit();
+        return;
+    }
     ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe& captureBounds) {
             if (auto const bounds = structure::capture::getBounds()) {
@@ -484,6 +499,11 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                 captureBounds.clear();
             }
             captureBounds.render(renderContext, renderAlphaLayer);
+
+            if (consumeWorldExitRequest()) {
+                worldExitPending = true;
+                return;
+            }
 
             if (auto loaded = structure::getLoaded(); loaded && loaded->generation != state.structureGeneration) {
                 auto& client = renderContext.mClientInstance;
@@ -498,7 +518,24 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                     return;
                 }
                 resetProjectionState(state);
-                if (!enableStructureProjection(state, renderContext, std::move(loaded))) {
+                bool activated = false;
+                {
+                    // Level destruction and structure activation must not pass
+                    // each other between the exit check and the first use of
+                    // the new state's Level/Dimension pointers.
+                    std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+                    if (consumeWorldExitRequest()) {
+                        worldExitPending = true;
+                    } else {
+                        activated = enableStructureProjection(
+                            state,
+                            renderContext,
+                            std::move(loaded)
+                        );
+                    }
+                }
+                if (worldExitPending) return;
+                if (!activated) {
                     resetProjectionState(state);
                     logger().error("Could not enable loaded structure projection");
                 } else {
@@ -532,6 +569,10 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
             renderProjection(state, renderContext, renderAlphaLayer);
         }
     );
+    if (worldExitPending) {
+        resetWorldAfterExit();
+        return;
+    }
     if (clearStructure) structure::clear();
 }
 

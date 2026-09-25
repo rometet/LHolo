@@ -93,6 +93,9 @@ std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
+std::mutex       gInputStateMutex;
+std::mutex       gInstallMutex;
+std::atomic_ullong gInstallRetryAt{};
 bool             gImGuiInitialized{};
 bool             gGraphicsInitialized{};
 bool             gGuiVisibleLastFrame{};
@@ -120,6 +123,7 @@ std::atomic_bool      gConsumeEscapeRelease{false};
 
 constexpr ULONGLONG kFullscreenGraphicsResumeDelayMs = 750;
 constexpr ULONGLONG kResizeGraphicsResumeDelayMs     = 100;
+constexpr ULONGLONG kInstallRetryIntervalMs          = 1000;
 constexpr size_t    kPresentVtableIndex              = 8;
 constexpr size_t    kResizeBuffersVtableIndex        = 13;
 constexpr size_t    kPresent1VtableIndex             = 22;
@@ -275,21 +279,24 @@ void loadFonts() {
 }
 
 LRESULT forwardToGame(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && wParam < gGameKeysDown.size()) {
-        gGameKeysDown[static_cast<std::size_t>(wParam)] = true;
-    } else if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam < gGameKeysDown.size()) {
-        gGameKeysDown[static_cast<std::size_t>(wParam)] = false;
-    }
-    switch (message) {
-    case WM_LBUTTONDOWN: gGameMouseButtonsDown[0] = true; break;
-    case WM_LBUTTONUP: gGameMouseButtonsDown[0] = false; break;
-    case WM_RBUTTONDOWN: gGameMouseButtonsDown[1] = true; break;
-    case WM_RBUTTONUP: gGameMouseButtonsDown[1] = false; break;
-    case WM_MBUTTONDOWN: gGameMouseButtonsDown[2] = true; break;
-    case WM_MBUTTONUP: gGameMouseButtonsDown[2] = false; break;
-    case WM_XBUTTONDOWN: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = true; break;
-    case WM_XBUTTONUP: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = false; break;
-    default: break;
+    {
+        std::lock_guard lock(gInputStateMutex);
+        if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && wParam < gGameKeysDown.size()) {
+            gGameKeysDown[static_cast<std::size_t>(wParam)] = true;
+        } else if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam < gGameKeysDown.size()) {
+            gGameKeysDown[static_cast<std::size_t>(wParam)] = false;
+        }
+        switch (message) {
+        case WM_LBUTTONDOWN: gGameMouseButtonsDown[0] = true; break;
+        case WM_LBUTTONUP: gGameMouseButtonsDown[0] = false; break;
+        case WM_RBUTTONDOWN: gGameMouseButtonsDown[1] = true; break;
+        case WM_RBUTTONUP: gGameMouseButtonsDown[1] = false; break;
+        case WM_MBUTTONDOWN: gGameMouseButtonsDown[2] = true; break;
+        case WM_MBUTTONUP: gGameMouseButtonsDown[2] = false; break;
+        case WM_XBUTTONDOWN: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = true; break;
+        case WM_XBUTTONUP: gGameMouseButtonsDown[GET_XBUTTON_WPARAM(wParam) == XBUTTON1 ? 3 : 4] = false; break;
+        default: break;
+        }
     }
     return gOriginalWndProc ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
                             : DefWindowProcW(window, message, wParam, lParam);
@@ -300,8 +307,15 @@ void releaseGameInput(HWND window) {
     // before the menu starts swallowing input, otherwise movement/use remains
     // latched after the physical key is released while ImGui is open.
     input::MenuInputHandoffScope inputHandoff;
-    for (std::size_t key = 0; key < gGameKeysDown.size(); ++key) {
-        if (!gGameKeysDown[key]) continue;
+    std::array<bool, 256> keysDown{};
+    std::array<bool, 5> mouseButtonsDown{};
+    {
+        std::lock_guard lock(gInputStateMutex);
+        keysDown = gGameKeysDown;
+        mouseButtonsDown = gGameMouseButtonsDown;
+    }
+    for (std::size_t key = 0; key < keysDown.size(); ++key) {
+        if (!keysDown[key]) continue;
         auto const virtualKey = static_cast<UINT>(key);
         auto scanCode = MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC);
         auto const extended = virtualKey == VK_LEFT || virtualKey == VK_UP
@@ -323,8 +337,8 @@ void releaseGameInput(HWND window) {
     constexpr std::array<UINT, 5> upMessages{
         WM_LBUTTONUP, WM_RBUTTONUP, WM_MBUTTONUP, WM_XBUTTONUP, WM_XBUTTONUP
     };
-    for (std::size_t button = 0; button < gGameMouseButtonsDown.size(); ++button) {
-        if (!gGameMouseButtonsDown[button]) continue;
+    for (std::size_t button = 0; button < mouseButtonsDown.size(); ++button) {
+        if (!mouseButtonsDown[button]) continue;
         WPARAM buttonParam{};
         if (button == 3) buttonParam = MAKEWPARAM(0, XBUTTON1);
         if (button == 4) buttonParam = MAKEWPARAM(0, XBUTTON2);
@@ -360,7 +374,10 @@ void prepareMouseHandoff(HWND window) {
         io.MouseWheelH = 0.0f;
         io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     }
-    gGameMouseButtonsDown.fill(false);
+    {
+        std::lock_guard lock(gInputStateMutex);
+        gGameMouseButtonsDown.fill(false);
+    }
 
     // A full-screen menu can leave the absolute OS cursor anywhere. Bedrock
     // converts that absolute position back to relative-look input when it
@@ -882,13 +899,34 @@ void removeHook(void*& target) {
 
 } // namespace
 
+namespace {
+
+void shutdownLocked();
+
+} // namespace
+
 bool ensureInstalled() {
     if (gInstalled.load(std::memory_order_acquire)) return true;
+    auto const now = GetTickCount64();
+    if (now < gInstallRetryAt.load(std::memory_order_acquire)) return false;
+    std::lock_guard installLock(gInstallMutex);
+    if (gInstalled.load(std::memory_order_acquire)) return true;
+    if (GetTickCount64() < gInstallRetryAt.load(std::memory_order_acquire)) return false;
+
+    auto failInstall = [&]() {
+        shutdownLocked();
+        gInstallRetryAt.store(
+            GetTickCount64() + kInstallRetryIntervalMs,
+            std::memory_order_release
+        );
+        return false;
+    };
+
     gShuttingDown.store(false, std::memory_order_release);
     auto window = findProcessWindow();
-    if (!window) return false;
+    if (!window) return failInstall();
     auto const status = MH_Initialize();
-    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
+    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return failInstall();
 
     D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_0;
     DXGI_SWAP_CHAIN_DESC description{};
@@ -905,7 +943,7 @@ bool ensureInstalled() {
     if (FAILED(D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &featureLevel, 1, D3D11_SDK_VERSION,
             &description, &dummySwapChain, &dummyDevice, nullptr, &dummyContext
-        ))) return false;
+        ))) return failInstall();
 
     auto** swapVtable = *reinterpret_cast<void***>(dummySwapChain);
     gPresentTarget = swapVtable[kPresentVtableIndex];
@@ -950,15 +988,17 @@ bool ensureInstalled() {
 
 
     if (!ok) {
-        shutdown();
-        return false;
+        return failInstall();
     }
     gInstalled.store(true, std::memory_order_release);
+    gInstallRetryAt.store(0, std::memory_order_release);
     logger().info("Injected ImGui DXGI hooks installed");
     return true;
 }
 
-void shutdown() {
+namespace {
+
+void shutdownLocked() {
     gShuttingDown.store(true, std::memory_order_release);
     gMouseHandoffActive.store(false, std::memory_order_release);
     // Best effort: leave the cursor exactly where Minecraft expects it if the
@@ -986,8 +1026,24 @@ void shutdown() {
     if (gGameQueue) gGameQueue->Release();
     gGameQueue = nullptr;
     gActiveSwapChain = nullptr;
+    {
+        std::lock_guard inputLock(gInputStateMutex);
+        gGameKeysDown.fill(false);
+        gGameMouseButtonsDown.fill(false);
+    }
+    gConsumeEscapeRelease.store(false, std::memory_order_release);
+    gGraphicsResumeAt.store(0, std::memory_order_release);
+    gInstallRetryAt.store(0, std::memory_order_release);
+    gGuiVisibleLastFrame = false;
     gWindow = nullptr;
     gInstalled.store(false, std::memory_order_release);
+}
+
+} // namespace
+
+void shutdown() {
+    std::lock_guard installLock(gInstallMutex);
+    shutdownLocked();
 }
 
 } // namespace lholo::overlay

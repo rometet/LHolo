@@ -9,6 +9,7 @@
 #include "place/PlaceHelper.h"
 #include "plugin/LHolo.h"
 #include "projection/ProjectionController.h"
+#include "projection/mesh/ProjectionMeshWorker.h"
 #include "structure/capture/StructureCapture.h"
 #include "structure/MaterialTracker.h"
 #include "structure/StructureLoader.h"
@@ -30,6 +31,8 @@ bool AppKernel::load() {
 
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
+
+    projection::detail::resetMeshWorkerForSession();
 
     if (!projection::detail::projectionController().installHooks()) {
         logger.error("Failed to install projection hooks");
@@ -65,12 +68,18 @@ bool AppKernel::disable() {
 
     structure::saveSettings();
     structure::detail::shutdownMaterialTracker();
-    structure::clear();
+    // Drop all world-owned state before removing hooks. In particular, this
+    // resets held placement/input state and joins the projection mesh worker
+    // while its Level/Dimension pointers are still valid.
+    place::resetWorldSession();
+    structure::resetWorldSession();
+    structure::capture::clear();
     input::uninstallMenuInputGuard();
     place::uninstallHook();
-    overlay::shutdown();
-    structure::capture::clear();
     projection::detail::projectionController().uninstallHooks();
+    // Projection hooks contain the automatic overlay-install retry path, so
+    // remove them before tearing the overlay down.
+    overlay::shutdown();
 
     logger.info("LHolo disabled");
     return true;

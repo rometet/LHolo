@@ -46,6 +46,7 @@
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/game/ClientInstance.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#include "mc/deps/nbt/IntArrayTag.h"
 #include "mc/deps/nbt/IntTag.h"
 #include "mc/deps/nbt/ListTag.h"
 #include "mc/world/level/block/Block.h"
@@ -180,6 +181,17 @@ bool inspectBlockLayer(ListTag const& layer, std::uint64_t volume, std::uint64_t
     for (auto const& value : layer) {
         if (!value.hold<IntTag>()) return false;
         if (static_cast<int>(value.get<IntTag>()) >= 0) ++occupied;
+    }
+    return true;
+}
+
+// format 2 (1.26.5x+) stores each index layer as a TAG_Int_Array instead of
+// a nested TAG_List of ints.
+bool inspectBlockLayer(IntArrayTag const& layer, std::uint64_t volume, std::uint64_t& occupied) {
+    if (static_cast<std::uint64_t>(layer.size()) != volume) return false;
+    occupied = 0;
+    for (auto const& value : layer) {
+        if (static_cast<int>(value) >= 0) ++occupied;
     }
     return true;
 }
@@ -482,15 +494,44 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
     loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ});
 
     auto const* blockIndices = findList(*structure, "block_indices");
-    if (!blockIndices || blockIndices->size() < 2
-        || !(*blockIndices)[0].hold<ListTag>() || !(*blockIndices)[1].hold<ListTag>()) {
+    if (!blockIndices || blockIndices->empty()
+        || !((*blockIndices)[0].hold<ListTag>() || (*blockIndices)[0].hold<IntArrayTag>())) {
         error = "block_indices 不是有效的双层索引";
         return nullptr;
     }
-    if (!inspectBlockLayer((*blockIndices)[0].get<ListTag>(), loaded->volume, loaded->primaryBlocks)
-        || !inspectBlockLayer((*blockIndices)[1].get<ListTag>(), loaded->volume, loaded->secondaryBlocks)) {
-        error = "方块索引数量或类型与结构尺寸不匹配";
+    if (blockIndices->size() > 2) {
+        error = "block_indices 包含过多索引层";
         return nullptr;
+    }
+    // format 1: List<List<Int>>（主层 + 可选副层）。
+    // format 2 (1.26.5x 起): List<IntArray>——每层一个 IntArray，副层取消
+    // （含水内联为方块状态，通常只有一个 IntArray）。两种形状都接受，缺失的
+    // 副层视为全空；真正的解析交给原版 StructureTemplate::load，它会把两种
+    // 形状都规范化为 mBlockIndices + optional<mExtraBlockIndices>。
+    if ((*blockIndices)[0].hold<ListTag>()) {
+        if (!inspectBlockLayer((*blockIndices)[0].get<ListTag>(), loaded->volume, loaded->primaryBlocks)) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+        if (blockIndices->size() >= 2) {
+            if (!(*blockIndices)[1].hold<ListTag>()
+                || !inspectBlockLayer((*blockIndices)[1].get<ListTag>(), loaded->volume, loaded->secondaryBlocks)) {
+                error = "方块索引数量或类型与结构尺寸不匹配";
+                return nullptr;
+            }
+        }
+    } else {
+        if (!inspectBlockLayer((*blockIndices)[0].get<IntArrayTag>(), loaded->volume, loaded->primaryBlocks)) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+        if (blockIndices->size() >= 2) {
+            if (!(*blockIndices)[1].hold<IntArrayTag>()
+                || !inspectBlockLayer((*blockIndices)[1].get<IntArrayTag>(), loaded->volume, loaded->secondaryBlocks)) {
+                error = "方块索引数量或类型与结构尺寸不匹配";
+                return nullptr;
+            }
+        }
     }
 
     auto const* palette = findCompound(*structure, "palette");
