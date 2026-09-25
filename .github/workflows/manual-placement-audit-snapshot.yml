@@ -11,9 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: 84a88b0a8c6cc20b5ce95546fefca3cecb99f811
           persist-credentials: false
       - name: Archive tracked source baseline
-        run: git archive --format=zip --output=manual-placement-source.zip 84a88b0a8c6cc20b5ce95546fefca3cecb99f811
+        run: git archive --format=zip --output=manual-placement-source.zip HEAD
       - uses: actions/upload-artifact@v7
         with:
           name: manual-placement-source-84a88b0
