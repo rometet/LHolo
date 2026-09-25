@@ -37,9 +37,11 @@ auto& logger() {
 void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    // Multiple changes before the next build collapse into one revision. A
+    // single revision bump is enough to reject any in-flight stale result.
+    if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
-    ++sectionState.requestedRevision;
 }
 
 void mergeNativeLiquidTelemetry(
