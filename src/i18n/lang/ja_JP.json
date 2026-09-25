@@ -194,5 +194,11 @@
   "actionHint.loadProjection": "投影を読み込み中",
   "actionHint.closeProjection": "投影を閉じています",
   "actionHint.noMatchingItem": "インベントリに対応するブロックがありません",
-  "actionHint.manualModeBlocked": "手動設置モードにより防止されました（投影ブロックに照準を合わせてください）"
+  "actionHint.manualModeBlocked": "手動設置モードにより防止されました（投影ブロックに照準を合わせてください）",
+  "section.manualPlacementAllowedItems": "手動設置：制限しないブロック",
+  "hint.manualPlacementAllowedItems": "登録したアイテムをメインハンドに持つと、投影の内外で通常設置できます。自動持ち替え・投影への連続設置は行いません。IDで登録（例：dirt、minecraft:scaffolding）。各ユーザーの設定に保存されます。",
+  "button.addAllowedItem": "追加",
+  "button.removeAllowedItem": "削除",
+  "hint.invalidAllowedItem": "有効なアイテムIDを入力してください。ワイルドカード・空気・状態指定は不可。最大128件です。",
+  "hint.noAllowedItems": "未登録：通常どおり手動設置の制限が適用されます。"
 }

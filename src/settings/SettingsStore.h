@@ -11,6 +11,7 @@
 #include <array>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace lholo::settings {
 
@@ -29,6 +30,8 @@ struct Settings {
     bool experimentalConsent{false};
     bool materialHudEnabled{false};
     int materialHudPosition{3};
+    // Per-client preference; modes remain session-only. Empty means no exceptions.
+    std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
     int autoPlacementBreakCooldownSeconds{10};
     bool hudEnabled{true};

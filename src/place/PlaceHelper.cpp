@@ -33,6 +33,7 @@
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/world/gamemode/GameMode.h"
 #include "mc/world/actor/player/Player.h"
+#include "mc/world/actor/player/Inventory.h"
 #include "mc/world/item/HandSlot.h"
 #include "mc/world/item/ItemStack.h"
 #include "mc/world/level/BlockPos.h"
@@ -110,7 +111,7 @@ bool aimedBlockAcceptsRightClick(GameMode& gm, BlockPos const& pos) {
 // ...) we let vanilla open/use it. Otherwise we take the right button over: on a
 // projection target LHolo places it (from tickEasyPlace), and off-target we block
 // the accidental placement and show a one-shot JE-style hint. The vanilla build
-// is never allowed through, so no stray block is placed.
+// is allowed through only for an explicitly exempt held item.
 LL_TYPE_INSTANCE_HOOK(
     GameModeStartBuildHook,
     ll::memory::HookPriority::Normal,
@@ -122,6 +123,11 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot        handSlot
 ) {
     if (isLocalManualBuild(*this)) {
+        if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
+            cancelPendingManualPress();
+            origin(pos, face, handSlot);
+            return;
+        }
         if (aimedBlockAcceptsRightClick(*this, pos)) {
             cancelPendingManualPress();
             origin(pos, face, handSlot);  // let vanilla open/use the block
@@ -157,6 +163,10 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot   handSlot
 ) {
     if (isLocalManualBuild(*this)) {
+        if (handSlot == HandSlot::Mainhand && isManualPlacementItemAllowed(item)) {
+            cancelPendingManualPress();
+            return origin(item, handSlot);
+        }
         auto const targetStatus = detail::manualTargetStatusUnderCrosshair();
         if (targetStatus == detail::ManualTargetStatus::None) {
             cancelPendingManualPress();
@@ -193,7 +203,7 @@ LL_TYPE_INSTANCE_HOOK(
 }
 
 // GameMode::buildBlock is the vanilla continuous-build placement. In manual mode
-// we always suppress it (LHolo drives placement from the press edge above): the
+// we suppress it unless the actual held item is explicitly exempt. Otherwise the
 // interact for an interactive block already happened there, and this only ever
 // carries a block PLACEMENT, which manual mode blocks. No hint here — the press
 // edge shows it once, so holding the button never spams the notification.
@@ -209,6 +219,10 @@ LL_TYPE_INSTANCE_HOOK(
     bool const        isSimTick
 ) {
     if (isLocalManualBuild(*this)) {
+        if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
+            cancelPendingManualPress();
+            return origin(pos, face, handSlot, isSimTick);
+        }
         return false;
     }
     return origin(pos, face, handSlot, isSimTick);
@@ -269,6 +283,22 @@ void setManualMode(bool manual) {
 
 bool isManualMode() {
     return placementState().manualMode();
+}
+
+std::vector<std::string> getManualPlacementAllowedItems() {
+    return placementState().manualPlacementAllowedItems();
+}
+
+bool setManualPlacementAllowedItems(std::vector<std::string> const& items) {
+    return placementState().setManualPlacementAllowedItems(items);
+}
+
+bool isManualPlacementItemAllowed(ItemStack const& item) {
+    return !item.isNull() && placementState().manualPlacementItemAllowed(item.getTypeName());
+}
+
+bool isManualPlacementHeldItemAllowed(Player& player) {
+    return isManualPlacementItemAllowed(player.getInventory().getItem(player.getSelectedItemSlot()));
 }
 
 std::string getAimedProjectedBlockName() {

@@ -81,6 +81,10 @@ struct PlacementItem {
 // states are intentionally not copied into the item stack.
 [[nodiscard]] ItemStack makePlacementItem(Block const& block);
 
+// Manual mode uses native Block -> Item identity/aux for material variants and
+// wall-mounted forms. The existing auto/range item-selection policy is unchanged.
+[[nodiscard]] ItemStack makeManualPlacementItem(Block const& block);
+
 // Resolves the real inventory item represented by a block. Must run on the game
 // tick thread because it touches the Bedrock item registry/localization data.
 [[nodiscard]] PlacementItem resolvePlacementItem(Block const& block);

@@ -12,6 +12,8 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <vector>
 #include <unordered_map>
 
 namespace lholo::place::detail {
@@ -64,6 +66,10 @@ public:
     void setRangeEnabled(bool enabled);
     [[nodiscard]] bool manualMode() const;
     void setManualMode(bool manual);
+    [[nodiscard]] std::vector<std::string> manualPlacementAllowedItems() const;
+    // Returns true only when a valid edit changed the stored list.
+    bool setManualPlacementAllowedItems(std::vector<std::string> const& items);
+    [[nodiscard]] bool manualPlacementItemAllowed(std::string_view itemId) const;
     [[nodiscard]] int radius() const;
     void setRadius(int radius);
     [[nodiscard]] int autoPlacementBreakCooldownSeconds() const;
@@ -123,6 +129,9 @@ private:
     std::unordered_map<std::int64_t, std::uint64_t> mAutoPlacementSuppressions;
     std::atomic_uint64_t                             mNextAutoPlacementSuppressionExpiry{0};
     std::unordered_map<FailedPlanKey, std::uint64_t, FailedPlanKeyHash> mFailedRangePlans;
+
+    mutable std::mutex       mManualPlacementItemsMutex;
+    std::vector<std::string> mManualPlacementAllowedItems;
 
     mutable std::mutex mAimedProjectedBlockNameMutex;
     std::string        mAimedProjectedBlockName;

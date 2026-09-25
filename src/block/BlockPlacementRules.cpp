@@ -22,6 +22,22 @@ ItemStack makePlacementItem(Block const& block) {
     return item;
 }
 
+ItemStack makeManualPlacementItem(Block const& block) {
+    auto const name = block.getTypeName();
+    // Runtime-name/item aliases still use their neutral, explicit mapping.
+    // For ordinary blocks, native conversion preserves true material aux and
+    // resolves wall-mounted forms. Reinit copies no world block-state data.
+    if (placeableBaseName(name) == name && placementItemName(name).empty()) {
+        ItemInstance const gameItem{block};
+        if (!gameItem.isNull()) {
+            ItemStack item;
+            item.reinit(gameItem.getTypeName(), 1, gameItem.getAuxValue());
+            if (!item.isNull()) return item;
+        }
+    }
+    return makePlacementItem(block);
+}
+
 std::string stripMinecraftFormatting(std::string_view text) {
     std::string out;
     out.reserve(text.size());

@@ -17,6 +17,8 @@
 #include "place/PlacementExecutor.h"
 
 #include "place/PlacementState.h"
+#include "place/ManualPlacementRules.h"
+#include "place/PlaceHelper.h"
 
 #include "block/BlockPlacementRules.h"
 #include "projection/Projection.h"
@@ -207,11 +209,13 @@ void cacheFailedPlan(FailedPlanKey const& key, std::uint64_t now) {
 // redstone item carries no placement state, so the stricter
 // sameItemAndAuxAndBlockData never matched a ghost that does.
 ItemFind findItemSlot(Player& player, Block const& block) {
-    ItemStack const want = block::makePlacementItem(block);
+    ItemStack const want = placementState().manualMode()
+        ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
+    if (want.isNull()) return {-1, nullptr};
     auto& inventory = player.getInventory();
     for (int slot = 0; slot < kInventorySlots; ++slot) {
         auto const& item = inventory.getItem(slot);
-        if (item.getIdAux() == want.getIdAux()) return {slot, &item};
+        if (!item.isNull() && item.getIdAux() == want.getIdAux()) return {slot, &item};
     }
     return {-1, nullptr};
 }
@@ -227,13 +231,15 @@ InventorySnapshot snapshotInventory(Player& player) {
     auto& inventory = player.getInventory();
     for (int slot = 0; slot < kInventorySlots; ++slot) {
         auto const& item = inventory.getItem(slot);
-        snapshot.emplace(item.getIdAux(), ItemFind{slot, &item});
+        if (!item.isNull()) snapshot.emplace(item.getIdAux(), ItemFind{slot, &item});
     }
     return snapshot;
 }
 
 ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
-    ItemStack const want = block::makePlacementItem(block);
+    ItemStack const want = placementState().manualMode()
+        ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
+    if (want.isNull()) return {-1, nullptr};
     auto const [first, last] = snapshot.equal_range(want.getIdAux());
     for (auto it = first; it != last; ++it) {
         if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
@@ -522,6 +528,23 @@ bool sameSerializedState(Block const& predicted, Block const& ghost, char const*
     return !expected.empty() && serializedState(predicted, key) == expected;
 }
 
+CompoundTag const* placementSerializedStates(Block const& block) {
+    for (auto const& [key, value] : block.mSerializationId.get()) {
+        if (key == "states" && value.hold<CompoundTag>()) return &value.get<CompoundTag>();
+    }
+    return nullptr;
+}
+
+bool manualSerializedPlacementMatches(Block const& predicted, Block const& ghost) {
+    // Identity is checked by the caller before this function. Do not treat
+    // missing/malformed serialization as permission to ignore a runtime ID.
+    auto const* expected = placementSerializedStates(ghost);
+    auto const* actual = placementSerializedStates(predicted);
+    return expected && actual && detail::manualPlacementStateMapsMatch(
+        ghost.getTypeName(), expected->mTags, actual->mTags
+    );
+}
+
 bool isTwoBlockDoor(Block const& block) {
     return block.hasProperty(BlockProperty::Door)
         && !serializedState(block, "upper_block_bit").empty();
@@ -592,13 +615,15 @@ bool placementPredictionMatches(
     }
     if (isTwoBlockDoor(ghost)) {
         // A door item places both cells. The lower ghost owns direction/open,
-        // the upper owns the hinge. Verify direction/open/half always; the hinge
+        // the upper owns the hinge. Verify direction/half always; opening is an
+        // interaction after manual placement, not a material/facing mismatch. The hinge
         // only when the upper half is visible (expectedDoorUpper). A layer cut
         // hides the upper, leaving the hinge unverifiable — one DoorItem use
         // still creates both halves, so accept the placement without it.
         bool matched = sameSerializedState(predicted, ghost, "upper_block_bit")
             && sameSerializedState(predicted, ghost, "direction")
-            && sameSerializedState(predicted, ghost, "open_bit");
+            && (placementState().manualMode()
+                || sameSerializedState(predicted, ghost, "open_bit"));
         if (matched && expectedDoorUpper) {
             std::string const expectedHinge = serializedState(*expectedDoorUpper, "door_hinge_bit");
             matched = !expectedHinge.empty()
@@ -622,7 +647,12 @@ bool placementPredictionMatches(
     // states above strict, then defer all remaining exceptions to the official
     // API instead of maintaining block-name suffix lists.
     if (ghost.getBlockType().allowStateMismatchOnPlacement(predicted, ghost)) return true;
-    return predicted == ghost;
+    if (predicted == ghost) return true;
+    // The official mismatch hook is not sufficient for every flattened or
+    // neighbor-driven permutation. Manual placement compares serialized
+    // identity, ignoring only explicitly known environment-driven states.
+    // No world mutation/connectionUpdate, correction-policy change, or new ABI.
+    return placementState().manualMode() && manualSerializedPlacementMatches(predicted, ghost);
 }
 
 bool resolveOrientedPlacement(
@@ -848,6 +878,12 @@ void tickEasyPlaceImpl() {
         showProjectedBlockName && target ? target->block : nullptr
     );
     if (!placementActive) return;
+    // Recheck every tick: switching to an exempt item while holding right-click
+    // must cancel a queued/repeating LHolo action before any slot swap or send.
+    if (placementState().manualMode() && isManualPlacementHeldItemAllowed(*player)) {
+        placementState().cancelManualPress();
+        return;
+    }
     PlacementContext const placementContext = makePlacementContext(origin, dir, pickRange);
     if (tickNow < placementState().nextPlaceAt()) return;
 

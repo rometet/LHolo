@@ -253,6 +253,12 @@
     LHOLO_TEXT_KEY("actionHint.loadProjection", ActionHintLoadProjection, "")                            \
     LHOLO_TEXT_KEY("actionHint.closeProjection", ActionHintCloseProjection, "")                          \
     LHOLO_TEXT_KEY("actionHint.noMatchingItem", ActionHintNoMatchingItem, "")                            \
+    LHOLO_TEXT_KEY("section.manualPlacementAllowedItems", SectionManualPlacementAllowedItems, "")    \
+    LHOLO_TEXT_KEY("hint.manualPlacementAllowedItems", HintManualPlacementAllowedItems, "")          \
+    LHOLO_TEXT_KEY("button.addAllowedItem", ButtonAddAllowedItem, "")                                \
+    LHOLO_TEXT_KEY("button.removeAllowedItem", ButtonRemoveAllowedItem, "")                          \
+    LHOLO_TEXT_KEY("hint.invalidAllowedItem", HintInvalidAllowedItem, "")                            \
+    LHOLO_TEXT_KEY("hint.noAllowedItems", HintNoAllowedItems, "")                                    \
     LHOLO_TEXT_KEY("actionHint.manualModeBlocked", ActionHintManualModeBlocked, "")
 
 namespace lholo::i18n {

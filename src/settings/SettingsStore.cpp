@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "settings/SettingsStore.h"
+#include "place/ManualPlacementRules.h"
 
 #include <fstream>
 #include <stdexcept>
@@ -36,6 +37,23 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     out.experimentalConsent = json.value("experimentalConsent", out.experimentalConsent);
     out.materialHudEnabled = json.value("materialHudEnabled", out.materialHudEnabled);
     out.materialHudPosition = json.value("materialHudPosition", out.materialHudPosition);
+    // Malformed/missing lists fail closed without invalidating unrelated settings.
+    out.manualPlacementAllowedItems.clear();
+    if (auto const allowed = json.find("manualPlacementAllowedItems");
+        allowed != json.end() && allowed->is_array()
+        && allowed->size() <= place::detail::kMaxManualPlacementAllowedItems) {
+        std::vector<std::string> items;
+        bool valid = true;
+        for (auto const& value : *allowed) {
+            if (!value.is_string()) { valid = false; break; }
+            items.push_back(value.get<std::string>());
+        }
+        if (valid) {
+            if (auto normalized = place::detail::normalizeManualPlacementAllowedItems(items)) {
+                out.manualPlacementAllowedItems = std::move(*normalized);
+            }
+        }
+    }
     out.placementRadius = json.value("placementRadius", out.placementRadius);
     out.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
@@ -164,6 +182,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"experimentalConsent", settings.experimentalConsent},
         {"materialHudEnabled", settings.materialHudEnabled},
         {"materialHudPosition", settings.materialHudPosition},
+        {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(
+            settings.manualPlacementAllowedItems).value_or(std::vector<std::string>{})},
         {"placementRadius", settings.placementRadius},
         {"autoPlacementBreakCooldownSeconds", settings.autoPlacementBreakCooldownSeconds},
         {"hudEnabled", settings.hudEnabled},
