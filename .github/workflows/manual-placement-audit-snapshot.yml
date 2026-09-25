@@ -1,0 +1,21 @@
+name: Manual placement audit snapshot
+on:
+  push:
+    branches: [fix/manual-placement-compatibility-20260925]
+    paths: [.github/workflows/manual-placement-audit-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Archive tracked source baseline
+        run: git archive --format=zip --output=manual-placement-source.zip 84a88b0a8c6cc20b5ce95546fefca3cecb99f811
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manual-placement-source-84a88b0
+          path: manual-placement-source.zip
+          retention-days: 3
