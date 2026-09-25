@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -38,6 +39,32 @@ namespace lholo::projection::detail {
 
 using TextureVariant =
     std::variant<std::monostate, mce::TexturePtr, mce::ClientTexture, mce::ServerTexture>;
+
+using SectionOccupancy = std::array<std::uint64_t, 64>;
+
+inline SubChunkKey projectionSectionKey(BlockPos const& position) {
+    auto const floorDiv16 = [](int value) {
+        return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
+    };
+    return {floorDiv16(position.x), floorDiv16(position.y), floorDiv16(position.z)};
+}
+
+inline std::size_t projectionSectionCellIndex(BlockPos const& position) {
+    auto const localX = static_cast<unsigned int>(position.x) & 15U;
+    auto const localY = static_cast<unsigned int>(position.y) & 15U;
+    auto const localZ = static_cast<unsigned int>(position.z) & 15U;
+    return localX | (localZ << 4U) | (localY << 8U);
+}
+
+inline void markProjectionSectionOccupied(SectionOccupancy& occupancy, BlockPos const& position) {
+    auto const bit = projectionSectionCellIndex(position);
+    occupancy[bit >> 6U] |= std::uint64_t{1} << (bit & 63U);
+}
+
+inline bool projectionSectionOccupied(SectionOccupancy const& occupancy, BlockPos const& position) {
+    auto const bit = projectionSectionCellIndex(position);
+    return (occupancy[bit >> 6U] & (std::uint64_t{1} << (bit & 63U))) != 0;
+}
 
 struct SectionState {
     Vec3    center{};
@@ -96,6 +123,9 @@ struct ProjectionState {
     float                           cachedCorrectionFillOpacity{-1.0f};
     float                           cachedCorrectionOutlineOpacity{-1.0f};
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
+    // Dense 4096-bit occupancy per local 16^3 section. This makes empty-cell
+    // correction scans O(1) instead of binary-searching the complete block list.
+    std::vector<SectionOccupancy>          sectionOccupancy;
     // Extra blocks occupy cells that have no render-block index. The detected
     // set covers the whole source region for HUD counting; the render set and
     // per-section sets contain only the current visible range. All stay sparse.
