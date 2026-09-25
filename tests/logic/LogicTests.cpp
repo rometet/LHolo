@@ -23,6 +23,7 @@
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionState.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "settings/SettingsStore.h"
 #include "structure/StructureSession.h"
@@ -67,6 +68,36 @@ struct TestPosition {
 
 bool nearlyEqual(float lhs, float rhs) {
     return std::abs(lhs - rhs) < 0.00001f;
+}
+
+void testSectionOccupancy() {
+    SectionOccupancy zeroSection{};
+    SectionOccupancy negativeSection{};
+    BlockPos const first{0, 0, 0};
+    BlockPos const edge{15, 15, 15};
+    BlockPos const negative{-1, -1, -1};
+    BlockPos const negativeBoundary{-16, -16, -16};
+    BlockPos const nextNegativeSection{-17, -17, -17};
+
+    LHOLO_CHECK((projectionSectionKey(first) == SubChunkKey{0, 0, 0}));
+    LHOLO_CHECK((projectionSectionKey(edge) == SubChunkKey{0, 0, 0}));
+    LHOLO_CHECK((projectionSectionKey(negative) == SubChunkKey{-1, -1, -1}));
+    LHOLO_CHECK((projectionSectionKey(negativeBoundary) == SubChunkKey{-1, -1, -1}));
+    LHOLO_CHECK((projectionSectionKey(nextNegativeSection) == SubChunkKey{-2, -2, -2}));
+
+    // Occupancy is local to one 16^3 section. Edge and negative deliberately
+    // share the same local cell index but belong to different section keys.
+    LHOLO_CHECK(projectionSectionCellIndex(edge) == projectionSectionCellIndex(negative));
+
+    LHOLO_CHECK(!projectionSectionOccupied(zeroSection, first));
+    markProjectionSectionOccupied(zeroSection, first);
+    markProjectionSectionOccupied(zeroSection, edge);
+    LHOLO_CHECK(projectionSectionOccupied(zeroSection, first));
+    LHOLO_CHECK(projectionSectionOccupied(zeroSection, edge));
+
+    LHOLO_CHECK(!projectionSectionOccupied(negativeSection, negative));
+    markProjectionSectionOccupied(negativeSection, negative);
+    LHOLO_CHECK(projectionSectionOccupied(negativeSection, negative));
 }
 
 void testNativeLiquidUvRemap() {
@@ -1229,6 +1260,7 @@ void testI18n() {
 
 int main() {
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
+    testSectionOccupancy();
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();
