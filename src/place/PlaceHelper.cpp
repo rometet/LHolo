@@ -19,6 +19,7 @@
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
+#include "place/ManualPlacementPolicy.h"
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
@@ -33,6 +34,7 @@
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/world/gamemode/GameMode.h"
 #include "mc/world/actor/player/Player.h"
+#include "mc/world/actor/player/Inventory.h"
 #include "mc/world/item/HandSlot.h"
 #include "mc/world/item/ItemStack.h"
 #include "mc/world/level/BlockPos.h"
@@ -66,6 +68,17 @@ struct PlaceHookStatus {
 
 PlaceHookStatus gHookStatus;
 
+bool unrestrictedManualItem(ItemStack const& item, HandSlot handSlot) {
+    return handSlot == HandSlot::Mainhand && !item.isNull()
+        && manualPlacementAllows(item.getTypeName());
+}
+
+bool unrestrictedManualItem(Player& player, HandSlot handSlot) {
+    if (handSlot != HandSlot::Mainhand) return false;
+    auto const& item = player.getInventory().getItem(player.getSelectedItemSlot());
+    return unrestrictedManualItem(item, handSlot);
+}
+
 LL_TYPE_INSTANCE_HOOK(
     LocalPlayerEasyPlaceHook,
     ll::memory::HookPriority::Normal,
@@ -81,7 +94,13 @@ LL_TYPE_INSTANCE_HOOK(
         && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0) {
         placementState().releaseManualPress();
     }
-    detail::tickEasyPlace();
+    if (placementState().manualMode() && unrestrictedManualItem(*this, HandSlot::Mainhand)) {
+        // Vanilla owns this item/hold. Also cancel an earlier queued click when
+        // the player changes slots, so LHolo cannot auto-swap or double-place.
+        placementState().cancelManualPress();
+    } else {
+        detail::tickEasyPlace();
+    }
     origin(currentTick);
 }
 
@@ -110,7 +129,7 @@ bool aimedBlockAcceptsRightClick(GameMode& gm, BlockPos const& pos) {
 // ...) we let vanilla open/use it. Otherwise we take the right button over: on a
 // projection target LHolo places it (from tickEasyPlace), and off-target we block
 // the accidental placement and show a one-shot JE-style hint. The vanilla build
-// is never allowed through, so no stray block is placed.
+// stays blocked unless the held item is explicitly allowed by this client.
 LL_TYPE_INSTANCE_HOOK(
     GameModeStartBuildHook,
     ll::memory::HookPriority::Normal,
@@ -122,6 +141,11 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot        handSlot
 ) {
     if (isLocalManualBuild(*this)) {
+        if (unrestrictedManualItem(mPlayer, handSlot)) {
+            cancelPendingManualPress();
+            origin(pos, face, handSlot);
+            return;
+        }
         if (aimedBlockAcceptsRightClick(*this, pos)) {
             cancelPendingManualPress();
             origin(pos, face, handSlot);  // let vanilla open/use the block
@@ -157,6 +181,12 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot   handSlot
 ) {
     if (isLocalManualBuild(*this)) {
+        // Use the actual hand/stack supplied by the hook, never an unrelated
+        // main-hand item to authorize an offhand use.
+        if (unrestrictedManualItem(item, handSlot)) {
+            cancelPendingManualPress();
+            return origin(item, handSlot);
+        }
         auto const targetStatus = detail::manualTargetStatusUnderCrosshair();
         if (targetStatus == detail::ManualTargetStatus::None) {
             cancelPendingManualPress();
@@ -193,7 +223,7 @@ LL_TYPE_INSTANCE_HOOK(
 }
 
 // GameMode::buildBlock is the vanilla continuous-build placement. In manual mode
-// we always suppress it (LHolo drives placement from the press edge above): the
+// we suppress restricted items (LHolo drives them from the press edge): the
 // interact for an interactive block already happened there, and this only ever
 // carries a block PLACEMENT, which manual mode blocks. No hint here — the press
 // edge shows it once, so holding the button never spams the notification.
@@ -209,6 +239,10 @@ LL_TYPE_INSTANCE_HOOK(
     bool const        isSimTick
 ) {
     if (isLocalManualBuild(*this)) {
+        if (unrestrictedManualItem(mPlayer, handSlot)) {
+            cancelPendingManualPress();
+            return origin(pos, face, handSlot, isSimTick);
+        }
         return false;
     }
     return origin(pos, face, handSlot, isSimTick);
@@ -284,6 +318,12 @@ void resetWorldSession() {
 }
 
 bool installHook() {
+    auto const policyError = initializeManualPlacementPolicy(
+        LHolo::getInstance().getSelf().getConfigDir() / "manual-placement-allowlist.txt"
+    );
+    if (policyError != ManualPlacementPolicyError::None) {
+        logger().warn("Manual placement allow-list could not be loaded; retaining the last valid list");
+    }
     gHookStatus.tick = LocalPlayerEasyPlaceHook::hook() == 0;
     if (!gHookStatus.tick) {
         logger().error("Failed to install easy-place tick hook");

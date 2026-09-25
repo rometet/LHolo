@@ -5,6 +5,7 @@
 #include "ui/MenuWidgets.h"
 
 #include "ui/MenuPages.h"
+#include "ui/ManualPlacementSettings.h"
 
 #include <algorithm>
 
@@ -76,7 +77,10 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 switch (model.page) {
                 case MenuPage::Projection: renderProjectionPage(model, actions, metrics); break;
                 case MenuPage::CreateStructure: renderCreateStructurePage(model, actions, metrics); break;
-                case MenuPage::Experimental: renderExperimentalPage(model, actions, metrics); break;
+                case MenuPage::Experimental:
+                    renderExperimentalPage(model, actions, metrics);
+                    renderManualPlacementSettings(metrics);
+                    break;
                 case MenuPage::Transform: renderTransformPage(model, metrics); break;
                 case MenuPage::Render: renderRenderPage(model, actions, metrics); break;
                 case MenuPage::Hotkeys: renderHotkeysPage(model, actions, metrics); break;
