@@ -20,6 +20,7 @@
 
 #include "block/BlockPlacementRules.h"
 #include "projection/Projection.h"
+#include "projection/core/ProjectionRules.h"
 #include "structure/StructureLoader.h"
 
 #include "ll/api/mod/NativeMod.h"
@@ -208,10 +209,11 @@ void cacheFailedPlan(FailedPlanKey const& key, std::uint64_t now) {
 // sameItemAndAuxAndBlockData never matched a ghost that does.
 ItemFind findItemSlot(Player& player, Block const& block) {
     ItemStack const want = block::makePlacementItem(block);
+    if (want.isNull()) return {-1, nullptr};
     auto& inventory = player.getInventory();
     for (int slot = 0; slot < kInventorySlots; ++slot) {
         auto const& item = inventory.getItem(slot);
-        if (item.getIdAux() == want.getIdAux()) return {slot, &item};
+        if (!item.isNull() && item.getIdAux() == want.getIdAux()) return {slot, &item};
     }
     return {-1, nullptr};
 }
@@ -227,13 +229,14 @@ InventorySnapshot snapshotInventory(Player& player) {
     auto& inventory = player.getInventory();
     for (int slot = 0; slot < kInventorySlots; ++slot) {
         auto const& item = inventory.getItem(slot);
-        snapshot.emplace(item.getIdAux(), ItemFind{slot, &item});
+        if (!item.isNull()) snapshot.emplace(item.getIdAux(), ItemFind{slot, &item});
     }
     return snapshot;
 }
 
 ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
     ItemStack const want = block::makePlacementItem(block);
+    if (want.isNull()) return {-1, nullptr};
     auto const [first, last] = snapshot.equal_range(want.getIdAux());
     for (auto it = first; it != last; ++it) {
         if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
@@ -578,10 +581,6 @@ bool placementPredictionMatches(
     if (!serializedState(ghost, "pillar_axis").empty()) {
         return sameSerializedState(predicted, ghost, "pillar_axis");
     }
-    // Walls, fences, glass panes and iron bars derive every connection state from
-    // their neighbours after placement (nothing is chosen at placement), so accept
-    // the placement on block identity alone — the connections resolve as the
-    // surrounding blocks fill in.
     // Repeaters and comparators: only facing is chosen at placement (delay/mode
     // are set by right-clicking afterwards, the powered bit is redstone-driven),
     // so match on facing alone — including the powered name variants, which reach
@@ -625,6 +624,31 @@ bool placementPredictionMatches(
     return predicted == ghost;
 }
 
+// Compare placement-controlled states as before, but let manual placement
+// compare flattened connections in the SAME real-world neighborhood. The
+// palette describes the finished structure; it must not require connections to
+// neighbors the player has not built yet. Do not ignore arbitrary state keys.
+bool placementPredictionMatchesInWorld(
+    Block const&    predicted,
+    Block const&    ghost,
+    Block const*    expectedDoorUpper,
+    BlockSource&    region,
+    BlockPos const& cell,
+    bool            manualPlacement
+) {
+    if (placementPredictionMatches(predicted, ghost, expectedDoorUpper)) return true;
+    if (!manualPlacement || predicted.getTypeName() != ghost.getTypeName()) return false;
+    auto const& type = ghost.getBlockType();
+    if (!type.isFenceBlock() && !type.isThinFenceBlock()) return false;
+
+    // Reuse correction's existing native connection update and its scoped
+    // region-write suppression. Never call connectionUpdate without that guard:
+    // it also writes its result into the supplied BlockSource.
+    auto const& normalizedGhost = projection::detail::withFlattenedConnections(ghost, region, cell);
+    auto const& normalizedPrediction = projection::detail::withFlattenedConnections(predicted, region, cell);
+    return placementPredictionMatches(normalizedPrediction, normalizedGhost, expectedDoorUpper);
+}
+
 bool resolveOrientedPlacement(
     LocalPlayer&            player,
     BlockSource&            region,
@@ -632,7 +656,8 @@ bool resolveOrientedPlacement(
     BlockPos const&         cell,
     Block const&            ghost,
     int                     itemAux,
-    ProjectionTarget&       out
+    ProjectionTarget&       out,
+    bool                    manualPlacement = false
 ) {
     Block const* expectedDoorUpper = nullptr;
     bool const   isDoor = isTwoBlockDoor(ghost);
@@ -682,7 +707,9 @@ bool resolveOrientedPlacement(
         Block const& predicted = ghost.getBlockType().getPlacementBlock(
             player, cell, face, relativeClick, itemAux
         );
-        if (!placementPredictionMatches(predicted, ghost, expectedDoorUpper)) return false;
+        if (!placementPredictionMatchesInWorld(
+                predicted, ghost, expectedDoorUpper, region, cell, manualPlacement
+            )) return false;
 
         result = ProjectionTarget{cell, at, face, &ghost, clickPos};
         return true;
@@ -910,7 +937,8 @@ void tickEasyPlaceImpl() {
             target->cell,
             *target->block,
             found.item->getAuxValue(),
-            placement
+            placement,
+            manualPlacement
         )) {
         return;
     }

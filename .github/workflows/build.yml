@@ -37,7 +37,7 @@ jobs:
 
       - name: Build logic tests
         run: |
-          xmake build LHoloLogicTests -v -y
+          xmake build -v -y LHoloLogicTests
 
       - name: Run logic tests
         run: |
@@ -48,3 +48,14 @@ jobs:
           name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
           path: |
             bin/
+
+  manual-regressions:
+    # These engine-double tests are separate from the real Windows DLL build.
+    # They cannot stand in for that build or Minecraft runtime acceptance.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Manual policy, item conversion and input routing
+        run: python3 tests/manual/run_tests.py --ubsan
+      - name: Placement comparison and negative control
+        run: python3 tests/manual/run_prediction_tests.py --ubsan
