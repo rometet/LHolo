@@ -194,5 +194,11 @@
   "actionHint.loadProjection": "載入投影",
   "actionHint.closeProjection": "關閉投影",
   "actionHint.noMatchingItem": "背包中沒有對應的投影方塊",
-  "actionHint.manualModeBlocked": "已被手動放置模式阻止（對準投影方塊才能放置）"
+  "actionHint.manualModeBlocked": "已被手動放置模式阻止（對準投影方塊才能放置）",
+  "section.manualPlacementAllowedItems": "手動放置：不限制的方塊",
+  "hint.manualPlacementAllowedItems": "主手持有清單中的物品時，在投影內外使用原版放置，不自動切換物品或重複放置投影。輸入物品 ID（如 dirt 或 minecraft:scaffolding）。儲存在本機使用者設定中。",
+  "button.addAllowedItem": "新增",
+  "button.removeAllowedItem": "移除",
+  "hint.invalidAllowedItem": "請輸入有效物品 ID。不允許萬用字元、空氣或方塊狀態語法。最多128項。",
+  "hint.noAllowedItems": "未設定例外：保留手動放置限制。"
 }

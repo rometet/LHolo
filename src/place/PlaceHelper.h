@@ -17,6 +17,10 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+class Player;
+class ItemStack;
 
 namespace lholo::place {
 
@@ -34,6 +38,11 @@ int  getAutoPlacementBreakCooldownSeconds();
 // placing automatically. Applies to both easy-place and range placement.
 void setManualMode(bool manual);
 bool isManualMode();
+std::vector<std::string> getManualPlacementAllowedItems();
+bool setManualPlacementAllowedItems(std::vector<std::string> const& items);
+// Exact held inventory item, never the blueprint target or a different slot.
+bool isManualPlacementItemAllowed(ItemStack const& item);
+bool isManualPlacementHeldItemAllowed(Player& player);
 // Display name of the projected blueprint block currently under the crosshair.
 std::string getAimedProjectedBlockName();
 

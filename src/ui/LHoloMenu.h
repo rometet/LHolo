@@ -94,6 +94,7 @@ struct MenuModel {
     bool manualPlace{};
     bool rangeEnabled{};
     bool experimentalConsent{};
+    std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
     int autoPlacementBreakCooldownSeconds{10};
     int offsetX{};

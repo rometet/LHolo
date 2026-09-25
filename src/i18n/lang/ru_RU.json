@@ -194,5 +194,11 @@
   "actionHint.loadProjection": "Загрузка проекции",
   "actionHint.closeProjection": "Закрытие проекции",
   "actionHint.noMatchingItem": "В инвентаре нет соответствующего блока проекции",
-  "actionHint.manualModeBlocked": "Заблокировано режимом ручной установки (наведите на блок проекции)"
+  "actionHint.manualModeBlocked": "Заблокировано режимом ручной установки (наведите на блок проекции)",
+  "section.manualPlacementAllowedItems": "Ручная установка: блоки без ограничений",
+  "hint.manualPlacementAllowedItems": "Предмет из списка в основной руке размещается обычным способом внутри и вне проекции, без смены предмета и повторной установки модом. Введите ID предмета (например, dirt или minecraft:scaffolding). Список сохраняется в локальных настройках.",
+  "button.addAllowedItem": "Добавить",
+  "button.removeAllowedItem": "Удалить",
+  "hint.invalidAllowedItem": "Введите корректный ID предмета. Маски, воздух и состояния блоков не допускаются. Не более 128 записей.",
+  "hint.noAllowedItems": "Исключений нет: действуют обычные ограничения ручной установки."
 }

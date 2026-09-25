@@ -194,5 +194,11 @@
   "actionHint.loadProjection": "Loading projection",
   "actionHint.closeProjection": "Closing projection",
   "actionHint.noMatchingItem": "No matching block in your inventory",
-  "actionHint.manualModeBlocked": "Blocked by manual place mode (aim at a projected block)"
+  "actionHint.manualModeBlocked": "Blocked by manual place mode (aim at a projected block)",
+  "section.manualPlacementAllowedItems": "Manual place: unrestricted blocks",
+  "hint.manualPlacementAllowedItems": "Hold a listed item in your main hand to use vanilla placement inside or outside the projection, without LHolo swapping items or repeating projected placement. Enter inventory IDs (e.g. dirt or minecraft:scaffolding). Saved in your local settings.",
+  "button.addAllowedItem": "Add",
+  "button.removeAllowedItem": "Remove",
+  "hint.invalidAllowedItem": "Enter a valid item ID. No wildcards, air, or block-state syntax. Maximum 128 entries.",
+  "hint.noAllowedItems": "No exceptions: normal manual-placement restrictions apply."
 }

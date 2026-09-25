@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "block/BlockPlacementRules.h"
+#include "ManualPlacementChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
@@ -472,6 +473,8 @@ void testSettingsStore() {
     settings.hudShowProjectedBlockName = false;
     settings.hudShowExtraBlocks = false;
     settings.autoPlacementBreakCooldownSeconds = 27;
+    LHOLO_CHECK(settings.manualPlacementAllowedItems.empty());
+    settings.manualPlacementAllowedItems = {" dirt ", "minecraft:scaffolding", "minecraft:dirt"};
     settings.correctionSeeThrough = true;
     settings.materialHudEnabled = true;
     settings.materialHudPosition = 3;
@@ -507,6 +510,8 @@ void testSettingsStore() {
     LHOLO_CHECK(!loaded.hudShowProjectedBlockName);
     LHOLO_CHECK(!loaded.hudShowExtraBlocks);
     LHOLO_CHECK(loaded.autoPlacementBreakCooldownSeconds == 27);
+    LHOLO_CHECK(loaded.manualPlacementAllowedItems
+        == (std::vector<std::string>{"minecraft:dirt", "minecraft:scaffolding"}));
     LHOLO_CHECK(loaded.correctionSeeThrough);
     LHOLO_CHECK(loaded.materialHudEnabled);
     LHOLO_CHECK(loaded.materialHudPosition == 3);
@@ -527,6 +532,7 @@ void testSettingsStore() {
     LHOLO_CHECK(!migrated.hudShowProjectedBlockName);
     LHOLO_CHECK(migrated.hudShowExtraBlocks);
     LHOLO_CHECK(migrated.autoPlacementBreakCooldownSeconds == 10);
+    LHOLO_CHECK(migrated.manualPlacementAllowedItems.empty());
     LHOLO_CHECK(!migrated.correctionSeeThrough);
     LHOLO_CHECK(!migrated.materialHudEnabled);
     LHOLO_CHECK(migrated.materialHudPosition == 3);
@@ -550,6 +556,20 @@ void testSettingsStore() {
     lholo::settings::Settings invalid;
     LHOLO_CHECK(lholo::settings::loadSettingsFile(path, invalid));
     LHOLO_CHECK(invalid.language == "ja_JP");
+
+    // An invalid exception list never grants a partial exemption and does not
+    // prevent unrelated, valid preferences from loading.
+    for (auto const* badList : {"true", "\"minecraft:dirt\"", "[\"dirt\",4]", "[\"dirt\",\"*\"]"}) {
+        {
+            std::ofstream bad(path, std::ios::trunc);
+            bad << "{\"placementRadius\":2,\"manualPlacementAllowedItems\":" << badList << "}";
+        }
+        lholo::settings::Settings rejected;
+        rejected.manualPlacementAllowedItems = {"minecraft:scaffolding"};
+        LHOLO_CHECK(lholo::settings::loadSettingsFile(path, rejected));
+        LHOLO_CHECK(rejected.manualPlacementAllowedItems.empty());
+        LHOLO_CHECK(rejected.placementRadius == 2);
+    }
 
     lholo::settings::Settings missing;
     std::filesystem::remove(path, error);
@@ -1208,6 +1228,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();

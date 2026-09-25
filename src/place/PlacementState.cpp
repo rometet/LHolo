@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "place/PlacementState.h"
+#include "place/ManualPlacementRules.h"
 
 #include <iterator>
 #include <utility>
@@ -21,6 +22,32 @@ void PlacementState::setRangeEnabled(bool enabled) { mRangeEnabled.store(enabled
 
 bool PlacementState::manualMode() const { return mManualMode.load(std::memory_order_acquire); }
 void PlacementState::setManualMode(bool manual) { mManualMode.store(manual, std::memory_order_release); }
+
+std::vector<std::string> PlacementState::manualPlacementAllowedItems() const {
+    std::lock_guard lock(mManualPlacementItemsMutex);
+    return mManualPlacementAllowedItems;
+}
+
+bool PlacementState::setManualPlacementAllowedItems(std::vector<std::string> const& items) {
+    auto normalized = normalizeManualPlacementAllowedItems(items);
+    if (!normalized) return false;
+    {
+        std::lock_guard lock(mManualPlacementItemsMutex);
+        if (*normalized == mManualPlacementAllowedItems) return false;
+        mManualPlacementAllowedItems = std::move(*normalized);
+    }
+    resetManualInput(); // An edit must never revive a pending click.
+    return true;
+}
+
+bool PlacementState::manualPlacementItemAllowed(std::string_view itemId) const {
+    auto normalized = normalizeManualPlacementItemId(itemId);
+    if (!normalized) return false;
+    std::lock_guard lock(mManualPlacementItemsMutex);
+    return std::binary_search(
+        mManualPlacementAllowedItems.begin(), mManualPlacementAllowedItems.end(), *normalized
+    );
+}
 
 int PlacementState::radius() const { return mRadius.load(std::memory_order_relaxed); }
 void PlacementState::setRadius(int radius) { mRadius.store(radius, std::memory_order_release); }
