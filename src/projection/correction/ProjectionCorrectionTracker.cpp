@@ -30,16 +30,11 @@ namespace {
 void markSectionDirty(ProjectionState& state, std::size_t section) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    // Multiple changes before the next build collapse into one revision. A
+    // single revision bump is enough to reject any in-flight stale result.
+    if (!sectionState.dirty) ++sectionState.requestedRevision;
     sectionState.dirty = true;
     sectionState.incrementalDirty = true;
-    ++sectionState.requestedRevision;
-}
-
-SubChunkKey localSectionKey(BlockPos const& position) {
-    auto const floorDiv16 = [](int value) {
-        return value >= 0 ? value / 16 : -1 - ((-1 - value) / 16);
-    };
-    return {floorDiv16(position.x), floorDiv16(position.y), floorDiv16(position.z)};
 }
 
 std::size_t ensureCorrectionSection(
@@ -47,7 +42,7 @@ std::size_t ensureCorrectionSection(
     BlockPos const&  position,
     BlockPos const&  transformedPosition
 ) {
-    auto const key = localSectionKey(position);
+    auto const key = projectionSectionKey(position);
     if (auto const found = state.localSectionIndices.find(key);
         found != state.localSectionIndices.end()) {
         if (state.sectionBlockIndices[found->second].empty()) {
@@ -63,6 +58,7 @@ std::size_t ensureCorrectionSection(
     state.localSectionIndices.emplace(key, section);
     state.localSectionKeys.push_back(key);
     state.sectionBlockIndices.emplace_back();
+    state.sectionOccupancy.emplace_back();
     state.sectionExtraBlockPositions.emplace_back();
     SectionState sectionState;
     sectionState.center = Vec3{
@@ -207,19 +203,11 @@ CorrectionProgressChanges updateCorrectionTracker(
     };
 
     auto const hasExpectedLocalCell = [&](BlockPos const& localPosition) {
-        auto const found = std::lower_bound(
-            state.structure->renderBlocks.begin(),
-            state.structure->renderBlocks.end(),
-            localPosition,
-            [](structure::LoadedStructure::RenderBlock const& entry, BlockPos const& position) {
-                return std::tie(entry.x, entry.y, entry.z)
-                    < std::tie(position.x, position.y, position.z);
-            }
-        );
-        return found != state.structure->renderBlocks.end()
-            && found->x == localPosition.x
-            && found->y == localPosition.y
-            && found->z == localPosition.z;
+        auto const section = state.localSectionIndices.find(projectionSectionKey(localPosition));
+        if (section == state.localSectionIndices.end()) return false;
+        auto const index = section->second;
+        return index < state.sectionOccupancy.size()
+            && projectionSectionOccupied(state.sectionOccupancy[index], localPosition);
     };
 
     auto const updateExtra = [&](
@@ -254,7 +242,7 @@ CorrectionProgressChanges updateCorrectionTracker(
             state.extraBlockPositions.insert(key);
             state.sectionExtraBlockPositions[section].insert(key);
         } else {
-            auto const sectionFound = state.localSectionIndices.find(localSectionKey(localPosition));
+            auto const sectionFound = state.localSectionIndices.find(projectionSectionKey(localPosition));
             if (sectionFound == state.localSectionIndices.end()) return;
             section = sectionFound->second;
             state.extraBlockPositions.erase(rendered);
@@ -271,7 +259,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                 localPosition.y + delta[1],
                 localPosition.z + delta[2],
             };
-            auto const found = state.localSectionIndices.find(localSectionKey(neighbor));
+            auto const found = state.localSectionIndices.find(projectionSectionKey(neighbor));
             if (found != state.localSectionIndices.end()) markSectionDirty(state, found->second);
         }
     };
