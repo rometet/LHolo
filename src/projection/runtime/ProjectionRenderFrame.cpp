@@ -66,7 +66,17 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
     // for both the ScreenContext camera and IClientInstance::getCamera().
     auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
     if (!impl) return {};
-    return {impl[10], impl[11], impl[12]};
+    Vec3 const position{impl[10], impl[11], impl[12]};
+    // This is an explicitly version-sensitive fallback. Fail closed if the
+    // opaque layout changes instead of feeding NaN/garbage into distance sorts.
+    constexpr float kMaxReasonableCoordinate = 30'000'000.0f;
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z)
+        || std::abs(position.x) > kMaxReasonableCoordinate
+        || std::abs(position.y) > kMaxReasonableCoordinate
+        || std::abs(position.z) > kMaxReasonableCoordinate) {
+        return {};
+    }
+    return position;
 }
 
 void resetWorldAfterExit() {
