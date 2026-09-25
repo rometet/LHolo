@@ -37,7 +37,7 @@ jobs:
 
       - name: Build logic tests
         run: |
-          xmake build -v -y LHoloLogicTests
+          xmake -v -y LHoloLogicTests
 
       - name: Run logic tests
         run: |
