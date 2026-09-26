@@ -741,6 +741,12 @@ void submitProjectionMeshPass(
                                 true,
                                 std::memory_order_acq_rel
                             )) {
+#if defined(LHOLO_PRAXIS_LIQUID_SIGN_TEXT_DIAGNOSTIC)
+                            logger().info(
+                                "LHOLO_LIQUID_DIAGNOSTIC_CANDIDATE candidate=A base=d7708ca material=sign_text waterAlpha={}",
+                                PraxisWaterDerivedAlpha
+                            );
+#endif
                             logger().info(
                                 "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterVertexAlpha={} lavaVertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
