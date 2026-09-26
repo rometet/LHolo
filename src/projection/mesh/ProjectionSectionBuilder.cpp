@@ -11,6 +11,7 @@
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
+#include "projection/core/ProjectionLiquidCullShadow.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
@@ -24,11 +25,16 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <iomanip>
+#include <locale>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <span>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -68,6 +74,11 @@ std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic_bool gSubmergedPlantLogged{};
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+std::atomic_bool gCullShadowCandidateLogged{};
+std::mutex gCullShadowSignaturesMutex;
+std::unordered_set<std::uint64_t> gCullShadowSignatures;
+#endif
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -1144,6 +1155,164 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     return succeeded;
 }
 
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+struct LiquidCullSourceRange {
+    std::size_t firstVertex{};
+    std::size_t lastVertex{};
+    std::size_t structureIndex{};
+    BlockPos local{};
+    BlockPos world{};
+    char const* originKind{"OTHER"};
+    char const* liquidKind{"water"};
+};
+
+bool reserveLiquidCullShadowSignature(std::span<glm::vec3 const> positions) {
+    if (positions.size() / 4U > MaxLiquidCullDiagnosticQuads) return false;
+    auto const signature = liquidCullGeometrySignature(positions);
+    std::lock_guard lock{gCullShadowSignaturesMutex};
+    if (gCullShadowSignatures.size() >= 8U) return false;
+    return gCullShadowSignatures.insert(signature).second;
+}
+
+void logLiquidCullShadowSection(
+    LiquidCullShadowReport const& report,
+    NativeLiquidCullOutcome const& production,
+    std::span<LiquidCullSourceRange const> sources,
+    std::span<PraxisCompatLiquidKind const> liquidKinds,
+    std::size_t section,
+    std::size_t configuredSections
+) {
+    if (!gCullShadowCandidateLogged.exchange(true, std::memory_order_acq_rel)) {
+        logger().info(
+            "LHOLO_LIQUID_DIAGNOSTIC_CANDIDATE candidate=C0 base=d7708ca purpose=cull-shadow productionRenderingChanged=0"
+        );
+    }
+    auto const matches = production.processed
+        && report.currentPairs == production.pairs
+        && report.currentRemovedVertices == production.culled;
+    std::ostringstream summary;
+    summary << "LHOLO_LIQUID_CULL_SHADOW_SUMMARY candidate=C0 base=d7708ca"
+            << " section=" << section << " sections=1 configuredSections=" << configuredSections
+            << " positionSpace=world_absolute"
+            << " vertices=" << report.vertices << " quads=" << report.quads
+            << " perSectionVertices=" << report.vertices
+            << " perSectionQuads=" << report.quads
+            << " currentPairs=" << production.pairs
+            << " currentRemovedVertices=" << production.culled
+            << " currentShadowPairs=" << report.currentPairs
+            << " currentShadowRemovedVertices=" << report.currentRemovedVertices
+            << " currentShadowMatchesProduction=" << (matches ? 1 : 0)
+            << " oldPraxisPairs=" << report.oldPraxisPairs
+            << " oldPraxisRemovedVertices=" << report.oldPraxisRemovedVertices
+            << " fullUnitIntegerFaces=" << report.fullUnitIntegerFaces
+            << " partialAxisAlignedFaces=" << report.partialAxisAlignedFaces
+            << " nonIntegerPlaneFaces=" << report.nonIntegerPlaneFaces
+            << " slopedFaces=" << report.slopedFaces
+            << " unknownFaces=" << report.unknownFaces
+            << " eligibleUnitQuads=" << report.eligibleUnitQuads
+            << " rejectedNonFlat=" << report.rejectedNonFlat
+            << " rejectedNonUnit=" << report.rejectedNonUnit
+            << " rejectedNonIntegerPlane=" << report.rejectedNonIntegerPlane
+            << " positiveFaces=" << report.positiveFaces
+            << " negativeFaces=" << report.negativeFaces
+            << " uniqueFaceKeys=" << report.uniqueFaceKeys
+            << " keysWithPositive=" << report.keysWithPositive
+            << " keysWithNegative=" << report.keysWithNegative
+            << " keysWithOppositeWindings=" << report.keysWithOppositeWindings
+            << " duplicatePositiveKeys=" << report.duplicatePositiveKeys
+            << " duplicateNegativeKeys=" << report.duplicateNegativeKeys
+            << " duplicateBothKeys=" << report.duplicateBothKeys
+            << " keysBlockedOnlyByDuplicatePolicy="
+            << report.keysBlockedOnlyByDuplicatePolicy
+            << " onePositiveOnlyKeys=" << report.onePositiveOnlyKeys
+            << " oneNegativeOnlyKeys=" << report.oneNegativeOnlyKeys
+            << " oneEachKeys=" << report.oneEachKeys
+            << " multiplePositiveOneNegativeKeys="
+            << report.multiplePositiveOneNegativeKeys
+            << " onePositiveMultipleNegativeKeys="
+            << report.onePositiveMultipleNegativeKeys
+            << " multipleBothKeys=" << report.multipleBothKeys;
+    logger().info("{}", summary.str());
+
+    for (auto const& diff : report.differences) {
+        auto const& key = diff.key;
+        logger().info(
+            "LHOLO_LIQUID_CULL_SHADOW_DIFF key=({},{},{},{}) oldPraxisPair=({},{}) currentPair=none currentReason={}",
+            key.axis, key.plane, key.first, key.second,
+            diff.firstQuad, diff.secondQuad,
+            diff.duplicatePositive && diff.duplicateNegative
+                ? "duplicate-both"
+                : diff.duplicatePositive ? "duplicate-positive"
+                : diff.duplicateNegative ? "duplicate-negative"
+                : "other"
+        );
+    }
+    auto const vectorText = [](std::array<float, 3> const& value) {
+        std::ostringstream stream;
+        stream.imbue(std::locale::classic());
+        stream << std::fixed << std::setprecision(6) << '(' << value[0]
+               << ',' << value[1] << ',' << value[2] << ')';
+        return stream.str();
+    };
+    for (auto const& quad : report.detailQuads) {
+        auto const className = [&] {
+            switch (quad.classification) {
+            case LiquidShadowQuadClass::FullUnitInteger: return "full-unit-integer";
+            case LiquidShadowQuadClass::PartialAxisAligned: return "partial-axis-aligned";
+            case LiquidShadowQuadClass::NonIntegerFull: return "non-integer-full";
+            case LiquidShadowQuadClass::Sloped: return "sloped";
+            default: return "unknown";
+            }
+        }();
+        std::ostringstream line;
+        line.imbue(std::locale::classic());
+        line << std::fixed << std::setprecision(6)
+             << "LHOLO_LIQUID_QUAD q=" << quad.index
+             << " v0=" << vectorText(quad.vertices[0])
+             << " v1=" << vectorText(quad.vertices[1])
+             << " v2=" << vectorText(quad.vertices[2])
+             << " v3=" << vectorText(quad.vertices[3])
+             << " min=" << vectorText(quad.minimum)
+             << " max=" << vectorText(quad.maximum)
+             << " extent=" << vectorText(quad.extent)
+             << " flatAxis=" << quad.flatAxis
+             << " plane=" << quad.plane
+             << " firstExtent=" << quad.firstExtent
+             << " secondExtent=" << quad.secondExtent
+             << " axisAligned=" << (quad.axisAligned ? 1 : 0)
+             << " fullUnit=" << (quad.fullUnit ? 1 : 0)
+             << " integerPlane=" << (quad.integerPlane ? 1 : 0)
+             << " winding=" << (quad.winding > 0 ? "positive"
+                                   : quad.winding < 0 ? "negative" : "none")
+             << " class=" << className
+             << " key=";
+        if (quad.hasKey) {
+            line << '(' << quad.key.axis << ',' << quad.key.plane << ','
+                 << quad.key.first << ',' << quad.key.second << ')';
+        } else {
+            line << "none";
+        }
+        line << " liquid="
+             << (quad.index * 4U < liquidKinds.size()
+                     && liquidKinds[quad.index * 4U] == PraxisCompatLiquidKind::Lava
+                    ? "lava" : "water");
+        logger().info("{}", line.str());
+        auto const vertex = quad.index * 4U;
+        for (auto const& source : sources) {
+            if (vertex < source.firstVertex || vertex >= source.lastVertex) continue;
+            logger().info(
+                "LHOLO_LIQUID_QUAD_SOURCE q={} firstVertex={} lastVertexInclusive={} structureIndex={} local=({},{},{}) world=({},{},{}) origin={} liquid={}",
+                quad.index, source.firstVertex, source.lastVertex - 1U,
+                source.structureIndex, source.local.x, source.local.y,
+                source.local.z, source.world.x, source.world.y, source.world.z,
+                source.originKind, source.liquidKind
+            );
+            break;
+        }
+    }
+}
+#endif
+
 std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
@@ -1165,6 +1334,9 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     };
     std::vector<std::size_t> candidates;
     std::vector<PraxisCompatLiquidKind> liquidKinds;
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+    std::vector<LiquidCullSourceRange> diagnosticSources;
+#endif
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
@@ -1308,6 +1480,24 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
         succeeded.push_back(index);
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+        try {
+            if (positionsBefore < MaxLiquidCullDetailQuads * 4U
+                && diagnosticSources.size() < MaxLiquidCullDetailQuads) {
+                auto const originKind = !entry.block ? "NORMAL_WATER"
+                    : entry.block->getTypeName() == "minecraft:bubble_column"
+                        ? "BUBBLE_SECONDARY_WATER" : "WATERLOGGED_SECONDARY";
+                diagnosticSources.push_back({
+                    positionsBefore, positionsAfter, index, local, worldPosition,
+                    originKind,
+                    liquidKind == PraxisCompatLiquidKind::Lava
+                        ? "minecraft:lava" : "minecraft:water"
+                });
+            }
+        } catch (...) {
+            // A diagnostic allocation or lookup cannot reject a liquid cell.
+        }
+#endif
     }
 
     // Compatibility ownership is section-atomic. Any missing cell keeps this
@@ -1323,7 +1513,40 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+    std::optional<LiquidCullShadowReport> diagnosticShadow;
+    std::vector<PraxisCompatLiquidKind> diagnosticKinds;
+    auto const& preCullPositions = tessellator.mMeshData->mPositions.get();
+    auto const preCullSpan = std::span<glm::vec3 const>{
+        preCullPositions.data(), preCullPositions.size()
+    };
+    try {
+        if (reserveLiquidCullShadowSignature(preCullSpan)) {
+            diagnosticShadow = analyzeLiquidCullShadow(preCullSpan);
+            diagnosticKinds.assign(
+                liquidKinds.begin(),
+                liquidKinds.begin() + std::min(
+                    liquidKinds.size(), MaxLiquidCullDetailQuads * 4U
+                )
+            );
+        }
+    } catch (...) {
+        diagnosticShadow.reset();
+    }
+#endif
     auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+    if (diagnosticShadow && diagnosticShadow->valid) {
+        try {
+            logLiquidCullShadowSection(
+                *diagnosticShadow, cull, diagnosticSources, diagnosticKinds,
+                section, state.sectionBlockIndices.size()
+            );
+        } catch (...) {
+            // The production cull outcome remains authoritative.
+        }
+    }
+#endif
     state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
     if (!cull.processed) {
