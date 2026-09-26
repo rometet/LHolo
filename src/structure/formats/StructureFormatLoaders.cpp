@@ -78,9 +78,10 @@ struct JavaParserLimits {
 std::atomic_uint64_t     gGeneration{0};
 
 bool checkedStructureVolume(std::uint64_t x, std::uint64_t y, std::uint64_t z,
-                            std::uint64_t& volume) {
-    if (x == 0 || y == 0 || z == 0 || x > JavaParserLimits::structureCells / y
-        || x * y > JavaParserLimits::structureCells / z) return false;
+                            std::uint64_t& volume,
+                            std::uint64_t maximumCells = JavaParserLimits::structureCells) {
+    if (x == 0 || y == 0 || z == 0 || x > maximumCells / y
+        || x * y > maximumCells / z) return false;
     volume = x * y * z;
     return true;
 }
@@ -875,7 +876,11 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
     loaded->sizeX = static_cast<int>(extentX);
     loaded->sizeY = static_cast<int>(extentY);
     loaded->sizeZ = static_cast<int>(extentZ);
-    if (!checkedStructureVolume(extentX, extentY, extentZ, loaded->volume)) {
+    // The merged box may contain large gaps between sparse regions. Only the
+    // individual region cells are scanned and capped above; here reject
+    // arithmetic overflow without imposing that dense-cell budget on gaps.
+    if (!checkedStructureVolume(extentX, extentY, extentZ, loaded->volume,
+                                std::numeric_limits<std::uint64_t>::max())) {
         error = "Litematic 合并后的结构体积过大";
         return nullptr;
     }

@@ -222,9 +222,14 @@ void testNbt() {
     using lholo::structure::detail::checkedPackedLongCount;
     check(checkedStructureVolume(1, 1, 1, volume) && volume == 1, "NBT normal volume");
     check(checkedStructureVolume(100, 100, 100, volume) && volume == 1000000, "NBT million cells");
+    check(checkedStructureVolume(500, 500, 500, volume,
+          std::numeric_limits<std::uint64_t>::max()) && volume == 125000000,
+          "NBT sparse merged bounding box");
     check(!checkedStructureVolume(0, 1, 1, volume), "NBT zero dimension");
     check(!checkedStructureVolume(0x7fffffffu, 0x7fffffffu, 0x7fffffffu, volume),
           "NBT extreme dimensions before multiplication");
+    check(!checkedStructureVolume(0x7fffffffu, 0x7fffffffu, 0x7fffffffu, volume,
+          std::numeric_limits<std::uint64_t>::max()), "NBT merged dimension overflow");
     check(checkedPackedLongCount(1, 2, longs) && longs == 1, "NBT packed normal");
     check(!checkedPackedLongCount(std::numeric_limits<std::uint64_t>::max(), 32, longs),
           "NBT packed multiplication overflow");

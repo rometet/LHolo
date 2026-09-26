@@ -16,7 +16,9 @@ kind, List and Compound, truncated and negative lengths, INT_MAX and signed
 `-1` values, nesting, dimension and packed-length overflow. A test allocator
 rejects allocations above 8 MiB; malformed inputs must throw a parser error
 without hitting that allocator cap. The 11-byte list-length reproducer is
-included. This bounds test execution without attempting an OOM.
+included. Sparse multi-region bounding boxes are allowed even when their
+empty gaps exceed the per-region cell budget. This bounds test execution
+without attempting an OOM.
 
 The bubble cases cover `.mcstructure` primary/secondary ordering, Java mapped
 and direct fallback paths, and correction liquid lookup/state comparison.
