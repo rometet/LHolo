@@ -741,6 +741,9 @@ void render(IDXGISwapChain* swapChain) {
     // attempt is intentionally retried on the next Present.
     if (!initializeImGui(swapChain)) return;
     structure::processPendingActions();
+    // LHolo can also open through commands or pending actions outside WndProc.
+    // Resolve simultaneous open requests in favor of LHolo before input draw.
+    if (structure::isGuiVisible()) gCompanionVisible.store(false, std::memory_order_release);
     auto const showCompanion = gCompanionVisible.load(std::memory_order_acquire);
     auto const showGui = structure::isGuiVisible() || showCompanion;
     if (showCompanion != gCompanionLastNotified.load(std::memory_order_acquire)) {
