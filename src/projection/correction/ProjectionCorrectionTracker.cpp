@@ -78,6 +78,7 @@ std::size_t ensureCorrectionSection(
     state.wrongFillSectionMeshes.emplace_back();
     state.wrongOutlineSectionMeshes.emplace_back();
     state.nativeLiquidSectionMeshes.emplace_back();
+    state.praxisCompatLiquidSections.emplace_back();
     state.liquidProxySectionMeshes.emplace_back();
     state.nativeLiquidSectionCellCounts.emplace_back();
     state.liquidProxySectionCellCounts.emplace_back();
