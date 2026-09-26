@@ -142,7 +142,7 @@ target("LHolo")
         "-Wno-pragma-system-header-outside-header",
         {tools = {"clang_cl"}}
     )
-    add_defines("NOMINMAX", "UNICODE")
+    add_defines("NOMINMAX", "UNICODE", "LHOLO_LIQUID_CULL_SHADOW_C0")
     add_syslinks("user32", "comdlg32", "d3d11", "d3d12", "dxgi", "delayimp")
     add_packages("levilamina", "imgui", "minhook", "zlib")
 

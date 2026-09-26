@@ -47,8 +47,12 @@ jobs:
         run: |
           python tests/regression/run_tests.py
 
+      - name: Run liquid cull shadow tests
+        run: |
+          python tests/liquid_cull_shadow/run_tests.py
+
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
+          name: LHolo-Candidate-C0-${{ github.sha }}-client-windows-x64
           path: |
             bin/

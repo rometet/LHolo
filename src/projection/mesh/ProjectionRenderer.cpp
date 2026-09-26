@@ -6,6 +6,7 @@
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
+#include "projection/core/ProjectionLiquidCullShadow.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
@@ -18,8 +19,11 @@
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -63,6 +67,10 @@ std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+std::mutex gCullShadowAggregateSignaturesMutex;
+std::unordered_set<std::uint64_t> gCullShadowAggregateSignatures;
+#endif
 
 enum class PraxisLiquidMaterialCandidate : std::uint8_t {
     SignText,
@@ -449,9 +457,59 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
     if (!result || !result->ready()) return {};
 
     auto candidate = clonePraxisExactReplayData(*result);
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+    std::optional<LiquidCullShadowReport> diagnosticShadow;
+    try {
+        if (candidate && candidate->ready()) {
+            auto const& positions = candidate->nativeStream->mPositions.get();
+            auto const span = std::span<glm::vec3 const>{positions.data(), positions.size()};
+            if (span.size() / 4U <= MaxLiquidCullDiagnosticQuads) {
+                auto const signature = liquidCullGeometrySignature(span);
+                bool firstSignature{};
+                {
+                    std::lock_guard lock{gCullShadowAggregateSignaturesMutex};
+                    if (gCullShadowAggregateSignatures.size() < 8U) {
+                        firstSignature = gCullShadowAggregateSignatures.insert(signature).second;
+                    }
+                }
+                if (firstSignature) diagnosticShadow = analyzeLiquidCullShadow(span);
+            }
+        }
+    } catch (...) {
+        diagnosticShadow.reset();
+    }
+#endif
     auto const boundaryCull = candidate
         ? cullPraxisAggregateBoundaryFaces(*candidate)
         : PraxisAggregateBoundaryCullResult{};
+#if defined(LHOLO_LIQUID_CULL_SHADOW_C0)
+    if (diagnosticShadow && diagnosticShadow->valid) {
+        try {
+            auto const productionPairs = boundaryCull.valid
+                ? boundaryCull.facePairsCulled : 0U;
+            auto const productionRemoved = boundaryCull.valid
+                ? boundaryCull.verticesCulled : 0U;
+            std::ostringstream line;
+            line << "LHOLO_LIQUID_CULL_SHADOW_AGGREGATE candidate=C0 base=d7708ca"
+                 << " sections=" << sections.size()
+                 << " positionSpace=projection_origin_local"
+                 << " aggregateVertices=" << diagnosticShadow->vertices
+                 << " aggregateQuads=" << diagnosticShadow->quads
+                 << " currentPairs=" << productionPairs
+                 << " currentRemovedVertices=" << productionRemoved
+                 << " currentShadowPairs=" << diagnosticShadow->currentPairs
+                 << " currentShadowRemovedVertices="
+                 << diagnosticShadow->currentRemovedVertices
+                 << " oldPraxisPairs=" << diagnosticShadow->oldPraxisPairs
+                 << " currentShadowMatchesProduction="
+                 << (diagnosticShadow->currentPairs == productionPairs
+                         && diagnosticShadow->currentRemovedVertices == productionRemoved ? 1 : 0);
+            logger().info("{}", line.str());
+        } catch (...) {
+            // Shadow logging cannot change the submitted mesh.
+        }
+    }
+#endif
     auto& telemetry = state.nativeLiquidTelemetry;
     telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull =
         result->nativeStream->mPositions.get().size();
