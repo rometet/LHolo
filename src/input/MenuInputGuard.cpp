@@ -4,6 +4,7 @@
 #include "input/MenuInputGuard.h"
 
 #include "structure/StructureLoader.h"
+#include "overlay/ImGuiOverlay.h"
 
 #include "ll/api/memory/Hook.h"
 
@@ -21,7 +22,7 @@ MenuInputGuardStatus gInstallStatus{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
-    return gInputHandoffDepth == 0 && structure::isMenuInputCaptured();
+    return gInputHandoffDepth == 0 && (structure::isMenuInputCaptured() || overlay::companionGuiVisible());
 }
 
 bool projectionOwnsMouseWheel(char actionButtonId) {
