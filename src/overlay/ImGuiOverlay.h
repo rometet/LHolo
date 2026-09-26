@@ -16,9 +16,24 @@
 
 #pragma once
 
+#include <cstddef>
+
 namespace lholo::overlay {
+
+using CompanionGuiDraw = void (*)(void* imguiContext) noexcept;
+using CompanionGuiState = void (*)(bool visible) noexcept;
+using CompanionHudNeeded = bool (*)() noexcept;
 
 bool ensureInstalled();
 void shutdown();
+bool companionGuiVisible() noexcept;
+bool companionGuiRegistered(void* owner) noexcept;
+bool registerCompanionGui(void* owner, unsigned key, CompanionGuiDraw draw,
+                          CompanionGuiDraw hud, CompanionHudNeeded hudNeeded,
+                          CompanionGuiState state, unsigned imguiVersion,
+                          std::size_t ioSize, std::size_t styleSize,
+                          std::size_t drawVertSize) noexcept;
+bool unregisterCompanionGui(void* owner) noexcept;
+void requestCompanionGuiClose() noexcept;
 
 } // namespace lholo::overlay

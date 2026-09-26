@@ -120,6 +120,44 @@ std::atomic_int gMenuCursorShowCount{};
 std::array<bool, 256> gGameKeysDown{};
 std::array<bool, 5>   gGameMouseButtonsDown{};
 std::atomic_bool      gConsumeEscapeRelease{false};
+std::atomic<void*> gCompanionOwner{};
+std::atomic<CompanionGuiDraw> gCompanionDraw{};
+std::atomic<CompanionGuiDraw> gCompanionHud{};
+std::atomic<CompanionHudNeeded> gCompanionHudNeeded{};
+std::atomic<CompanionGuiState> gCompanionState{};
+std::atomic_uint gCompanionKey{VK_F10};
+std::atomic_bool gCompanionVisible{};
+std::atomic_bool gCompanionKeyDown{};
+std::atomic_uint gCompanionCallbacksInFlight{};
+std::atomic_bool gCompanionLastNotified{};
+
+void notifyCompanionState(bool visible) noexcept {
+    gCompanionCallbacksInFlight.fetch_add(1, std::memory_order_acquire);
+    if (auto callback = gCompanionState.load(std::memory_order_acquire)) callback(visible);
+    gCompanionCallbacksInFlight.fetch_sub(1, std::memory_order_release);
+}
+
+bool companionHudNeeded() noexcept {
+    gCompanionCallbacksInFlight.fetch_add(1, std::memory_order_acquire);
+    auto callback = gCompanionHudNeeded.load(std::memory_order_acquire);
+    bool const needed = callback && callback();
+    gCompanionCallbacksInFlight.fetch_sub(1, std::memory_order_release);
+    return needed;
+}
+
+void drawCompanion(std::atomic<CompanionGuiDraw>& draw) noexcept {
+    gCompanionCallbacksInFlight.fetch_add(1, std::memory_order_acquire);
+    if (auto callback = draw.load(std::memory_order_acquire)) {
+        auto* frameContext = ImGui::GetCurrentContext();
+        callback(frameContext);
+        ImGui::SetCurrentContext(frameContext);
+    }
+    gCompanionCallbacksInFlight.fetch_sub(1, std::memory_order_release);
+}
+
+void waitForCompanionCallbacks() noexcept {
+    while (gCompanionCallbacksInFlight.load(std::memory_order_acquire) != 0) Sleep(0);
+}
 
 constexpr ULONGLONG kFullscreenGraphicsResumeDelayMs = 750;
 constexpr ULONGLONG kResizeGraphicsResumeDelayMs     = 100;
@@ -476,6 +514,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     if (message == WM_KILLFOCUS || (message == WM_ACTIVATEAPP && wParam == FALSE)) {
         structure::resetHotkeyState();
+        gCompanionKeyDown.store(false, std::memory_order_release);
         gMouseHandoffActive.store(false, std::memory_order_release);
         releaseMenuCursor();
         ClipCursor(nullptr);
@@ -501,6 +540,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
         && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
         && structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam))) {
+        if (structure::isGuiVisible()) gCompanionVisible.store(false, std::memory_order_release);
         if (!guiWasVisible && structure::isGuiVisible()) releaseGameInput(window);
         if (guiWasVisible && !structure::isGuiVisible()) confineMouseToClientCenter(window);
         return 1;
@@ -508,6 +548,25 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
         && (message == WM_KEYUP || message == WM_SYSKEYUP)
         && structure::handleGuiHotkeyKeyUp(static_cast<unsigned int>(wParam))) {
+        return 1;
+    }
+    // LHolo shortcuts have priority if the user binds the same key.
+    if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
+        && gCompanionDraw.load(std::memory_order_acquire)
+        && static_cast<unsigned>(wParam) == gCompanionKey.load(std::memory_order_acquire)
+        && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
+        if (!guiWasVisible && !gCompanionKeyDown.exchange(true, std::memory_order_acq_rel)) {
+            bool const opening = !gCompanionVisible.load(std::memory_order_acquire);
+            gCompanionVisible.store(opening, std::memory_order_release);
+            if (opening) releaseGameInput(window);
+            else confineMouseToClientCenter(window);
+        }
+        return 1;
+    }
+    if (gCompanionDraw.load(std::memory_order_acquire)
+        && static_cast<unsigned>(wParam) == gCompanionKey.load(std::memory_order_acquire)
+        && (message == WM_KEYUP || message == WM_SYSKEYUP)) {
+        gCompanionKeyDown.store(false, std::memory_order_release);
         return 1;
     }
     if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam == VK_ESCAPE
@@ -518,7 +577,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     // own window messages, so translate them to virtual-key codes and route them
     // through the same capture/trigger path as the keyboard.
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized) {
-        if (message == WM_MOUSEWHEEL && structure::handleProjectionOffsetWheel(
+        if (!gCompanionVisible.load(std::memory_order_acquire)
+            && message == WM_MOUSEWHEEL && structure::handleProjectionOffsetWheel(
             GET_WHEEL_DELTA_WPARAM(wParam))) {
             return 1;
         }
@@ -538,6 +598,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (mouseKey != 0) {
             if (message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
                 if (structure::handleGuiHotkeyKeyDown(mouseKey)) {
+                    if (structure::isGuiVisible()) gCompanionVisible.store(false, std::memory_order_release);
                     if (!guiWasVisible && structure::isGuiVisible()) releaseGameInput(window);
                     if (guiWasVisible && !structure::isGuiVisible()) confineMouseToClientCenter(window);
                     return 1;
@@ -547,7 +608,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
         }
     }
-    if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized && structure::isGuiVisible()) {
+    if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
+        && (structure::isGuiVisible() || gCompanionVisible.load(std::memory_order_acquire))) {
         gMouseHandoffActive.store(false, std::memory_order_release);
         ClipCursor(nullptr);
         ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
@@ -558,7 +620,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
             gConsumeEscapeRelease.store(true, std::memory_order_release);
-            structure::requestOpenGui();
+            if (structure::isGuiVisible()) structure::requestOpenGui();
+            else gCompanionVisible.store(false, std::memory_order_release);
             confineMouseToClientCenter(window);
             return 1;
         }
@@ -570,7 +633,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         // other mods read a hidden cursor as "gameplay has the mouse".
         if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) return 1;
     }
-    if (structure::isMenuInputCaptured()
+    if ((structure::isMenuInputCaptured() || gCompanionVisible.load(std::memory_order_acquire))
         && isMenuInputMessage(message)
         && !isFullscreenKeyMessage(message, wParam)) {
         return consumeMenuInputMessage(window, message, wParam, lParam);
@@ -678,8 +741,17 @@ void render(IDXGISwapChain* swapChain) {
     // attempt is intentionally retried on the next Present.
     if (!initializeImGui(swapChain)) return;
     structure::processPendingActions();
-    auto const showGui = structure::isGuiVisible();
-    auto const showHud = !showGui && structure::hasHudInfo();
+    // LHolo can also open through commands or pending actions outside WndProc.
+    // Resolve simultaneous open requests in favor of LHolo before input draw.
+    if (structure::isGuiVisible()) gCompanionVisible.store(false, std::memory_order_release);
+    auto const showCompanion = gCompanionVisible.load(std::memory_order_acquire);
+    auto const showGui = structure::isGuiVisible() || showCompanion;
+    if (showCompanion != gCompanionLastNotified.load(std::memory_order_acquire)) {
+        gCompanionLastNotified.store(showCompanion, std::memory_order_release);
+        notifyCompanionState(showCompanion);
+    }
+    auto const showCompanionHud = !showGui && companionHudNeeded();
+    auto const showHud = !showGui && (structure::hasHudInfo() || showCompanionHud);
     if (gGuiVisibleLastFrame != showGui) {
         if (!showGui) {
             prepareMouseHandoff(gWindow);
@@ -703,7 +775,7 @@ void render(IDXGISwapChain* swapChain) {
         ClipCursor(nullptr);
     }
 
-    auto draw = [](ID3D11RenderTargetView* target) {
+    auto draw = [showCompanionHud](ID3D11RenderTargetView* target) {
         gDeviceContext->OMSetRenderTargets(1, &target, nullptr);
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -717,9 +789,17 @@ void render(IDXGISwapChain* swapChain) {
                 PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
                 gGuiVisibleLastFrame = false;
             }
+        } else if (gCompanionVisible.load(std::memory_order_acquire)) {
+            drawCompanion(gCompanionDraw);
+            if (!gCompanionVisible.load(std::memory_order_acquire)) {
+                prepareMouseHandoff(gWindow);
+                PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
+                gGuiVisibleLastFrame = false;
+            }
         } else {
             structure::renderHud();
             structure::renderMaterialHud();
+            if (showCompanionHud) drawCompanion(gCompanionHud);
         }
         structure::renderActionHint();
         ImGui::Render();
@@ -905,6 +985,60 @@ void shutdownLocked();
 
 } // namespace
 
+bool companionGuiVisible() noexcept {
+    return gCompanionVisible.load(std::memory_order_acquire);
+}
+
+bool companionGuiRegistered(void* owner) noexcept {
+    return owner && gCompanionOwner.load(std::memory_order_acquire) == owner;
+}
+
+bool registerCompanionGui(void* owner, unsigned key, CompanionGuiDraw draw,
+                          CompanionGuiDraw hud, CompanionHudNeeded hudNeeded,
+                          CompanionGuiState state, unsigned imguiVersion,
+                          std::size_t ioSize, std::size_t styleSize,
+                          std::size_t drawVertSize) noexcept {
+    // Both DLLs statically link ImGui and share a context pointer. Reject any
+    // layout mismatch before a Companion callback can access that context.
+    if (imguiVersion != IMGUI_VERSION_NUM || ioSize != sizeof(ImGuiIO)
+        || styleSize != sizeof(ImGuiStyle) || drawVertSize != sizeof(ImDrawVert)
+        || !owner || !draw || !hud || !hudNeeded || !state
+        || key == 0 || key == VK_INSERT || key == VK_F11) return false;
+    std::lock_guard lock(gResourceMutex);
+    if (gShuttingDown.load(std::memory_order_acquire)
+        || gCompanionOwner.load(std::memory_order_acquire)) return false;
+    gCompanionKey.store(key, std::memory_order_release);
+    gCompanionState.store(state, std::memory_order_release);
+    gCompanionHud.store(hud, std::memory_order_release);
+    gCompanionHudNeeded.store(hudNeeded, std::memory_order_release);
+    gCompanionOwner.store(owner, std::memory_order_release);
+    gCompanionDraw.store(draw, std::memory_order_release);
+    return true;
+}
+
+bool unregisterCompanionGui(void* owner) noexcept {
+    if (!owner) return false;
+    std::lock_guard lock(gResourceMutex);
+    void* current = gCompanionOwner.load(std::memory_order_acquire);
+    if (!current) return true; // LHolo may already have shut down.
+    if (current != owner) return false;
+    gCompanionVisible.store(false, std::memory_order_release);
+    gCompanionDraw.store(nullptr, std::memory_order_release);
+    gCompanionHud.store(nullptr, std::memory_order_release);
+    gCompanionHudNeeded.store(nullptr, std::memory_order_release);
+    auto callback = gCompanionState.exchange(nullptr, std::memory_order_acq_rel);
+    waitForCompanionCallbacks();
+    if (callback) callback(false);
+    gCompanionOwner.store(nullptr, std::memory_order_release);
+    gCompanionKeyDown.store(false, std::memory_order_release);
+    gCompanionLastNotified.store(false, std::memory_order_release);
+    return true;
+}
+
+void requestCompanionGuiClose() noexcept {
+    gCompanionVisible.store(false, std::memory_order_release);
+}
+
 bool ensureInstalled() {
     if (gInstalled.load(std::memory_order_acquire)) return true;
     auto const now = GetTickCount64();
@@ -1016,6 +1150,16 @@ void shutdownLocked() {
     gOriginalWndProc = nullptr;
 
     std::lock_guard lock(gResourceMutex);
+    gCompanionVisible.store(false, std::memory_order_release);
+    gCompanionDraw.store(nullptr, std::memory_order_release);
+    gCompanionHud.store(nullptr, std::memory_order_release);
+    gCompanionHudNeeded.store(nullptr, std::memory_order_release);
+    auto callback = gCompanionState.exchange(nullptr, std::memory_order_acq_rel);
+    waitForCompanionCallbacks();
+    if (callback) callback(false);
+    gCompanionOwner.store(nullptr, std::memory_order_release);
+    gCompanionKeyDown.store(false, std::memory_order_release);
+    gCompanionLastNotified.store(false, std::memory_order_release);
     releaseGraphicsBackend();
     if (gImGuiInitialized) {
         ImGui_ImplWin32_Shutdown();
@@ -1047,3 +1191,33 @@ void shutdown() {
 }
 
 } // namespace lholo::overlay
+
+// Optional in-process GUI bridge. LHolo remains the sole owner of the ImGui
+// frame, DXGI hooks, WndProc and game input handoff.
+extern "C" __declspec(dllexport) bool __cdecl lholo_register_companion_gui_v2(
+    void* owner, unsigned key, lholo::overlay::CompanionGuiDraw draw,
+    lholo::overlay::CompanionGuiDraw hud, lholo::overlay::CompanionHudNeeded hudNeeded,
+    lholo::overlay::CompanionGuiState state, unsigned imguiVersion,
+    std::size_t ioSize, std::size_t styleSize, std::size_t drawVertSize
+) noexcept {
+    return lholo::overlay::registerCompanionGui(
+        owner, key, draw, hud, hudNeeded, state,
+        imguiVersion, ioSize, styleSize, drawVertSize
+    );
+}
+
+extern "C" __declspec(dllexport) bool __cdecl lholo_unregister_companion_gui_v2(void* owner) noexcept {
+    return lholo::overlay::unregisterCompanionGui(owner);
+}
+
+extern "C" __declspec(dllexport) bool __cdecl lholo_companion_gui_registered_v2(void* owner) noexcept {
+    return lholo::overlay::companionGuiRegistered(owner);
+}
+
+extern "C" __declspec(dllexport) bool __cdecl lholo_menu_input_captured_v2() noexcept {
+    return lholo::structure::isMenuInputCaptured() || lholo::overlay::companionGuiVisible();
+}
+
+extern "C" __declspec(dllexport) void __cdecl lholo_close_companion_gui_v2() noexcept {
+    lholo::overlay::requestCompanionGuiClose();
+}

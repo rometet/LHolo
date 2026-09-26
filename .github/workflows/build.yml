@@ -35,6 +35,15 @@ jobs:
       - run: |
           xmake -v -y
 
+      - name: Verify Companion GUI bridge exports
+        shell: pwsh
+        run: |
+          $exports = llvm-readobj --coff-exports bin/LHolo/LHolo.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect LHolo.dll exports' }
+          foreach ($name in @('lholo_register_companion_gui_v2', 'lholo_unregister_companion_gui_v2', 'lholo_companion_gui_registered_v2', 'lholo_menu_input_captured_v2', 'lholo_close_companion_gui_v2')) {
+            if (-not ($exports | Select-String -SimpleMatch "Name: $name" -Quiet)) { throw "Missing bridge export: $name" }
+          }
+
       - name: Build logic tests
         run: |
           xmake -v -y LHoloLogicTests
