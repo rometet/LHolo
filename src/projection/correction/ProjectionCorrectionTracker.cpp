@@ -128,7 +128,11 @@ CorrectionProgressChanges updateCorrectionTracker(
             entry.liquid, transformSettings, identityTransform
         );
         auto const& actual = region.getBlock(position);
-        auto const& actualLiquid = region.getLiquidBlock(position);
+        auto const isBubbleColumn = (expected && expected->getTypeName() == "minecraft:bubble_column")
+            || (actual.getTypeName() == "minecraft:bubble_column");
+        auto const& actualLiquid = isBubbleColumn
+            ? region.getExtraBlock(position)
+            : region.getLiquidBlock(position);
         auto const bodyMissing = expected && actual.isAir();
         auto const liquidMissing = expectedLiquid && actualLiquid.isAir();
         auto const bodyTypeWrong = expected
@@ -152,7 +156,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                         withFlattenedConnections(*expected, region, position),
                         actual
                     ))
-            || (expectedLiquid && actualLiquid != *expectedLiquid)) {
+            || (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid))) {
             nextState = CorrectionState::WrongState;
         }
         auto const nowCorrect = nextState == CorrectionState::Correct;
