@@ -49,6 +49,6 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
+          name: LHolo-Candidate-A-${{ github.sha }}-client-windows-x64
           path: |
             bin/
