@@ -21,6 +21,7 @@
 #include "place/PlaceHelper.h"
 
 #include "block/BlockPlacementRules.h"
+#include "block/BlockOrientationRules.h"
 #include "projection/Projection.h"
 #include "structure/StructureLoader.h"
 
@@ -535,6 +536,12 @@ CompoundTag const* placementSerializedStates(Block const& block) {
     return nullptr;
 }
 
+bool horizontalPlacementDirectionMatches(Block const& predicted, Block const& ghost) {
+    auto const* expected = placementSerializedStates(ghost);
+    auto const* actual = placementSerializedStates(predicted);
+    return expected && actual && block::horizontalDirectionStatesMatch(expected->mTags, actual->mTags);
+}
+
 bool manualSerializedPlacementMatches(Block const& predicted, Block const& ghost) {
     // Identity is checked by the caller before this function. Do not treat
     // missing/malformed serialization as permission to ignore a runtime ID.
@@ -579,6 +586,16 @@ bool placementPredictionMatches(
     if (block::placeableBaseName(predicted.getTypeName())
         != block::placeableBaseName(ghost.getTypeName())) return false;
 
+    // Orientation is a veto in EVERY mode, before any specialized or native
+    // tolerance can return true. Missing serialization is not permission to
+    // guess a direction. Connection/power/post-placement states stay under the
+    // existing checks below; this guard alone never authorizes a placement.
+    auto const* expectedStates = placementSerializedStates(ghost);
+    auto const* actualStates = placementSerializedStates(predicted);
+    if (!expectedStates || !actualStates || !block::placementOrientationStatesMatch(
+            ghost.getTypeName(), expectedStates->mTags, actualStates->mTags
+        )) return false;
+
     auto const& name = ghost.getTypeName();
     if (name.ends_with("_stairs")) {
         return sameSerializedState(predicted, ghost, "weirdo_direction")
@@ -601,6 +618,20 @@ bool placementPredictionMatches(
     if (!serializedState(ghost, "pillar_axis").empty()) {
         return sameSerializedState(predicted, ghost, "pillar_axis");
     }
+    // Trapdoors are placement-controlled: direction comes from the clicked
+    // face/player orientation and upside_down_bit from the hit face/height.
+    // BlockType::allowStateMismatchOnPlacement() can be more permissive than
+    // LHolo needs here, so never let it accept a wrong-facing trapdoor.
+    // In manual mode an open projected trapdoor may be placed closed and opened
+    // afterwards, but its direction and top/bottom half must already be exact.
+    if (name == "minecraft:trapdoor" || name.ends_with("_trapdoor")) {
+        bool const orientationMatches =
+            sameSerializedState(predicted, ghost, "direction")
+            && sameSerializedState(predicted, ghost, "upside_down_bit");
+        if (!orientationMatches) return false;
+        return placementState().manualMode()
+            || sameSerializedState(predicted, ghost, "open_bit");
+    }
     // Walls, fences, glass panes and iron bars derive every connection state from
     // their neighbours after placement (nothing is chosen at placement), so accept
     // the placement on block identity alone — the connections resolve as the
@@ -611,7 +642,7 @@ bool placementPredictionMatches(
     // here via the shared placeable-base rule. This also lets a delay-adjusted repeater place.
     if (name == "minecraft:unpowered_repeater" || name == "minecraft:powered_repeater"
         || name == "minecraft:unpowered_comparator" || name == "minecraft:powered_comparator") {
-        return sameSerializedState(predicted, ghost, "minecraft:cardinal_direction");
+        return horizontalPlacementDirectionMatches(predicted, ghost);
     }
     if (isTwoBlockDoor(ghost)) {
         // A door item places both cells. The lower ghost owns direction/open,
@@ -621,7 +652,7 @@ bool placementPredictionMatches(
         // hides the upper, leaving the hinge unverifiable — one DoorItem use
         // still creates both halves, so accept the placement without it.
         bool matched = sameSerializedState(predicted, ghost, "upper_block_bit")
-            && sameSerializedState(predicted, ghost, "direction")
+            && horizontalPlacementDirectionMatches(predicted, ghost)
             && (placementState().manualMode()
                 || sameSerializedState(predicted, ghost, "open_bit"));
         if (matched && expectedDoorUpper) {
@@ -781,7 +812,7 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         BlockPos const cell{cand.x, cand.y, cand.z};
 
         // Empty suppression state takes one branch for the entire candidate
-        // batch; hash lookups happen only during an active ten-second window.
+        // batch; hash lookups happen only during an active-ten second window.
         if (suppressionsActive
             && placementState().autoPlacementSuppressed(packBlockPos(cell), now)) {
             continue;
