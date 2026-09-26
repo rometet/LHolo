@@ -1484,7 +1484,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         try {
             if (positionsBefore < MaxLiquidCullDetailQuads * 4U
                 && diagnosticSources.size() < MaxLiquidCullDetailQuads) {
-                auto const originKind = !entry.block ? "NORMAL_WATER"
+                auto const originKind = liquidKind == PraxisCompatLiquidKind::Lava
+                    ? "OTHER" : !entry.block ? "NORMAL_WATER"
                     : entry.block->getTypeName() == "minecraft:bubble_column"
                         ? "BUBBLE_SECONDARY_WATER" : "WATERLOGGED_SECONDARY";
                 diagnosticSources.push_back({
