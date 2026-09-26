@@ -1,0 +1,10 @@
+# Candidate D0: liquid UV atlas target observation
+
+Base: `rometet/LHolo@d7708cac849eb16eb22ea80db3101a84eb24f6d5`.
+This is a diagnostic build. It leaves the production `BlockGraphics::getTexture(0, 0)` rectangle and `remapNativeLiquidUvToAtlas` call unchanged. The shadow path copies at most 240 raw UV vertices per section, remaps only that copy, and logs at most 16 cells, 16 quads, and 8 section summaries per process. The section summary counts every successfully remapped water cell and vertex, including ones beyond the copy cap.
+
+Old Praxis `119791ca394bce4f066f2b5eb5474d4dc42c4021` resolved `water_still_grey`, `still_water_grey`, `water_still`, then `still_water` through `NativeTextureAtlas::resolve`. That resolver read a map populated by hooks and raw atlas layouts, including offsets `0xAC8`, `0x70`, `0x58`, `0x20`, and others. Those offsets belong to the old game version and are not used here.
+
+The 26.51 Fake Headers expose `BlockGraphics::getTextureUVCoordinateSet(name, 0, 0)` and `TextureUVCoordinateSet::sourceFileLocation`. Candidate D0 calls that typed API in the liquid build context, accepts a named rectangle only when its typed source path basename matches the requested alias, and rejects an unknown-name fallback. A missing or unverifiable source path leaves the old rectangle unresolved; the summary then reports `oldPraxisNamedRectResolved=0`. Successful compilation proves only the API signature and link, not that 26.51 will resolve one of these names at runtime.
+
+On Minecraft 26.51, manually load the Candidate D0 DLL and `lholotest2.mcstructure` in the same world, resource pack, and projection location used for Candidate C0. Read `latest.log` for `LHOLO_LIQUID_UV_DIAGNOSTIC_CANDIDATE`, `LHOLO_LIQUID_UV_RECT_OLD_PRAXIS`, `LHOLO_LIQUID_UV_RECT_CURRENT`, `LHOLO_LIQUID_UV_RECT_COMPARE`, `LHOLO_LIQUID_UV_QUAD`, and `LHOLO_LIQUID_UV_SHADOW_SUMMARY`. If named resolution is zero, the atlas comparison remains blocked; do not infer equality from the zero-filled comparison fields. No Minecraft result is claimed by the local or CI tests.

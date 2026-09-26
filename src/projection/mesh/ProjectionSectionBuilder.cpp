@@ -12,6 +12,9 @@
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+#include "projection/core/ProjectionLiquidUvShadow.h"
+#endif
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -68,6 +71,64 @@ std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic_bool gSubmergedPlantLogged{};
+
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+std::atomic_bool gLiquidUvD0CandidateLogged{};
+std::atomic<unsigned> gLiquidUvD0DetailCells{};
+std::atomic<unsigned> gLiquidUvD0DetailQuads{};
+std::atomic<unsigned> gLiquidUvD0Summaries{};
+
+struct LiquidUvD0NamedRect {
+    NativeLiquidAtlasRect rect{};
+    char const* alias{"unavailable"};
+    char const* reason{"typed_name_or_source_path_unavailable"};
+    std::string sourcePath;
+    bool resolved{};
+};
+
+LiquidUvD0NamedRect resolveLiquidUvD0NamedWaterRect() {
+    LiquidUvD0NamedRect result{};
+    // The 26.51 MCAPI returns a UV set but has no success flag. Verify the
+    // typed source path so an unknown-name fallback is never called a match.
+    for (char const* alias : LiquidUvWaterStillAliases) {
+        try {
+            auto const texture = BlockGraphics::getTextureUVCoordinateSet(alias, 0, 0);
+            auto const path = texture.sourceFileLocation->getFullPath().value;
+            if (!liquidUvTexturePathMatchesAlias(path, alias)) {
+                if (result.sourcePath.empty()) result.sourcePath = path;
+                continue;
+            }
+            NativeLiquidAtlasRect const rect{
+                texture._u0, texture._v0, texture._u1, texture._v1
+            };
+            if (!isValidNativeLiquidAtlasRect(rect)) continue;
+            result.rect = rect;
+            result.alias = alias;
+            result.sourcePath = path;
+            result.reason = "none";
+            result.resolved = true;
+            return result;
+        } catch (...) {
+            result.reason = "typed_lookup_exception";
+        }
+    }
+    return result;
+}
+
+struct LiquidUvD0Summary {
+    std::size_t waterCells{};
+    std::size_t vertices{};
+    std::size_t quads{};
+    std::size_t currentRectResolvedCells{};
+    std::size_t rawUvCapturedVertices{};
+    std::size_t currentRemappedVertices{};
+    std::size_t oldShadowRemappedVertices{};
+    BoundedLiquidUvRectSet currentRects;
+    BoundedLiquidUvRectSet normalRects;
+    BoundedLiquidUvRectSet bubbleRects;
+    BoundedLiquidUvRectSet waterloggedRects;
+};
+#endif
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -1174,6 +1235,17 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     std::vector<std::size_t> succeeded;
     if (candidates.empty()) return succeeded;
 
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+    LiquidUvD0Summary uvD0{};
+    LiquidUvD0NamedRect uvD0Old{};
+    bool uvD0NamedLookupAttempted{};
+    if (!gLiquidUvD0CandidateLogged.exchange(true, std::memory_order_acq_rel)) {
+        logger().info(
+            "LHOLO_LIQUID_UV_DIAGNOSTIC_CANDIDATE candidate=D0 base=d7708ca purpose=uv-atlas-shadow productionRenderingChanged=0"
+        );
+    }
+#endif
+
     // This is the separate Praxis 1.21.132 compatibility candidate. The
     // existing LHolo retained build above remains false/true; this build uses
     // the proven true/false generation contract without sharing its output.
@@ -1225,6 +1297,81 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
             continue;
         }
+
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+        bool const uvD0Water = !expectedLiquid->getBlockType().mMaterial.mSuperHot;
+        char const* uvD0SourceClass = "OTHER_LIQUID";
+        if (uvD0Water) {
+            if (!uvD0NamedLookupAttempted) {
+                uvD0NamedLookupAttempted = true;
+                try {
+                    uvD0Old = resolveLiquidUvD0NamedWaterRect();
+                    if (gLiquidUvD0Summaries.load(std::memory_order_relaxed) < 8) {
+                        if (uvD0Old.resolved) {
+                            logger().info(
+                                "LHOLO_LIQUID_UV_RECT_OLD_PRAXIS resolved=1 alias={} sourcePath={} u0={:.9f} v0={:.9f} u1={:.9f} v1={:.9f} width={:.9f} height={:.9f}",
+                                uvD0Old.alias, uvD0Old.sourcePath,
+                                uvD0Old.rect.u0, uvD0Old.rect.v0,
+                                uvD0Old.rect.u1, uvD0Old.rect.v1,
+                                uvD0Old.rect.u1 - uvD0Old.rect.u0,
+                                uvD0Old.rect.v1 - uvD0Old.rect.v0
+                            );
+                        } else {
+                            logger().info(
+                                "LHOLO_LIQUID_UV_RECT_OLD_PRAXIS resolved=0 reason={} firstReturnedSourcePath={}",
+                                uvD0Old.reason, uvD0Old.sourcePath
+                            );
+                        }
+                    }
+                } catch (...) {
+                    uvD0Old.reason = "diagnostic_exception";
+                }
+            }
+            auto const body = entry.block ? entry.block->getTypeName() : std::string{};
+            if (body == "minecraft:bubble_column") {
+                uvD0SourceClass = "BUBBLE_SECONDARY_WATER";
+                uvD0.bubbleRects.add(atlasRect);
+            } else if (body.empty() || body == expectedLiquid->getTypeName()) {
+                uvD0SourceClass = "NORMAL_WATER";
+                uvD0.normalRects.add(atlasRect);
+            } else {
+                uvD0SourceClass = "WATERLOGGED_SECONDARY";
+                uvD0.waterloggedRects.add(atlasRect);
+            }
+            ++uvD0.waterCells;
+            ++uvD0.currentRectResolvedCells;
+            uvD0.currentRects.add(atlasRect);
+            auto const logIndex = gLiquidUvD0DetailCells.fetch_add(1, std::memory_order_relaxed);
+            if (logIndex < 16) {
+                try {
+                    logger().info(
+                        "LHOLO_LIQUID_UV_RECT_CURRENT structureIndex={} local=({},{},{}) world=({},{},{}) body={} liquid={} sourceClass={} u0={:.9f} v0={:.9f} u1={:.9f} v1={:.9f} width={:.9f} height={:.9f} textureName={} textureIdentity=RECT_AND_DEFAULT_NAME",
+                        index, local.x, local.y, local.z,
+                        worldPosition.x, worldPosition.y, worldPosition.z,
+                        body.empty() ? "<none>" : body.c_str(),
+                        expectedLiquid->getTypeName(), uvD0SourceClass,
+                        atlasRect.u0, atlasRect.v0, atlasRect.u1, atlasRect.v1,
+                        atlasRect.u1 - atlasRect.u0, atlasRect.v1 - atlasRect.v0,
+                        graphics->getDefaultTextureName(0)
+                    );
+                    if (uvD0Old.resolved) {
+                        auto const diff = compareLiquidUvRects(atlasRect, uvD0Old.rect);
+                        logger().info(
+                            "LHOLO_LIQUID_UV_RECT_COMPARE structureIndex={} current=({:.9f},{:.9f},{:.9f},{:.9f}) oldPraxis=({:.9f},{:.9f},{:.9f},{:.9f}) delta=({:.9f},{:.9f},{:.9f},{:.9f}) maxAbsDelta={:.9f} exactEqual={} epsilon={:.9f} epsilonEqual={}",
+                            index,
+                            atlasRect.u0, atlasRect.v0, atlasRect.u1, atlasRect.v1,
+                            uvD0Old.rect.u0, uvD0Old.rect.v0, uvD0Old.rect.u1, uvD0Old.rect.v1,
+                            diff.delta[0], diff.delta[1], diff.delta[2], diff.delta[3],
+                            diff.maxAbsDelta, diff.exactEqual,
+                            LiquidUvShadowEpsilon, diff.epsilonEqual
+                        );
+                    }
+                } catch (...) {
+                    // Diagnostic failure never changes liquid section ownership.
+                }
+            }
+        }
+#endif
 
         TessellatorSuffixCheckpoint const checkpoint{tessellator};
         auto& positions = tessellator.mMeshData->mPositions.get();
@@ -1289,6 +1436,19 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
 
         auto const addedVertices = positionsAfter - positionsBefore;
         auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+        std::array<glm::vec2, LiquidUvShadowMaxCapturedVertices> uvD0Raw{};
+        std::size_t uvD0Copied{};
+        if (uvD0Water && addedUvs == addedVertices && (addedUvs % 4U) == 0U) {
+            uvD0Copied = std::min(
+                addedUvs,
+                LiquidUvShadowMaxCapturedVertices - uvD0.rawUvCapturedVertices
+            );
+            uvD0Copied -= uvD0Copied % 4U;
+            std::copy_n(uvs.begin() + static_cast<std::ptrdiff_t>(uvsBefore), uvD0Copied, uvD0Raw.begin());
+            uvD0.rawUvCapturedVertices += uvD0Copied;
+        }
+#endif
         auto const uvRemapped = addedUvs == addedVertices
             && remapNativeLiquidUvToAtlas(
                 std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
@@ -1300,6 +1460,61 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             continue;
         }
 
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+        if (uvD0Water) {
+            uvD0.vertices += addedVertices;
+            uvD0.quads += addedVertices / 4U;
+            uvD0.currentRemappedVertices += addedUvs;
+            if (uvD0Copied != 0) {
+                try {
+                    auto uvD0Shadow = uvD0Raw;
+                    bool const oldShadowReady = uvD0Old.resolved
+                        && remapNativeLiquidUvToAtlas(
+                            std::span<glm::vec2>{uvD0Shadow.data(), uvD0Copied}, uvD0Old.rect
+                        );
+                    if (oldShadowReady) uvD0.oldShadowRemappedVertices += uvD0Copied;
+                    for (std::size_t q = 0; q < uvD0Copied / 4U; ++q) {
+                        auto const logIndex = gLiquidUvD0DetailQuads.fetch_add(1, std::memory_order_relaxed);
+                        if (logIndex >= 16) break;
+                        auto const* raw = uvD0Raw.data() + q * 4U;
+                        auto const* shadow = uvD0Shadow.data() + q * 4U;
+                        auto const* current = uvs.data() + uvsBefore + q * 4U;
+                        auto minU = raw[0].x;
+                        auto maxU = raw[0].x;
+                        auto minV = raw[0].y;
+                        auto maxV = raw[0].y;
+                        for (std::size_t corner = 1; corner < 4; ++corner) {
+                            minU = std::min(minU, raw[corner].x);
+                            maxU = std::max(maxU, raw[corner].x);
+                            minV = std::min(minV, raw[corner].y);
+                            maxV = std::max(maxV, raw[corner].y);
+                        }
+                        logger().info(
+                            "LHOLO_LIQUID_UV_QUAD q={} sourceClass={} world=({},{},{}) shadowAvailable={} rawMinU={:.9f} rawMaxU={:.9f} rawMinV={:.9f} rawMaxV={:.9f} rawSpanU={:.9f} rawSpanV={:.9f} raw0=({:.9f},{:.9f}) raw1=({:.9f},{:.9f}) raw2=({:.9f},{:.9f}) raw3=({:.9f},{:.9f}) current0=({:.9f},{:.9f}) current1=({:.9f},{:.9f}) current2=({:.9f},{:.9f}) current3=({:.9f},{:.9f}) oldShadow0=({:.9f},{:.9f}) oldShadow1=({:.9f},{:.9f}) oldShadow2=({:.9f},{:.9f}) oldShadow3=({:.9f},{:.9f})",
+                            logIndex, uvD0SourceClass,
+                            worldPosition.x, worldPosition.y, worldPosition.z, oldShadowReady,
+                            minU, maxU, minV, maxV, maxU - minU, maxV - minV,
+                            raw[0].x, raw[0].y, raw[1].x, raw[1].y,
+                            raw[2].x, raw[2].y, raw[3].x, raw[3].y,
+                            current[0].x, current[0].y, current[1].x, current[1].y,
+                            current[2].x, current[2].y, current[3].x, current[3].y,
+                            oldShadowReady ? shadow[0].x : 0.0f,
+                            oldShadowReady ? shadow[0].y : 0.0f,
+                            oldShadowReady ? shadow[1].x : 0.0f,
+                            oldShadowReady ? shadow[1].y : 0.0f,
+                            oldShadowReady ? shadow[2].x : 0.0f,
+                            oldShadowReady ? shadow[2].y : 0.0f,
+                            oldShadowReady ? shadow[3].x : 0.0f,
+                            oldShadowReady ? shadow[3].y : 0.0f
+                        );
+                    }
+                } catch (...) {
+                    // Keep the already remapped production UVs unchanged.
+                }
+            }
+        }
+#endif
+
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
@@ -1309,6 +1524,34 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
         succeeded.push_back(index);
     }
+
+#ifdef LHOLO_LIQUID_UV_ATLAS_SHADOW_D0
+    if (uvD0.waterCells != 0
+        && gLiquidUvD0Summaries.fetch_add(1, std::memory_order_relaxed) < 8) {
+        try {
+            auto const currentRect = uvD0.currentRects.rects[0];
+            auto const diff = uvD0Old.resolved
+                ? compareLiquidUvRects(currentRect, uvD0Old.rect)
+                : LiquidUvRectComparison{};
+            logger().info(
+                "LHOLO_LIQUID_UV_SHADOW_SUMMARY candidate=D0 base=d7708ca section={} waterCells={} vertices={} quads={} currentRectResolvedCells={} currentUniqueRects={} currentRectsSaturated={} normalWaterUniqueRects={} bubbleSecondaryUniqueRects={} waterloggedSecondaryUniqueRects={} oldPraxisNamedRectResolved={} oldPraxisAlias={} rectExactEqual={} rectEpsilonEqual={} rectMaxAbsDelta={:.9f} epsilon={:.9f} rawUvCapturedVertices={} currentRemappedVertices={} oldShadowRemappedVertices={} productionUvChanged=0",
+                section, uvD0.waterCells, uvD0.vertices, uvD0.quads,
+                uvD0.currentRectResolvedCells, uvD0.currentRects.size,
+                uvD0.currentRects.saturated,
+                uvD0.normalRects.size, uvD0.bubbleRects.size, uvD0.waterloggedRects.size,
+                uvD0Old.resolved, uvD0Old.alias,
+                uvD0Old.resolved && diff.exactEqual,
+                uvD0Old.resolved && diff.epsilonEqual,
+                diff.maxAbsDelta, LiquidUvShadowEpsilon,
+                uvD0.rawUvCapturedVertices,
+                uvD0.currentRemappedVertices,
+                uvD0.oldShadowRemappedVertices
+            );
+        } catch (...) {
+            // Observation cannot reject an otherwise valid section.
+        }
+    }
+#endif
 
     // Compatibility ownership is section-atomic. Any missing cell keeps this
     // section on the unchanged retained/proxy fallback instead of mixing two
