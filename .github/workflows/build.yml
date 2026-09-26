@@ -47,8 +47,18 @@ jobs:
         run: |
           python tests/regression/run_tests.py
 
+      - name: Run manual placement portable tests
+        run: |
+          clang++ -std=c++20 -O2 -Isrc tests/manual_placement/portable_main.cpp src/place/PlacementState.cpp -o build/regression/manual-placement-tests.exe
+          .\build\regression\manual-placement-tests.exe
+
+      - name: Run Candidate D1 native UV tests
+        run: |
+          clang++ -std=c++20 -O2 -Isrc tests/diagnostics/liquid_native_uv_d1_tests.cpp -o build/regression/liquid-native-uv-d1-tests.exe
+          .\build\regression\liquid-native-uv-d1-tests.exe
+
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
+          name: LHolo-Candidate-D1-${{ github.sha }}-client-windows-x64
           path: |
             bin/

@@ -38,6 +38,15 @@ inline bool isValidNativeLiquidAtlasRect(NativeLiquidAtlasRect const& rect) {
 }
 
 template <class Uv, std::size_t Extent>
+bool validateNativeLiquidUv(std::span<Uv, Extent> uvs) {
+    if (uvs.empty() || (uvs.size() % 4U) != 0U) return false;
+    for (auto const& uv : uvs) {
+        if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return false;
+    }
+    return true;
+}
+
+template <class Uv, std::size_t Extent>
 bool remapNativeLiquidUvToAtlas(
     std::span<Uv, Extent>                   uvs,
     NativeLiquidAtlasRect const&            rect,

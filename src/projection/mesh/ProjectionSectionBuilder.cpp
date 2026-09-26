@@ -66,6 +66,9 @@ std::atomic_bool gNativeLiquidCullLogged{};
 std::atomic_bool gNativeLiquidCullSkipLogged{};
 std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
+#ifdef LHOLO_LIQUID_NATIVE_UV_D1
+std::atomic_bool gLiquidNativeUvD1Logged{};
+#endif
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic_bool gSubmergedPlantLogged{};
 
@@ -1289,23 +1292,53 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
 
         auto const addedVertices = positionsAfter - positionsBefore;
         auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
+        auto const isWater = !expectedLiquid->getBlockType().mMaterial.mSuperHot;
+        std::span<glm::vec2> uvSpan{};
+        if (addedUvs > 0U) {
+            uvSpan = std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs};
+        }
+#ifdef LHOLO_LIQUID_NATIVE_UV_D1
+        // Candidate D1 changes one variable only for water: preserve the
+        // BlockTessellator-produced 26.51 UV0 stream instead of applying the
+        // 1.21.132-era manual atlas remap. Atlas resolution/validation, liquid
+        // geometry, culling, color, alpha and submit paths stay unchanged.
         auto const uvRemapped = addedUvs == addedVertices
-            && remapNativeLiquidUvToAtlas(
-                std::span<glm::vec2>{uvs.data() + uvsBefore, addedUvs},
-                atlasRect
-            );
+            && validateNativeLiquidUv(uvSpan)
+            && (isWater || remapNativeLiquidUvToAtlas(uvSpan, atlasRect));
+#else
+        auto const uvRemapped = addedUvs == addedVertices
+            && remapNativeLiquidUvToAtlas(uvSpan, atlasRect);
+#endif
         if (!uvRemapped) {
             checkpoint.restore(tessellator);
             ++state.nativeLiquidTelemetry.praxisCompatUvRemapFailures;
             continue;
         }
 
+#ifdef LHOLO_LIQUID_NATIVE_UV_D1
+        if (isWater && !gLiquidNativeUvD1Logged.exchange(
+                true,
+                std::memory_order_acq_rel
+            )) {
+            auto const firstUv = uvSpan.empty() ? glm::vec2{} : uvSpan.front();
+            logger().info(
+                "LHOLO_LIQUID_NATIVE_UV_D1 candidate=D1 base=d7708ca manualRemapApplied=0 nativeUvPreserved=1 atlasRectStillResolved=1 waterAlpha=160 firstUv=({}, {}) atlasRect=({}, {}, {}, {})",
+                firstUv.x,
+                firstUv.y,
+                atlasRect.u0,
+                atlasRect.v0,
+                atlasRect.u1,
+                atlasRect.v1
+            );
+        }
+#endif
+
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
-        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
-            ? PraxisCompatLiquidKind::Lava
-            : PraxisCompatLiquidKind::Water;
+        auto const liquidKind = isWater
+            ? PraxisCompatLiquidKind::Water
+            : PraxisCompatLiquidKind::Lava;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
         succeeded.push_back(index);
     }
