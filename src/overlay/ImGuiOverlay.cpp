@@ -1105,12 +1105,13 @@ bool shutdownLocked() {
             return false;
         }
     }
-    gOriginalWndProc = nullptr;
 
     // MinHook/WndProc replacement only prevents new entries. A callback that
     // was already executing may still return through LHolo.dll, so drain every
-    // pre-existing callback before releasing graphics or ImGui resources.
+    // pre-existing callback before releasing graphics or ImGui resources or
+    // clearing the original WndProc pointer they may still need.
     if (!waitForOverlayCallbacks()) return false;
+    gOriginalWndProc = nullptr;
 
     std::lock_guard lock(gResourceMutex);
     releaseGraphicsBackend();
