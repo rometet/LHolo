@@ -3,6 +3,8 @@
 
 #include "projection/hooks/ProjectionGameHooks.h"
 
+#include "app/HookLifecycle.h"
+
 #include "overlay/ImGuiOverlay.h"
 #include "plugin/LHolo.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -10,6 +12,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <variant>
 
@@ -28,6 +31,36 @@
 
 namespace lholo::projection::detail {
 namespace {
+
+struct ProjectionGameHookStatus {
+    bool getBlock{};
+    bool getBlockLayer{};
+    bool getLiquidBlock{};
+    bool getBlockEntity{};
+    bool setBlock{};
+    bool setBlockWithActor{};
+    bool sendToServer{};
+    bool send{};
+};
+
+std::mutex gGameHookMutex;
+ProjectionGameHookStatus gGameHookStatus{};
+
+template <class Hook>
+bool installTracked(bool& installed) {
+    if (installed) return true;
+    if (Hook::hook() != 0) return false;
+    installed = true;
+    return true;
+}
+
+template <class Hook>
+bool uninstallTracked(bool& installed) {
+    if (!installed) return true;
+    if (!Hook::unhook()) return false;
+    installed = false;
+    return true;
+}
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
@@ -69,6 +102,8 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
     if (auto const* block = findTessellationBlock(position)) return *block;
     return origin(position);
 }
@@ -82,6 +117,8 @@ LL_TYPE_INSTANCE_HOOK(
     BlockPos const& position,
     uint layer
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position, layer);
     if (layer == 0) {
         if (auto const* block = findTessellationBlock(position)) return *block;
     } else if (layer == 1) {
@@ -98,6 +135,8 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
     if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
     return origin(position);
 }
@@ -110,6 +149,8 @@ LL_TYPE_INSTANCE_HOOK(
     BlockActor const*,
     BlockPos const& position
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
     if (auto const* actor = findTessellationBlockActor(position)) return actor;
     return origin(position);
 }
@@ -131,6 +172,8 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position, block, updateFlags, syncMsg, changeSourceContext);
     if (regionWritesSuppressed()) return true;
     return origin(position, block, updateFlags, syncMsg, changeSourceContext);
 }
@@ -152,6 +195,10 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
+    }
     if (regionWritesSuppressed()) return true;
     return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
 }
@@ -164,6 +211,11 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     Packet& packet
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(packet);
+        return;
+    }
     if (filterProjectionPacket(packet)) return;
     origin(packet);
 }
@@ -176,6 +228,11 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     Packet& packet
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(packet);
+        return;
+    }
     if (filterProjectionPacket(packet)) return;
     origin(packet);
 }
@@ -183,68 +240,29 @@ LL_TYPE_INSTANCE_HOOK(
 } // namespace
 
 bool installProjectionGameHooks() {
-    if (BlockSourceGetBlockHook::hook() < 0) return false;
-    if (BlockSourceGetBlockLayerHook::hook() < 0) {
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceGetBlockEntityHook::hook() < 0) {
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceGetLiquidBlockHook::hook() < 0) {
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceSetBlockHook::hook() < 0) {
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceSetBlockWithActorHook::hook() < 0) {
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (LoopbackPacketSenderSendToServerHook::hook() < 0) {
-        BlockSourceSetBlockWithActorHook::unhook();
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (LoopbackPacketSenderSendHook::hook() < 0) {
-        LoopbackPacketSenderSendToServerHook::unhook();
-        BlockSourceSetBlockWithActorHook::unhook();
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    return true;
+    std::lock_guard lock(gGameHookMutex);
+    return installTracked<BlockSourceGetBlockHook>(gGameHookStatus.getBlock)
+        && installTracked<BlockSourceGetBlockLayerHook>(gGameHookStatus.getBlockLayer)
+        && installTracked<BlockSourceGetBlockEntityHook>(gGameHookStatus.getBlockEntity)
+        && installTracked<BlockSourceGetLiquidBlockHook>(gGameHookStatus.getLiquidBlock)
+        && installTracked<BlockSourceSetBlockHook>(gGameHookStatus.setBlock)
+        && installTracked<BlockSourceSetBlockWithActorHook>(gGameHookStatus.setBlockWithActor)
+        && installTracked<LoopbackPacketSenderSendToServerHook>(gGameHookStatus.sendToServer)
+        && installTracked<LoopbackPacketSenderSendHook>(gGameHookStatus.send);
 }
 
-void uninstallProjectionGameHooks() {
-    LoopbackPacketSenderSendHook::unhook();
-    LoopbackPacketSenderSendToServerHook::unhook();
-    BlockSourceSetBlockWithActorHook::unhook();
-    BlockSourceSetBlockHook::unhook();
-    BlockSourceGetLiquidBlockHook::unhook();
-    BlockSourceGetBlockEntityHook::unhook();
-    BlockSourceGetBlockLayerHook::unhook();
-    BlockSourceGetBlockHook::unhook();
+bool uninstallProjectionGameHooks() {
+    std::lock_guard lock(gGameHookMutex);
+    bool ok = true;
+    ok = uninstallTracked<LoopbackPacketSenderSendHook>(gGameHookStatus.send) && ok;
+    ok = uninstallTracked<LoopbackPacketSenderSendToServerHook>(gGameHookStatus.sendToServer) && ok;
+    ok = uninstallTracked<BlockSourceSetBlockWithActorHook>(gGameHookStatus.setBlockWithActor) && ok;
+    ok = uninstallTracked<BlockSourceSetBlockHook>(gGameHookStatus.setBlock) && ok;
+    ok = uninstallTracked<BlockSourceGetLiquidBlockHook>(gGameHookStatus.getLiquidBlock) && ok;
+    ok = uninstallTracked<BlockSourceGetBlockEntityHook>(gGameHookStatus.getBlockEntity) && ok;
+    ok = uninstallTracked<BlockSourceGetBlockLayerHook>(gGameHookStatus.getBlockLayer) && ok;
+    ok = uninstallTracked<BlockSourceGetBlockHook>(gGameHookStatus.getBlock) && ok;
+    return ok;
 }
 
 } // namespace lholo::projection::detail
