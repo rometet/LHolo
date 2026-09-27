@@ -70,21 +70,15 @@ LL_TYPE_INSTANCE_HOOK(
 
 bool installProjectionRenderHooks() {
     std::lock_guard lock(gRenderHookMutex);
-    bool installedHitThisCall = false;
-
     if (!gHitSelectHookInstalled) {
         if (LevelRendererPlayerRenderHitSelectHook::hook() != 0) return false;
         gHitSelectHookInstalled = true;
-        installedHitThisCall = true;
     }
 
     if (!gBlockEntitiesHookInstalled) {
-        if (LevelRendererPlayerRenderBlockEntitiesHook::hook() != 0) {
-            if (installedHitThisCall && LevelRendererPlayerRenderHitSelectHook::unhook()) {
-                gHitSelectHookInstalled = false;
-            }
-            return false;
-        }
+        // Leave any already-installed sibling hook tracked on failure.
+        // AppKernel publishes Quiescing before performing rollback teardown.
+        if (LevelRendererPlayerRenderBlockEntitiesHook::hook() != 0) return false;
         gBlockEntitiesHookInstalled = true;
     }
     return true;
