@@ -16,6 +16,8 @@
 
 #include "overlay/ImGuiOverlay.h"
 
+#include "app/HookLifecycle.h"
+
 #include <Windows.h>
 
 #define D3D12_FEATURE_DATA_D3D12_OPTIONS D3D12_FEATURE_DATA_D3D12_OPTIONS_LEGACY
@@ -465,6 +467,9 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (!app::hook_lifecycle::isRunning()) {
+        return forwardToGame(window, message, wParam, lParam);
+    }
     if (message == kMsgAcquireMenuCursor) {
         acquireMenuCursor();
         return 0;
@@ -579,7 +584,8 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 void executeCommandListsHook(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
-    if (!gGameQueue && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    if (app::hook_lifecycle::isRunning()
+        && !gGameQueue && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
         std::lock_guard lock(gResourceMutex);
         if (!gGameQueue) {
             gGameQueue = queue;
@@ -665,6 +671,7 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
 }
 
 void render(IDXGISwapChain* swapChain) {
+    if (!app::hook_lifecycle::isRunning()) return;
     if (gShuttingDown.load(std::memory_order_acquire)) return;
     if (gRendering.exchange(true, std::memory_order_acq_rel)) return;
     struct Reset { ~Reset() { gRendering.store(false, std::memory_order_release); } } reset;
@@ -890,26 +897,46 @@ bool installHook(void* target, void* detour, void** original) {
     return target && MH_CreateHook(target, detour, original) == MH_OK && MH_EnableHook(target) == MH_OK;
 }
 
-void removeHook(void*& target) {
-    if (!target) return;
-    MH_DisableHook(target);
-    MH_RemoveHook(target);
+bool removeHook(void*& target) {
+    if (!target) return true;
+    auto const disableStatus = MH_DisableHook(target);
+    if (disableStatus != MH_OK
+        && disableStatus != MH_ERROR_DISABLED
+        && disableStatus != MH_ERROR_NOT_CREATED) {
+        logger().warn(
+            "MinHook disable failed for target {}: status={}",
+            target,
+            static_cast<int>(disableStatus)
+        );
+    }
+    auto const removeStatus = MH_RemoveHook(target);
+    if (removeStatus != MH_OK && removeStatus != MH_ERROR_NOT_CREATED) {
+        logger().error(
+            "MinHook remove failed for target {}: status={}",
+            target,
+            static_cast<int>(removeStatus)
+        );
+        return false;
+    }
     target = nullptr;
+    return true;
 }
 
 } // namespace
 
 namespace {
 
-void shutdownLocked();
+bool shutdownLocked();
 
 } // namespace
 
 bool ensureInstalled() {
+    if (!app::hook_lifecycle::isRunning()) return false;
     if (gInstalled.load(std::memory_order_acquire)) return true;
     auto const now = GetTickCount64();
     if (now < gInstallRetryAt.load(std::memory_order_acquire)) return false;
     std::lock_guard installLock(gInstallMutex);
+    if (!app::hook_lifecycle::isRunning()) return false;
     if (gInstalled.load(std::memory_order_acquire)) return true;
     if (GetTickCount64() < gInstallRetryAt.load(std::memory_order_acquire)) return false;
 
@@ -998,20 +1025,42 @@ bool ensureInstalled() {
 
 namespace {
 
-void shutdownLocked() {
+bool shutdownLocked() {
     gShuttingDown.store(true, std::memory_order_release);
     gMouseHandoffActive.store(false, std::memory_order_release);
     // Best effort: leave the cursor exactly where Minecraft expects it if the
     // mod is unloaded while the menu is still open.
     releaseMenuCursor();
     ClipCursor(nullptr);
-    removeHook(gExecuteTarget);
-    removeHook(gResize1Target);
-    removeHook(gPresent1Target);
-    removeHook(gResizeTarget);
-    removeHook(gPresentTarget);
+
+    bool hooksRemoved = true;
+    hooksRemoved = removeHook(gExecuteTarget) && hooksRemoved;
+    hooksRemoved = removeHook(gResize1Target) && hooksRemoved;
+    hooksRemoved = removeHook(gPresent1Target) && hooksRemoved;
+    hooksRemoved = removeHook(gResizeTarget) && hooksRemoved;
+    hooksRemoved = removeHook(gPresentTarget) && hooksRemoved;
+    if (!hooksRemoved) {
+        // Do not release any callback-owned resources while even one executable
+        // hook may still target this DLL. AppKernel will fail the disable and
+        // keep the module resident so a later teardown attempt is safe.
+        logger().error("Overlay hook teardown incomplete; retaining LHolo resources");
+        return false;
+    }
+
     if (gOriginalWndProc && gWindow && IsWindow(gWindow)) {
-        SetWindowLongPtrW(gWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(gOriginalWndProc));
+        SetLastError(ERROR_SUCCESS);
+        auto const previous = SetWindowLongPtrW(
+            gWindow,
+            GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(gOriginalWndProc)
+        );
+        if (previous == 0 && GetLastError() != ERROR_SUCCESS) {
+            logger().error(
+                "Failed to restore Minecraft WndProc during LHolo shutdown: error={}",
+                static_cast<unsigned long>(GetLastError())
+            );
+            return false;
+        }
     }
     gOriginalWndProc = nullptr;
 
@@ -1037,13 +1086,14 @@ void shutdownLocked() {
     gGuiVisibleLastFrame = false;
     gWindow = nullptr;
     gInstalled.store(false, std::memory_order_release);
+    return true;
 }
 
 } // namespace
 
-void shutdown() {
+bool shutdown() {
     std::lock_guard installLock(gInstallMutex);
-    shutdownLocked();
+    return shutdownLocked();
 }
 
 } // namespace lholo::overlay
