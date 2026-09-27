@@ -19,10 +19,9 @@ ProjectionController& projectionController() {
 
 bool ProjectionController::installHooks() {
     if (!installProjectionGameHooks()) return false;
-    if (!installProjectionRenderHooks()) {
-        (void)uninstallProjectionGameHooks();
-        return false;
-    }
+    // AppKernel owns rollback so it can publish Quiescing before any already
+    // installed hook is physically removed.
+    if (!installProjectionRenderHooks()) return false;
     return true;
 }
 
