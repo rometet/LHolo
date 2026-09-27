@@ -43,6 +43,14 @@ jobs:
       - run: |
           xmake -w -y
 
+      - name: Build logic tests
+        run: |
+          xmake -v -y LHoloLogicTests
+
+      - name: Run logic tests
+        run: |
+          xmake run LHoloLogicTests
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
