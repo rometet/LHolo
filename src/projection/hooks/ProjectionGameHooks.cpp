@@ -102,8 +102,7 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) return origin(position);
+    if (!app::hook_lifecycle::isRunning()) return origin(position);
     if (auto const* block = findTessellationBlock(position)) return *block;
     return origin(position);
 }
@@ -117,8 +116,7 @@ LL_TYPE_INSTANCE_HOOK(
     BlockPos const& position,
     uint layer
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) return origin(position, layer);
+    if (!app::hook_lifecycle::isRunning()) return origin(position, layer);
     if (layer == 0) {
         if (auto const* block = findTessellationBlock(position)) return *block;
     } else if (layer == 1) {
@@ -135,8 +133,7 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) return origin(position);
+    if (!app::hook_lifecycle::isRunning()) return origin(position);
     if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
     return origin(position);
 }
@@ -149,8 +146,7 @@ LL_TYPE_INSTANCE_HOOK(
     BlockActor const*,
     BlockPos const& position
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) return origin(position);
+    if (!app::hook_lifecycle::isRunning()) return origin(position);
     if (auto const* actor = findTessellationBlockActor(position)) return actor;
     return origin(position);
 }
@@ -172,8 +168,9 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) return origin(position, block, updateFlags, syncMsg, changeSourceContext);
+    if (!app::hook_lifecycle::isRunning()) {
+        return origin(position, block, updateFlags, syncMsg, changeSourceContext);
+    }
     if (regionWritesSuppressed()) return true;
     return origin(position, block, updateFlags, syncMsg, changeSourceContext);
 }
@@ -195,8 +192,7 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
-    app::hook_lifecycle::DetourGuard guard;
-    if (!guard) {
+    if (!app::hook_lifecycle::isRunning()) {
         return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
     }
     if (regionWritesSuppressed()) return true;
