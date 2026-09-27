@@ -37,6 +37,7 @@
 #include <imgui.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <array>
 #include <cfloat>
 #include <filesystem>
@@ -98,6 +99,10 @@ std::mutex       gResourceMutex;
 std::mutex       gInputStateMutex;
 std::mutex       gInstallMutex;
 std::atomic_ullong gInstallRetryAt{};
+std::atomic_uint  gActiveOverlayCallbacks{};
+std::mutex        gOverlayIdleMutex;
+std::condition_variable gOverlayIdle;
+thread_local unsigned int gOverlayCallbackDepth{};
 bool             gImGuiInitialized{};
 bool             gGraphicsInitialized{};
 bool             gGuiVisibleLastFrame{};
@@ -133,6 +138,38 @@ constexpr size_t    kResizeBuffers1VtableIndex       = 39;
 constexpr size_t    kExecuteCommandListsVtableIndex  = 10;
 
 auto& logger() { return LHolo::getInstance().getSelf().getLogger(); }
+
+class OverlayCallbackGuard final {
+public:
+    OverlayCallbackGuard() {
+        if (gOverlayCallbackDepth++ == 0) {
+            gActiveOverlayCallbacks.fetch_add(1, std::memory_order_acq_rel);
+            mOuter = true;
+        }
+    }
+    ~OverlayCallbackGuard() {
+        if (gOverlayCallbackDepth != 0) --gOverlayCallbackDepth;
+        if (!mOuter) return;
+        auto const previous =
+            gActiveOverlayCallbacks.fetch_sub(1, std::memory_order_acq_rel);
+        if (previous == 1) gOverlayIdle.notify_all();
+    }
+
+private:
+    bool mOuter{};
+};
+
+bool waitForOverlayCallbacks() {
+    if (gOverlayCallbackDepth != 0) {
+        logger().error("Overlay teardown requested from inside an overlay callback");
+        return false;
+    }
+    std::unique_lock lock(gOverlayIdleMutex);
+    gOverlayIdle.wait(lock, [] {
+        return gActiveOverlayCallbacks.load(std::memory_order_acquire) == 0;
+    });
+    return true;
+}
 
 void logGraphicsFailure(IDXGISwapChain* swapChain, char const* operation, HRESULT result) {
     HRESULT removedReason = S_OK;
@@ -467,6 +504,7 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    OverlayCallbackGuard callbackGuard;
     if (!app::hook_lifecycle::isRunning()) {
         return forwardToGame(window, message, wParam, lParam);
     }
@@ -584,6 +622,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 void executeCommandListsHook(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
+    OverlayCallbackGuard callbackGuard;
     if (app::hook_lifecycle::isRunning()
         && !gGameQueue && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
         std::lock_guard lock(gResourceMutex);
@@ -808,6 +847,7 @@ void render(IDXGISwapChain* swapChain) {
 }
 
 HRESULT __stdcall presentHook(IDXGISwapChain* swapChain, UINT interval, UINT flags) {
+    OverlayCallbackGuard callbackGuard;
     render(swapChain);
     return gOriginalPresent(swapChain, interval, flags);
 }
@@ -818,6 +858,7 @@ HRESULT __stdcall present1Hook(
     UINT flags,
     DXGI_PRESENT_PARAMETERS const* parameters
 ) {
+    OverlayCallbackGuard callbackGuard;
     render(swapChain);
     return gOriginalPresent1(swapChain, interval, flags, parameters);
 }
@@ -830,6 +871,7 @@ HRESULT __stdcall resizeHook(
     DXGI_FORMAT format,
     UINT flags
 ) {
+    OverlayCallbackGuard callbackGuard;
     std::unique_lock lock(gResourceMutex);
     if (gActiveSwapChain != swapChain) {
         lock.unlock();
@@ -861,6 +903,7 @@ HRESULT __stdcall resize1Hook(
     UINT const* creationNodeMask,
     IUnknown* const* presentQueue
 ) {
+    OverlayCallbackGuard callbackGuard;
     std::unique_lock lock(gResourceMutex);
     if (gActiveSwapChain != static_cast<IDXGISwapChain*>(swapChain)) {
         lock.unlock();
@@ -1063,6 +1106,11 @@ bool shutdownLocked() {
         }
     }
     gOriginalWndProc = nullptr;
+
+    // MinHook/WndProc replacement only prevents new entries. A callback that
+    // was already executing may still return through LHolo.dll, so drain every
+    // pre-existing callback before releasing graphics or ImGui resources.
+    if (!waitForOverlayCallbacks()) return false;
 
     std::lock_guard lock(gResourceMutex);
     releaseGraphicsBackend();
