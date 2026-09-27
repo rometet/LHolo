@@ -16,6 +16,8 @@
 
 #include "place/PlaceHelper.h"
 
+#include "app/HookLifecycle.h"
+
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
@@ -45,6 +47,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <mutex>
 
 namespace lholo::place {
 namespace {
@@ -66,6 +69,7 @@ struct PlaceHookStatus {
 };
 
 PlaceHookStatus gHookStatus;
+std::mutex gHookMutex;
 
 LL_TYPE_INSTANCE_HOOK(
     LocalPlayerEasyPlaceHook,
@@ -75,6 +79,11 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::Tick const& currentTick
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(currentTick);
+        return;
+    }
     structure::detail::tickMaterialTracker(*this);
     // Physical mouse state belongs to the game-input Hook boundary. The
     // executor consumes only the resulting logical press state.
@@ -122,6 +131,11 @@ LL_TYPE_INSTANCE_HOOK(
     uchar             face,
     ::HandSlot        handSlot
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(pos, face, handSlot);
+        return;
+    }
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
@@ -162,6 +176,8 @@ LL_TYPE_INSTANCE_HOOK(
     ::ItemStack& item,
     ::HandSlot   handSlot
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(item, handSlot);
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementItemAllowed(item)) {
             cancelPendingManualPress();
@@ -196,6 +212,11 @@ LL_TYPE_INSTANCE_HOOK(
     &GameMode::$stopBuildBlock,
     void
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin();
+        return;
+    }
     if (isLocalManualBuild(*this)) {
         placementState().releaseManualPress();
     }
@@ -218,6 +239,8 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot        handSlot,
     bool const        isSimTick
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(pos, face, handSlot, isSimTick);
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
@@ -314,37 +337,65 @@ void resetWorldSession() {
 }
 
 bool installHook() {
-    gHookStatus.tick = LocalPlayerEasyPlaceHook::hook() == 0;
+    std::lock_guard lock(gHookMutex);
+    if (!gHookStatus.tick) {
+        gHookStatus.tick = LocalPlayerEasyPlaceHook::hook() == 0;
+    }
     if (!gHookStatus.tick) {
         logger().error("Failed to install easy-place tick hook");
         return false;
     }
-    gHookStatus.manualStart = GameModeStartBuildHook::hook() == 0;
+    if (!gHookStatus.manualStart) {
+        gHookStatus.manualStart = GameModeStartBuildHook::hook() == 0;
+    }
     if (!gHookStatus.manualStart) {
         logger().warn("Failed to install manual-place start hook; manual mode will be unavailable");
     }
-    gHookStatus.manualUseItem = GameModeUseItemHook::hook() == 0;
+    if (!gHookStatus.manualUseItem) {
+        gHookStatus.manualUseItem = GameModeUseItemHook::hook() == 0;
+    }
     if (!gHookStatus.manualUseItem) {
         logger().warn("Failed to install manual-place air-use hook; floating manual placement will be unavailable");
     }
-    gHookStatus.manualStop = GameModeStopBuildHook::hook() == 0;
+    if (!gHookStatus.manualStop) {
+        gHookStatus.manualStop = GameModeStopBuildHook::hook() == 0;
+    }
     if (!gHookStatus.manualStop) {
         logger().warn("Failed to install manual-place stop hook; manual mode may keep repeating");
     }
-    gHookStatus.manualBuild = GameModeBuildBlockHook::hook() == 0;
+    if (!gHookStatus.manualBuild) {
+        gHookStatus.manualBuild = GameModeBuildBlockHook::hook() == 0;
+    }
     if (!gHookStatus.manualBuild) {
         logger().warn("Failed to install manual-place build hook; manual mode may double-place");
     }
     return true;
 }
 
-void uninstallHook() {
-    if (gHookStatus.manualBuild) GameModeBuildBlockHook::unhook();
-    if (gHookStatus.manualStop) GameModeStopBuildHook::unhook();
-    if (gHookStatus.manualUseItem) GameModeUseItemHook::unhook();
-    if (gHookStatus.manualStart) GameModeStartBuildHook::unhook();
-    if (gHookStatus.tick) LocalPlayerEasyPlaceHook::unhook();
-    gHookStatus = {};
+bool uninstallHook() {
+    std::lock_guard lock(gHookMutex);
+    bool ok = true;
+    if (gHookStatus.manualBuild) {
+        if (GameModeBuildBlockHook::unhook()) gHookStatus.manualBuild = false;
+        else ok = false;
+    }
+    if (gHookStatus.manualStop) {
+        if (GameModeStopBuildHook::unhook()) gHookStatus.manualStop = false;
+        else ok = false;
+    }
+    if (gHookStatus.manualUseItem) {
+        if (GameModeUseItemHook::unhook()) gHookStatus.manualUseItem = false;
+        else ok = false;
+    }
+    if (gHookStatus.manualStart) {
+        if (GameModeStartBuildHook::unhook()) gHookStatus.manualStart = false;
+        else ok = false;
+    }
+    if (gHookStatus.tick) {
+        if (LocalPlayerEasyPlaceHook::unhook()) gHookStatus.tick = false;
+        else ok = false;
+    }
+    return ok;
 }
 
 } // namespace lholo::place
