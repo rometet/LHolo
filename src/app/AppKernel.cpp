@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "app/AppKernel.h"
+#include "app/HookLifecycle.h"
 
 #include "i18n/LanguageStore.h"
 #include "input/MenuInputGuard.h"
@@ -32,9 +33,28 @@ bool AppKernel::load() {
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    if (!hook_lifecycle::beginEnable()) {
+        logger.error("LHolo hook lifecycle is not ready for enable");
+        return false;
+    }
+
     projection::detail::resetMeshWorkerForSession();
 
     if (!projection::detail::projectionController().installHooks()) {
+        // A failed install may leave a subset of hooks registered. Quiesce
+        // first, then remove every tracked hook before allowing the DLL to
+        // become disabled.
+        hook_lifecycle::beginQuiesce();
+        auto const projectionRemoved =
+            projection::detail::projectionController().uninstallHooks();
+        auto const placeRemoved = place::uninstallHook();
+        auto const inputRemoved = input::uninstallMenuInputGuard();
+        if (projectionRemoved && placeRemoved && inputRemoved) {
+            hook_lifecycle::waitForQuiescence();
+            if (overlay::shutdown()) {
+                hook_lifecycle::markDisabled();
+            }
+        }
         logger.error("Failed to install projection hooks");
         return false;
     }
@@ -66,21 +86,46 @@ bool AppKernel::enable() {
 bool AppKernel::disable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    // Publish quiescing before touching hook registrations. Every LHolo detour
+    // becomes an origin-only pass-through immediately, including calls that
+    // enter through another mod's hook chain.
+    hook_lifecycle::beginQuiesce();
     structure::saveSettings();
+
+    bool hooksRemoved = true;
+    hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
+    hooksRemoved = place::uninstallHook() && hooksRemoved;
+    hooksRemoved = projection::detail::projectionController().uninstallHooks()
+        && hooksRemoved;
+    if (!hooksRemoved) {
+        // Fail closed: state, workers and overlay resources stay alive while a
+        // callback may still target LHolo.dll. A later disable attempt can
+        // retry only the hooks whose tracked state is still installed.
+        logger.error(
+            "LHolo disable aborted because one or more native hooks could not be removed"
+        );
+        return false;
+    }
+
+    // No new tracked detours can enter after successful physical unhook. Wait
+    // for callbacks that were already inside LHolo to return before releasing
+    // any projection-owned state.
+    hook_lifecycle::waitForQuiescence();
+
+    // The overlay has its own MinHook/WndProc callbacks. Its shutdown is
+    // checked and fail-closed as well; never destroy state under a stale
+    // executable callback.
+    if (!overlay::shutdown()) {
+        logger.error("LHolo disable aborted because overlay teardown was incomplete");
+        return false;
+    }
+
     structure::detail::shutdownMaterialTracker();
-    // Drop all world-owned state before removing hooks. In particular, this
-    // resets held placement/input state and joins the projection mesh worker
-    // while its Level/Dimension pointers are still valid.
     place::resetWorldSession();
     structure::resetWorldSession();
     structure::capture::clear();
-    input::uninstallMenuInputGuard();
-    place::uninstallHook();
-    projection::detail::projectionController().uninstallHooks();
-    // Projection hooks contain the automatic overlay-install retry path, so
-    // remove them before tearing the overlay down.
-    overlay::shutdown();
 
+    hook_lifecycle::markDisabled();
     logger.info("LHolo disabled");
     return true;
 }
