@@ -19,6 +19,6 @@
 namespace lholo::overlay {
 
 bool ensureInstalled();
-void shutdown();
+bool shutdown();
 
 } // namespace lholo::overlay
