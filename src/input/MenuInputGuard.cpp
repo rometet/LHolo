@@ -3,6 +3,8 @@
 
 #include "input/MenuInputGuard.h"
 
+#include "app/HookLifecycle.h"
+
 #include "structure/StructureLoader.h"
 
 #include "ll/api/memory/Hook.h"
@@ -13,11 +15,13 @@
 #include "mc/deps/input/win/HIDControllerGameCoreDesktop.h"
 
 #include <cstdint>
+#include <mutex>
 
 namespace lholo::input {
 namespace {
 
 MenuInputGuardStatus gInstallStatus{};
+std::mutex gInstallMutex;
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
@@ -42,6 +46,11 @@ LL_TYPE_INSTANCE_HOOK(
     short dy,
     bool  forceMotionlessPointer
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
+        return;
+    }
     if (menuOwnsGameInput() || projectionOwnsMouseWheel(actionButtonId)) return;
     origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
 }
@@ -55,6 +64,11 @@ LL_TYPE_INSTANCE_HOOK(
     int                                                 keyCode,
     Bedrock::Input::KeyboardEventProcessor::InputOrigin originType
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(keyCode, originType);
+        return;
+    }
     if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
     origin(keyCode, originType);
 }
@@ -67,6 +81,11 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     int keyCode
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(keyCode);
+        return;
+    }
     if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
     origin(keyCode);
 }
@@ -78,6 +97,7 @@ MenuInputHandoffScope::MenuInputHandoffScope() { ++gInputHandoffDepth; }
 MenuInputHandoffScope::~MenuInputHandoffScope() { --gInputHandoffDepth; }
 
 MenuInputGuardStatus installMenuInputGuard() {
+    std::lock_guard lock(gInstallMutex);
     if (!gInstallStatus.mouseInputHookInstalled) {
         gInstallStatus.mouseInputHookInstalled = MenuMouseInputHook::hook() == 0;
     }
@@ -90,12 +110,22 @@ MenuInputGuardStatus installMenuInputGuard() {
     return gInstallStatus;
 }
 
-void uninstallMenuInputGuard() {
-    if (gInstallStatus.keyUpInputHookInstalled) MenuKeyUpInputHook::unhook();
-    if (gInstallStatus.keyDownInputHookInstalled) MenuKeyDownInputHook::unhook();
-    if (gInstallStatus.mouseInputHookInstalled) MenuMouseInputHook::unhook();
-
-    gInstallStatus = {};
+bool uninstallMenuInputGuard() {
+    std::lock_guard lock(gInstallMutex);
+    bool ok = true;
+    if (gInstallStatus.keyUpInputHookInstalled) {
+        if (MenuKeyUpInputHook::unhook()) gInstallStatus.keyUpInputHookInstalled = false;
+        else ok = false;
+    }
+    if (gInstallStatus.keyDownInputHookInstalled) {
+        if (MenuKeyDownInputHook::unhook()) gInstallStatus.keyDownInputHookInstalled = false;
+        else ok = false;
+    }
+    if (gInstallStatus.mouseInputHookInstalled) {
+        if (MenuMouseInputHook::unhook()) gInstallStatus.mouseInputHookInstalled = false;
+        else ok = false;
+    }
+    return ok;
 }
 
 } // namespace lholo::input
