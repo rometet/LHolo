@@ -20,27 +20,25 @@ ProjectionController& projectionController() {
 bool ProjectionController::installHooks() {
     if (!installProjectionGameHooks()) return false;
     if (!installProjectionRenderHooks()) {
-        uninstallProjectionGameHooks();
+        (void)uninstallProjectionGameHooks();
         return false;
     }
     return true;
 }
 
-void ProjectionController::uninstallHooks() {
-    uninstallProjectionRenderHooks();
-    uninstallProjectionGameHooks();
-    ProjectionSession::getInstance().withLockedState(
-        [](ProjectionState&, overlay::BoundsWireframe& captureBounds) {
-            captureBounds.clear();
-        }
-    );
+bool ProjectionController::uninstallHooks() {
+    bool ok = true;
+    ok = uninstallProjectionRenderHooks() && ok;
+    ok = uninstallProjectionGameHooks() && ok;
+    return ok;
 }
 
 void ProjectionController::disableProjection() {
     auto& session = ProjectionSession::getInstance();
     session.withLockedState(
-        [](ProjectionState& state, overlay::BoundsWireframe&) {
+        [](ProjectionState& state, overlay::BoundsWireframe& captureBounds) {
             resetProjectionState(state);
+            captureBounds.clear();
         }
     );
     // A requested restore anchor belongs only to the projection being
