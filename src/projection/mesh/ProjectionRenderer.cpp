@@ -500,7 +500,14 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
 ) {
     PraxisExactReplaySubmitResult result{};
     auto const replayStarted = std::chrono::steady_clock::now();
-    Tessellator& tessellator = screenContext.tessellator;
+    // Do not borrow ScreenContext's shared Tessellator here. Minecraft reuses
+    // that object for later UI/item rendering in the same frame; Exact Replay
+    // replaces MeshData and several format/quad flags, and leaking any of that
+    // state corrupts inventory rendering. Use an isolated Tessellator backed by
+    // the same BufferResourceService instead.
+    Tessellator tessellator{
+        screenContext.tessellator.mBufferResourceService
+    };
     auto const vertexCount = data.nativeStream->mPositions.get().size();
     tessellator.begin(
         Tessellator::DebugContextCallback{},
