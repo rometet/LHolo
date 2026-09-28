@@ -143,6 +143,34 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
             }
     
             auto const section = result.section;
+            auto const storageReady =
+                section < state.warningFillSectionMeshes.size()
+                && section < state.correctionOutlineSectionMeshes.size()
+                && section < state.wrongFillSectionMeshes.size()
+                && section < state.wrongOutlineSectionMeshes.size()
+                && section < state.nativeLiquidSectionMeshes.size()
+                && section < state.praxisCompatLiquidSections.size()
+                && section < state.liquidProxySectionMeshes.size()
+                && section < state.nativeLiquidSectionCellCounts.size()
+                && section < state.liquidProxySectionCellCounts.size()
+                && section < state.blockEntityPlaceholderSectionMeshes.size();
+            if (!storageReady) {
+                // Fail closed instead of indexing an out-of-sync per-section
+                // storage vector. Extra correction sections must extend every
+                // parallel section store together.
+                state.sections[section].buildInFlight = false;
+                state.sections[section].dirty = true;
+                logger().error(
+                    "Projection section storage mismatch at section {}: sections={} praxis={} nativeLiquid={} liquidProxy={} placeholders={}",
+                    section,
+                    state.sections.size(),
+                    state.praxisCompatLiquidSections.size(),
+                    state.nativeLiquidSectionMeshes.size(),
+                    state.liquidProxySectionMeshes.size(),
+                    state.blockEntityPlaceholderSectionMeshes.size()
+                );
+                continue;
+            }
             state.sections[section].buildInFlight = false;
             if (!result.success) {
                 markSectionDirty(state, section, true);
