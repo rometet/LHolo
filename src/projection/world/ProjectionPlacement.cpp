@@ -77,33 +77,47 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
 
 } // namespace
 
-void rebuildProjectionPlacement(
+bool rebuildProjectionPlacement(
     ProjectionState&                   state,
     BlockSource&                       region,
     BlockActorRenderDispatcher&        dispatcher,
     LegacyStructureSettings const&     transformSettings,
-    ProjectionPlacementSettings const& settings
+    ProjectionPlacementSettings const& settings,
+    bool                               restart
 ) {
-    // A moved placement keeps its local GPU geometry, but the virtual world
-    // and correction lookup must follow the new world origin.
-    state.blockTessellator = std::make_unique<BlockTessellator>(&region);
+    constexpr std::size_t kPlacementCellsPerFrame = 4096;
 
-    // Publish a new immutable virtual-world version. In-flight workers keep
-    // the previous maps alive without observing a partially rebuilt placement.
-    state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
-    state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
-    state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
-    state.projectedBlockActors.clear();
-    std::fill(
-        state.blockActorRendererAvailable.begin(),
-        state.blockActorRendererAvailable.end(),
-        0
-    );
-    state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
-    std::vector<Vec3> centerSums(state.sections.size(), Vec3{});
-    std::vector<std::size_t> centerCounts(state.sections.size(), 0);
+    if (restart) {
+        // A moved placement keeps its local GPU geometry, but the virtual world
+        // and correction lookup must follow the new world origin.
+        state.blockTessellator = std::make_unique<BlockTessellator>(&region);
 
-    for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
+        // Publish a fresh snapshot, then populate it incrementally. No mesh
+        // worker is scheduled until the snapshot is complete, so workers never
+        // observe partially built maps.
+        state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
+        state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
+        state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
+        state.projectedBlockActors.clear();
+        std::fill(
+            state.blockActorRendererAvailable.begin(),
+            state.blockActorRendererAvailable.end(),
+            0
+        );
+        state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
+        state.placementCenterSums.assign(state.sections.size(), Vec3{});
+        state.placementCenterCounts.assign(state.sections.size(), 0);
+        state.placementBuildCursor = 0;
+        state.placementBuildActive = true;
+    }
+
+    if (!state.placementBuildActive) return true;
+
+    auto const total = state.structure->renderBlocks.size();
+    auto const begin = state.placementBuildCursor;
+    auto const end = std::min(total, begin + kPlacementCellsPerFrame);
+
+    for (std::size_t index = begin; index < end; ++index) {
         auto const& entry = state.structure->renderBlocks[index];
         if (!isLayerVisible(
                 settings.layerAxis == structure::LayerAxis::X ? entry.x : entry.y,
@@ -156,6 +170,7 @@ void rebuildProjectionPlacement(
                 }
             }
         }
+
         // The liquid layer is independent of the body layer. This must run
         // even when a solid body exists so waterlogged slabs, stairs, fences
         // and signs remain a two-layer cell in the virtual projection world.
@@ -166,22 +181,31 @@ void rebuildProjectionPlacement(
             state.expectedWorldLiquids->emplace(worldKey, transformedLiquid);
         }
         state.expectedWorldBlockIndices->emplace(worldKey, index);
+
         auto const section = state.blockToSection[index];
-        centerSums[section] += Vec3{
-            static_cast<float>(transformed.x) + 0.5f,
-            static_cast<float>(transformed.y) + 0.5f,
-            static_cast<float>(transformed.z) + 0.5f
-        };
-        ++centerCounts[section];
+        if (section < state.placementCenterSums.size()) {
+            state.placementCenterSums[section] += Vec3{
+                static_cast<float>(transformed.x) + 0.5f,
+                static_cast<float>(transformed.y) + 0.5f,
+                static_cast<float>(transformed.z) + 0.5f
+            };
+            ++state.placementCenterCounts[section];
+        }
     }
+
+    state.placementBuildCursor = end;
+    if (end < total) return false;
 
     pairProjectedChests(region, state);
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        if (centerCounts[section] != 0) {
+        if (section < state.placementCenterCounts.size()
+            && state.placementCenterCounts[section] != 0) {
             state.sections[section].center
-                = centerSums[section] / static_cast<float>(centerCounts[section]);
+                = state.placementCenterSums[section]
+                / static_cast<float>(state.placementCenterCounts[section]);
         }
     }
+
     auto* stateAddress = &state;
     auto* regionAddress = &region;
     state.blockTessellator->mCachedGetBlock.get()
@@ -192,7 +216,12 @@ void rebuildProjectionPlacement(
             return found == stateAddress->expectedWorldBlocks->end()
                 ? regionAddress->getBlock(position) : *found->second;
         };
+
     state.correctionScanCursor = 0;
+    state.placementBuildActive = false;
+    state.placementCenterSums.clear();
+    state.placementCenterCounts.clear();
+    return true;
 }
 
 } // namespace lholo::projection::detail

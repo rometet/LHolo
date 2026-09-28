@@ -209,8 +209,8 @@ void renderProjection(
                 .correctionOutlineOpacity = correctionOutlineOpacity
             }
         );
-        if (invalidation.placementViewChanged()) {
-            rebuildProjectionPlacement(
+        if (invalidation.placementViewChanged() || state.placementBuildActive) {
+            auto const placementReady = rebuildProjectionPlacement(
                 state,
                 player->getDimensionBlockSource(),
                 renderContext.mBlockEntityRenderDispatcher,
@@ -225,8 +225,10 @@ void renderProjection(
                     .displayLayer      = displayLayer,
                     .layerAxis         = layerAxis,
                     .identityTransform = identityTransform
-                }
+                },
+                invalidation.placementViewChanged()
             );
+            if (!placementReady) return;
         }
         ProjectionSectionBuildSettings const sectionBuildSettings{
             .mirror                   = mirror,
@@ -253,6 +255,11 @@ void renderProjection(
             layerAxis
         );
     }
+
+    // The alpha callback can arrive while the opaque callback is still
+    // incrementally constructing the initial placement snapshot. Do not render
+    // or schedule against a partial virtual world.
+    if (state.placementBuildActive) return;
 
     // Keep vanilla world queries at their real BlockPos, but do not upload large
     // absolute coordinates to the GPU. Render vertices relative to the projection

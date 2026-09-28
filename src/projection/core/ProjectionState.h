@@ -151,6 +151,15 @@ struct ProjectionState {
     std::shared_ptr<ExpectedBlockIndexMap>   expectedWorldBlockIndices{
         std::make_shared<ExpectedBlockIndexMap>()
     };
+
+    // Building the transformed virtual-world lookup is O(N) in structure
+    // cells. Keep it incremental so a large projection never monopolizes one
+    // render frame before the async mesh worker can start.
+    bool                     placementBuildActive{};
+    std::size_t              placementBuildCursor{};
+    std::vector<Vec3>        placementCenterSums;
+    std::vector<std::size_t> placementCenterCounts;
+
     NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
 };
