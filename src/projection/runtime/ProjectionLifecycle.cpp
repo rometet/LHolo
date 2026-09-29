@@ -159,6 +159,7 @@ bool prepareProjectionState(
         }
 
         state.sectionBlockIndices.resize(centers.size());
+        state.sectionOccupancy.resize(centers.size());
         for (std::size_t section = 0; section < centers.size(); ++section) {
             state.sectionBlockIndices[section].reserve(sectionCounts[section]);
         }
@@ -166,9 +167,11 @@ bool prepareProjectionState(
         // Pass 2: direct O(1) assignment with no inner-vector reallocations.
         for (std::size_t index = 0; index < blockCount; ++index) {
             auto const& entry = state.structure->renderBlocks[index];
+            BlockPos const localPosition{entry.x, entry.y, entry.z};
             auto const section = denseLookup[denseIndex(entry.x, entry.y, entry.z)];
             state.blockToSection[index] = section;
             state.sectionBlockIndices[section].push_back(index);
+            markProjectionSectionOccupied(state.sectionOccupancy[section], localPosition);
         }
     } else {
         // Extremely sparse/huge extents avoid allocating an oversized dense
@@ -181,6 +184,7 @@ bool prepareProjectionState(
             );
             if (inserted) {
                 state.sectionBlockIndices.emplace_back();
+                state.sectionOccupancy.emplace_back();
                 state.localSectionKeys.push_back(key);
                 auto const [sx, sy, sz] = key;
                 centers.emplace_back(
@@ -191,6 +195,8 @@ bool prepareProjectionState(
             }
             state.blockToSection[index] = found->second;
             state.sectionBlockIndices[found->second].push_back(index);
+            BlockPos const localPosition{entry.x, entry.y, entry.z};
+            markProjectionSectionOccupied(state.sectionOccupancy[found->second], localPosition);
         }
     }
     initializeSectionStates(state.sections, centers);
