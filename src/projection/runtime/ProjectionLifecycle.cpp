@@ -11,8 +11,10 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <tuple>
 #include <utility>
@@ -95,25 +97,101 @@ bool prepareProjectionState(
     state.cachedMirror = -1;
 
     std::vector<Vec3> centers;
-    state.blockToSection.resize(state.structure->renderBlocks.size());
-    for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
-        auto const& entry = state.structure->renderBlocks[index];
-        auto const key = std::tuple{entry.x / 16, entry.y / 16, entry.z / 16};
-        auto [found, inserted] = state.localSectionIndices.try_emplace(
-            key, state.sectionBlockIndices.size()
+    auto const blockCount = state.structure->renderBlocks.size();
+    state.blockToSection.resize(blockCount);
+
+    // Structure loaders normalize render-block coordinates into [0, size).
+    // Use a dense section lookup during initial grouping instead of doing one
+    // std::map tree lookup/allocation per block. The persistent map is still
+    // populated once per occupied section for later sparse correction lookups.
+    auto const sectionCountX = static_cast<std::size_t>((state.structure->sizeX + 15) / 16);
+    auto const sectionCountY = static_cast<std::size_t>((state.structure->sizeY + 15) / 16);
+    auto const sectionCountZ = static_cast<std::size_t>((state.structure->sizeZ + 15) / 16);
+    auto const denseSectionCount64 =
+        static_cast<std::uint64_t>(sectionCountX)
+        * static_cast<std::uint64_t>(sectionCountY)
+        * static_cast<std::uint64_t>(sectionCountZ);
+    constexpr std::uint64_t kDenseSectionLookupLimit = 1U << 20;
+    constexpr auto NoSection = std::numeric_limits<std::size_t>::max();
+
+    if (denseSectionCount64 != 0
+        && denseSectionCount64 <= kDenseSectionLookupLimit) {
+        std::vector<std::size_t> denseLookup(
+            static_cast<std::size_t>(denseSectionCount64),
+            NoSection
         );
-        if (inserted) {
-            state.sectionBlockIndices.emplace_back();
-            state.localSectionKeys.push_back(key);
-            auto const [sx, sy, sz] = key;
-            centers.emplace_back(
-                static_cast<float>(sx * 16 + 8),
-                static_cast<float>(sy * 16 + 8),
-                static_cast<float>(sz * 16 + 8)
-            );
+        std::vector<std::size_t> sectionCounts;
+        centers.reserve(std::min<std::size_t>(
+            blockCount, static_cast<std::size_t>(denseSectionCount64)
+        ));
+        state.localSectionKeys.reserve(centers.capacity());
+
+        auto const denseIndex = [&](int x, int y, int z) {
+            auto const sx = static_cast<std::size_t>(x / 16);
+            auto const sy = static_cast<std::size_t>(y / 16);
+            auto const sz = static_cast<std::size_t>(z / 16);
+            return (sx * sectionCountY + sy) * sectionCountZ + sz;
+        };
+
+        // Pass 1: compact occupied dense sections and count their blocks.
+        for (auto const& entry : state.structure->renderBlocks) {
+            auto const slot = denseIndex(entry.x, entry.y, entry.z);
+            auto section = denseLookup[slot];
+            if (section == NoSection) {
+                section = centers.size();
+                denseLookup[slot] = section;
+                auto const key = std::tuple{
+                    entry.x / 16,
+                    entry.y / 16,
+                    entry.z / 16
+                };
+                state.localSectionIndices.emplace(key, section);
+                state.localSectionKeys.push_back(key);
+                auto const [sx, sy, sz] = key;
+                centers.emplace_back(
+                    static_cast<float>(sx * 16 + 8),
+                    static_cast<float>(sy * 16 + 8),
+                    static_cast<float>(sz * 16 + 8)
+                );
+                sectionCounts.push_back(0);
+            }
+            ++sectionCounts[section];
         }
-        state.blockToSection[index] = found->second;
-        state.sectionBlockIndices[found->second].push_back(index);
+
+        state.sectionBlockIndices.resize(centers.size());
+        for (std::size_t section = 0; section < centers.size(); ++section) {
+            state.sectionBlockIndices[section].reserve(sectionCounts[section]);
+        }
+
+        // Pass 2: direct O(1) assignment with no inner-vector reallocations.
+        for (std::size_t index = 0; index < blockCount; ++index) {
+            auto const& entry = state.structure->renderBlocks[index];
+            auto const section = denseLookup[denseIndex(entry.x, entry.y, entry.z)];
+            state.blockToSection[index] = section;
+            state.sectionBlockIndices[section].push_back(index);
+        }
+    } else {
+        // Extremely sparse/huge extents avoid allocating an oversized dense
+        // table and retain the original sparse-map behavior.
+        for (std::size_t index = 0; index < blockCount; ++index) {
+            auto const& entry = state.structure->renderBlocks[index];
+            auto const key = std::tuple{entry.x / 16, entry.y / 16, entry.z / 16};
+            auto [found, inserted] = state.localSectionIndices.try_emplace(
+                key, state.sectionBlockIndices.size()
+            );
+            if (inserted) {
+                state.sectionBlockIndices.emplace_back();
+                state.localSectionKeys.push_back(key);
+                auto const [sx, sy, sz] = key;
+                centers.emplace_back(
+                    static_cast<float>(sx * 16 + 8),
+                    static_cast<float>(sy * 16 + 8),
+                    static_cast<float>(sz * 16 + 8)
+                );
+            }
+            state.blockToSection[index] = found->second;
+            state.sectionBlockIndices[found->second].push_back(index);
+        }
     }
     initializeSectionStates(state.sections, centers);
     state.warningFillSectionMeshes.resize(state.sectionBlockIndices.size());

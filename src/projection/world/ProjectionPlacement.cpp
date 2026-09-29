@@ -98,13 +98,22 @@ bool rebuildProjectionPlacement(
         state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
         state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
         state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
+        state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
+
+        auto const expectedCells = state.structure->renderBlocks.size();
+        state.expectedWorldBlocks->reserve(expectedCells);
+        state.expectedWorldLiquids->reserve(expectedCells);
+        state.expectedWorldBlockIndices->reserve(expectedCells);
+        state.expectedWorldBlockActors->reserve(std::min<std::size_t>(
+            expectedCells, 1024
+        ));
+
         state.projectedBlockActors.clear();
         std::fill(
             state.blockActorRendererAvailable.begin(),
             state.blockActorRendererAvailable.end(),
             0
         );
-        state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
         state.placementCenterSums.assign(state.sections.size(), Vec3{});
         state.placementCenterCounts.assign(state.sections.size(), 0);
         state.placementBuildCursor = 0;
