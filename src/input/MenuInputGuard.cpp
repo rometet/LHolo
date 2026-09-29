@@ -3,6 +3,7 @@
 
 #include "input/MenuInputGuard.h"
 
+#include "app/HookLifecycle.h"
 #include "overlay/CompanionBridge.h"
 #include "structure/StructureLoader.h"
 
@@ -45,7 +46,15 @@ LL_TYPE_INSTANCE_HOOK(
     short dy,
     bool  forceMotionlessPointer
 ) {
-    if (menuOwnsGameInput() || projectionOwnsMouseWheel(actionButtonId)) return;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
+        return;
+    }
+    try {
+        if (menuOwnsGameInput() || projectionOwnsMouseWheel(actionButtonId)) return;
+    } catch (...) {
+    }
     origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
 }
 
@@ -58,7 +67,15 @@ LL_TYPE_INSTANCE_HOOK(
     int                                                 keyCode,
     Bedrock::Input::KeyboardEventProcessor::InputOrigin originType
 ) {
-    if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(keyCode, originType);
+        return;
+    }
+    try {
+        if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    } catch (...) {
+    }
     origin(keyCode, originType);
 }
 
@@ -70,7 +87,15 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     int keyCode
 ) {
-    if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(keyCode);
+        return;
+    }
+    try {
+        if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    } catch (...) {
+    }
     origin(keyCode);
 }
 
@@ -78,7 +103,9 @@ LL_TYPE_INSTANCE_HOOK(
 
 MenuInputHandoffScope::MenuInputHandoffScope() { ++gInputHandoffDepth; }
 
-MenuInputHandoffScope::~MenuInputHandoffScope() { --gInputHandoffDepth; }
+MenuInputHandoffScope::~MenuInputHandoffScope() {
+    if (gInputHandoffDepth != 0) --gInputHandoffDepth;
+}
 
 MenuInputGuardStatus installMenuInputGuard() {
     if (!gInstallStatus.mouseInputHookInstalled) {
@@ -93,12 +120,21 @@ MenuInputGuardStatus installMenuInputGuard() {
     return gInstallStatus;
 }
 
-void uninstallMenuInputGuard() {
-    if (gInstallStatus.keyUpInputHookInstalled) MenuKeyUpInputHook::unhook();
-    if (gInstallStatus.keyDownInputHookInstalled) MenuKeyDownInputHook::unhook();
-    if (gInstallStatus.mouseInputHookInstalled) MenuMouseInputHook::unhook();
-
-    gInstallStatus = {};
+bool uninstallMenuInputGuard() {
+    bool ok = true;
+    if (gInstallStatus.keyUpInputHookInstalled) {
+        if (MenuKeyUpInputHook::unhook()) gInstallStatus.keyUpInputHookInstalled = false;
+        else ok = false;
+    }
+    if (gInstallStatus.keyDownInputHookInstalled) {
+        if (MenuKeyDownInputHook::unhook()) gInstallStatus.keyDownInputHookInstalled = false;
+        else ok = false;
+    }
+    if (gInstallStatus.mouseInputHookInstalled) {
+        if (MenuMouseInputHook::unhook()) gInstallStatus.mouseInputHookInstalled = false;
+        else ok = false;
+    }
+    return ok;
 }
 
 } // namespace lholo::input

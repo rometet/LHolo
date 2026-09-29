@@ -3,6 +3,7 @@
 
 #include "app/AppKernel.h"
 
+#include "app/HookLifecycle.h"
 #include "i18n/LanguageStore.h"
 #include "input/MenuInputGuard.h"
 #include "overlay/ImGuiOverlay.h"
@@ -32,10 +33,23 @@ bool AppKernel::load() {
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    if (!hook_lifecycle::beginEnable()) {
+        logger.error("LHolo hook lifecycle was not ready for enable");
+        return false;
+    }
+
     projection::detail::resetMeshWorkerForSession();
 
     if (!projection::detail::projectionController().installHooks()) {
-        logger.error("Failed to install projection hooks");
+        hook_lifecycle::beginQuiesce();
+        hook_lifecycle::waitForQuiescence();
+        auto const removed =
+            projection::detail::projectionController().uninstallHooks();
+        if (removed) hook_lifecycle::markDisabled();
+        logger.error(
+            "Failed to install projection hooks; rollbackRemoved={}",
+            removed ? 1 : 0
+        );
         return false;
     }
 
@@ -66,21 +80,59 @@ bool AppKernel::enable() {
 bool AppKernel::disable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    // Waiting for global detour quiescence from inside a typed detour would
+    // wait for the current thread's own lease forever. Fail closed so the
+    // loader keeps this native image resident and the user can restart cleanly.
+    if (hook_lifecycle::insideDetour()) {
+        logger.error("LHolo disable requested from inside a typed detour; refusing unsafe unload");
+        return false;
+    }
+
+    // Close typed-detour admission first. Existing callbacks finish against
+    // intact state; new callbacks become origin-only while teardown proceeds.
+    hook_lifecycle::beginQuiesce();
+    hook_lifecycle::waitForQuiescence();
+
+    // Typed render hooks are now origin-only, so they can no longer retry
+    // overlay installation. Drain Present/WndProc/Praxis callbacks before
+    // mutating StructureSession or world-owned projection state.
+    if (!overlay::shutdown()) {
+        logger.error(
+            "LHolo disable aborted because overlay teardown was incomplete; native module remains resident"
+        );
+        return false;
+    }
+
+    // Cancellation alone is not enough: std::async may still be executing code
+    // in this DLL. Join it before any native image or loader state can vanish.
+    structure::shutdownPendingStructureLoad();
+
     structure::saveSettings();
     structure::detail::shutdownMaterialTracker();
-    // Drop all world-owned state before removing hooks. In particular, this
-    // resets held placement/input state and joins the projection mesh worker
-    // while its Level/Dimension pointers are still valid.
+    // Drop all world-owned state only after every overlay callback has drained.
+    // This resets held placement/input state and joins the projection mesh
+    // worker while its Level/Dimension pointers are still valid.
     place::resetWorldSession();
     structure::resetWorldSession();
     structure::capture::clear();
-    input::uninstallMenuInputGuard();
-    place::uninstallHook();
-    projection::detail::projectionController().uninstallHooks();
-    // Projection hooks contain the automatic overlay-install retry path, so
-    // remove them before tearing the overlay down.
-    overlay::shutdown();
 
+    // Attempt every typed-hook teardown. If one hook refuses to detach,
+    // returning false keeps the native module resident rather than leaving an
+    // engine target pointing into an unloaded DLL.
+    bool hooksRemoved = true;
+    hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
+    hooksRemoved = place::uninstallHook() && hooksRemoved;
+    hooksRemoved = projection::detail::projectionController().uninstallHooks()
+        && hooksRemoved;
+
+    if (!hooksRemoved) {
+        logger.error(
+            "LHolo disable incomplete; one or more typed hooks remain installed and the native module must stay resident"
+        );
+        return false;
+    }
+
+    hook_lifecycle::markDisabled();
     logger.info("LHolo disabled");
     return true;
 }

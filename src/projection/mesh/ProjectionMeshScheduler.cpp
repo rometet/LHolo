@@ -117,6 +117,28 @@ bool validateMeshData(
     return true;
 }
 
+bool sectionBuildStorageReady(ProjectionState const& state, std::size_t section) {
+    return state.structure
+        && state.expectedWorldBlocks
+        && state.expectedWorldLiquids
+        && state.expectedWorldBlockActors
+        && state.expectedWorldBlockIndices
+        && section < state.sections.size()
+        && section < state.sectionBlockIndices.size()
+        && section < state.sectionExtraBlockPositions.size()
+        && section < state.localSectionKeys.size()
+        && section < state.warningFillSectionMeshes.size()
+        && section < state.correctionOutlineSectionMeshes.size()
+        && section < state.wrongFillSectionMeshes.size()
+        && section < state.wrongOutlineSectionMeshes.size()
+        && section < state.nativeLiquidSectionMeshes.size()
+        && section < state.praxisCompatLiquidSections.size()
+        && section < state.liquidProxySectionMeshes.size()
+        && section < state.nativeLiquidSectionCellCounts.size()
+        && section < state.liquidProxySectionCellCounts.size()
+        && section < state.blockEntityPlaceholderSectionMeshes.size();
+}
+
 } // namespace
 
 void scheduleProjectionMeshBuild(
@@ -135,6 +157,30 @@ void scheduleProjectionMeshBuild(
 
     auto const snapshotStarted = std::chrono::steady_clock::now();
     auto const section = *selected;
+    if (!sectionBuildStorageReady(state, section) || !state.level || !state.dimension) {
+        if (section < state.sections.size()) {
+            state.sections[section].buildInFlight = false;
+            state.sections[section].dirty = false;
+        }
+        logger().error(
+            "Projection mesh build skipped: invalid section/world storage at section {}",
+            section
+        );
+        return;
+    }
+    for (auto const index : state.sectionBlockIndices[section]) {
+        if (index >= state.structure->renderBlocks.size()) {
+            state.sections[section].buildInFlight = false;
+            state.sections[section].dirty = false;
+            logger().error(
+                "Projection mesh build skipped: block index {} out of range {} in section {}",
+                index,
+                state.structure->renderBlocks.size(),
+                section
+            );
+            return;
+        }
+    }
     BlockPos minimum{INT_MAX, INT_MAX, INT_MAX};
     BlockPos maximum{INT_MIN, INT_MIN, INT_MIN};
     for (auto const index : state.sectionBlockIndices[section]) {
@@ -207,7 +253,10 @@ void scheduleProjectionMeshBuild(
         auto const found = state.localSectionIndices.find(std::tuple{
             sectionX + delta[0], sectionY + delta[1], sectionZ + delta[2]
         });
-        if (found == state.localSectionIndices.end()) continue;
+        if (found == state.localSectionIndices.end()
+            || found->second >= state.sectionExtraBlockPositions.size()) {
+            continue;
+        }
         auto const& positions = state.sectionExtraBlockPositions[found->second];
         snapshot->extraBlockPositions.insert(positions.begin(), positions.end());
     }
@@ -394,6 +443,30 @@ void buildNextProjectionSectionSynchronously(
     for (std::size_t attempt = 0; attempt < state.sections.size(); ++attempt) {
         auto const section = state.dirtySectionCursor++ % state.sections.size();
         if (!state.sections[section].dirty) continue;
+        if (!sectionBuildStorageReady(state, section)) {
+            state.sections[section].dirty = false;
+            state.sections[section].buildInFlight = false;
+            logger().error(
+                "Synchronous projection mesh build skipped: invalid storage at section {}",
+                section
+            );
+            continue;
+        }
+        bool indicesValid = true;
+        for (auto const index : state.sectionBlockIndices[section]) {
+            if (index >= state.structure->renderBlocks.size()) {
+                indicesValid = false;
+                break;
+            }
+        }
+        if (!indicesValid) {
+            state.sections[section].dirty = false;
+            logger().error(
+                "Synchronous projection mesh build skipped: out-of-range block index at section {}",
+                section
+            );
+            continue;
+        }
         state.sections[section].dirty = false;
         buildProjectionSection(
             state,

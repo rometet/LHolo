@@ -16,6 +16,7 @@
 
 #include "place/PlaceHelper.h"
 
+#include "app/HookLifecycle.h"
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
@@ -75,6 +76,11 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     ::Tick const& currentTick
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(currentTick);
+        return;
+    }
     structure::detail::tickMaterialTracker(*this);
     // Physical mouse state belongs to the game-input Hook boundary. The
     // executor consumes only the resulting logical press state.
@@ -122,6 +128,11 @@ LL_TYPE_INSTANCE_HOOK(
     uchar             face,
     ::HandSlot        handSlot
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(pos, face, handSlot);
+        return;
+    }
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
@@ -162,6 +173,8 @@ LL_TYPE_INSTANCE_HOOK(
     ::ItemStack& item,
     ::HandSlot   handSlot
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(item, handSlot);
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementItemAllowed(item)) {
             cancelPendingManualPress();
@@ -196,6 +209,11 @@ LL_TYPE_INSTANCE_HOOK(
     &GameMode::$stopBuildBlock,
     void
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin();
+        return;
+    }
     if (isLocalManualBuild(*this)) {
         placementState().releaseManualPress();
     }
@@ -218,6 +236,8 @@ LL_TYPE_INSTANCE_HOOK(
     ::HandSlot        handSlot,
     bool const        isSimTick
 ) {
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(pos, face, handSlot, isSimTick);
     if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
@@ -338,13 +358,22 @@ bool installHook() {
     return true;
 }
 
-void uninstallHook() {
-    if (gHookStatus.manualBuild) GameModeBuildBlockHook::unhook();
-    if (gHookStatus.manualStop) GameModeStopBuildHook::unhook();
-    if (gHookStatus.manualUseItem) GameModeUseItemHook::unhook();
-    if (gHookStatus.manualStart) GameModeStartBuildHook::unhook();
-    if (gHookStatus.tick) LocalPlayerEasyPlaceHook::unhook();
-    gHookStatus = {};
+bool uninstallHook() {
+    bool ok = true;
+    auto remove = [&](bool& installed, auto unhook) {
+        if (!installed) return;
+        if (unhook()) installed = false;
+        else ok = false;
+    };
+    remove(gHookStatus.manualBuild, [] { return GameModeBuildBlockHook::unhook(); });
+    remove(gHookStatus.manualStop, [] { return GameModeStopBuildHook::unhook(); });
+    remove(gHookStatus.manualUseItem, [] { return GameModeUseItemHook::unhook(); });
+    remove(gHookStatus.manualStart, [] { return GameModeStartBuildHook::unhook(); });
+    remove(gHookStatus.tick, [] { return LocalPlayerEasyPlaceHook::unhook(); });
+    if (!ok) {
+        logger().error("Failed to remove one or more placement hooks; retaining LHolo DLL");
+    }
+    return ok;
 }
 
 } // namespace lholo::place

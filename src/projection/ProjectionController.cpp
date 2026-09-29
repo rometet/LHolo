@@ -26,14 +26,16 @@ bool ProjectionController::installHooks() {
     return true;
 }
 
-void ProjectionController::uninstallHooks() {
-    uninstallProjectionRenderHooks();
-    uninstallProjectionGameHooks();
+bool ProjectionController::uninstallHooks() {
+    bool ok = true;
+    ok = uninstallProjectionRenderHooks() && ok;
+    ok = uninstallProjectionGameHooks() && ok;
     ProjectionSession::getInstance().withLockedState(
         [](ProjectionState&, overlay::BoundsWireframe& captureBounds) {
             captureBounds.clear();
         }
     );
+    return ok;
 }
 
 void ProjectionController::disableProjection() {
