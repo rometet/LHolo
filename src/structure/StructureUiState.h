@@ -77,6 +77,7 @@ struct PendingHotkeyActions {
     bool settingsSave{};
     bool loadProjection{};
     bool closeProjection{};
+    bool toggleManualPlacement{};
 };
 
 class StructureUiState {
@@ -141,6 +142,7 @@ public:
     void queueLayerDelta(int delta);
     void queueLoadProjection();
     void queueCloseProjection();
+    void queueToggleManualPlacement();
     void requestSettingsSave();
     [[nodiscard]] PendingHotkeyActions consumePendingHotkeyActions();
 
@@ -219,6 +221,7 @@ private:
     std::atomic_int      mPendingLayerDelta{0};
     std::atomic_bool     mPendingLoadProjection{false};
     std::atomic_bool     mPendingCloseProjection{false};
+    std::atomic_bool     mPendingToggleManualPlacement{false};
     std::atomic_bool     mPendingSettingsSave{false};
     std::atomic_uint64_t mIgnoreHotkeyUntil{0};
 

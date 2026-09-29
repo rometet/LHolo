@@ -37,6 +37,7 @@ constexpr std::array<DefaultHotkey, input::kHotkeyCount> kDefaultHotkeys{{
     {VK_DOWN, lholo::ui::kHotkeyModifierAlt},
     {0,       0},
     {0,       0},
+    {0,       0},
 }};
 
 // "Reset all hotkeys" restores this together with the bindings: it is an input
@@ -322,6 +323,10 @@ void StructureUiState::queueCloseProjection() {
     mPendingCloseProjection.store(true, std::memory_order_release);
 }
 
+void StructureUiState::queueToggleManualPlacement() {
+    mPendingToggleManualPlacement.store(true, std::memory_order_release);
+}
+
 void StructureUiState::requestSettingsSave() {
     mPendingSettingsSave.store(true, std::memory_order_release);
 }
@@ -334,7 +339,8 @@ PendingHotkeyActions StructureUiState::consumePendingHotkeyActions() {
         mPendingLayerDelta.exchange(0, std::memory_order_acq_rel),
         mPendingSettingsSave.exchange(false, std::memory_order_acq_rel),
         mPendingLoadProjection.exchange(false, std::memory_order_acq_rel),
-        mPendingCloseProjection.exchange(false, std::memory_order_acq_rel)
+        mPendingCloseProjection.exchange(false, std::memory_order_acq_rel),
+        mPendingToggleManualPlacement.exchange(false, std::memory_order_acq_rel)
     };
 }
 
@@ -460,6 +466,7 @@ void StructureUiState::resetWorldSession() {
     mPendingLayerDelta.store(0, std::memory_order_release);
     mPendingLoadProjection.store(false, std::memory_order_release);
     mPendingCloseProjection.store(false, std::memory_order_release);
+    mPendingToggleManualPlacement.store(false, std::memory_order_release);
     mIgnoreHotkeyUntil.store(0, std::memory_order_release);
     stopHotkeyCapture();
     resetHotkeyState();
