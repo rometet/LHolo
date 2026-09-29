@@ -54,12 +54,9 @@ bool AppKernel::enable() {
         logger.warn("Failed to install menu key-up guard");
     }
 
-    // Do not perform DXGI/D3D11/D3D12 method discovery during mod enable.
-    // LeviLamina enables client mods while Minecraft is still entering the
-    // world, so creating dummy graphics devices here stalls the loading screen.
-    // ProjectionRenderHooks already retries overlay::ensureInstalled() from
-    // the first real world render callback, where the game renderer exists.
-    logger.info("LHolo graphics overlay initialization deferred until world rendering starts.");
+    if (!overlay::ensureInstalled()) {
+        logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
+    }
 
     logger.info("LHolo enabled. Type lholo to open the projection menu.");
     logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
