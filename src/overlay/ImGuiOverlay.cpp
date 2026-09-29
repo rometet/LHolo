@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "overlay/ImGuiOverlay.h"
+#include "overlay/CompanionBridge.h"
 
 #include <Windows.h>
 
@@ -131,6 +132,14 @@ constexpr size_t    kResizeBuffers1VtableIndex       = 39;
 constexpr size_t    kExecuteCommandListsVtableIndex  = 10;
 
 auto& logger() { return LHolo::getInstance().getSelf().getLogger(); }
+
+bool anyMenuVisible() {
+    return structure::isGuiVisible() || companion::isVisible();
+}
+
+bool anyMenuInputCaptured() {
+    return structure::isMenuInputCaptured() || companion::isVisible();
+}
 
 void logGraphicsFailure(IDXGISwapChain* swapChain, char const* operation, HRESULT result) {
     HRESULT removedReason = S_OK;
@@ -483,10 +492,6 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     if (!gShuttingDown.load(std::memory_order_acquire)
         && message == WM_KEYDOWN && wParam == VK_F11
         && (lParam & (1LL << 30)) == 0) {
-        // Fullscreen transition may replace or resize the swap-chain buffers.
-        // Tear down the whole D3D11On12 side before Minecraft handles F11; a
-        // ResizeBuffers hook alone is too late for renderer paths that start
-        // their transition directly from the window message.
         {
             std::lock_guard lock(gResourceMutex);
             releaseGraphicsBackend();
@@ -497,26 +502,45 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         logger().info("ImGui graphics backend suspended for fullscreen transition");
     }
-    auto const guiWasVisible = structure::isGuiVisible();
+
+    auto const menuWasVisible = anyMenuVisible();
+    auto const lholoWasVisible = structure::isGuiVisible();
+
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
-        && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
-        && structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam))) {
-        if (!guiWasVisible && structure::isGuiVisible()) releaseGameInput(window);
-        if (guiWasVisible && !structure::isGuiVisible()) confineMouseToClientCenter(window);
-        return 1;
+        && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
+        auto const repeated = (lParam & (1LL << 30)) != 0;
+        if (companion::handleHotkeyKeyDown(
+                static_cast<unsigned int>(wParam), repeated)) {
+            if (companion::isVisible() && structure::isGuiVisible()) {
+                structure::requestOpenGui();
+            }
+            auto const menuVisible = anyMenuVisible();
+            if (!menuWasVisible && menuVisible) releaseGameInput(window);
+            if (menuWasVisible && !menuVisible) confineMouseToClientCenter(window);
+            return 1;
+        }
+        if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam))) {
+            if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
+                companion::close();
+            }
+            auto const menuVisible = anyMenuVisible();
+            if (!menuWasVisible && menuVisible) releaseGameInput(window);
+            if (menuWasVisible && !menuVisible) confineMouseToClientCenter(window);
+            return 1;
+        }
     }
+
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
-        && (message == WM_KEYUP || message == WM_SYSKEYUP)
-        && structure::handleGuiHotkeyKeyUp(static_cast<unsigned int>(wParam))) {
-        return 1;
+        && (message == WM_KEYUP || message == WM_SYSKEYUP)) {
+        if (companion::handleHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
+        if (structure::handleGuiHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
     }
     if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam == VK_ESCAPE
         && gConsumeEscapeRelease.exchange(false, std::memory_order_acq_rel)) {
         return 1;
     }
-    // Mouse middle/side buttons can be bound as hotkeys too. They arrive as their
-    // own window messages, so translate them to virtual-key codes and route them
-    // through the same capture/trigger path as the keyboard.
+
+    // Mouse middle/side buttons can be bound as LHolo hotkeys too.
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized) {
         if (message == WM_MOUSEWHEEL && structure::handleProjectionOffsetWheel(
             GET_WHEEL_DELTA_WPARAM(wParam))) {
@@ -538,8 +562,12 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (mouseKey != 0) {
             if (message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
                 if (structure::handleGuiHotkeyKeyDown(mouseKey)) {
-                    if (!guiWasVisible && structure::isGuiVisible()) releaseGameInput(window);
-                    if (guiWasVisible && !structure::isGuiVisible()) confineMouseToClientCenter(window);
+                    if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
+                        companion::close();
+                    }
+                    auto const menuVisible = anyMenuVisible();
+                    if (!menuWasVisible && menuVisible) releaseGameInput(window);
+                    if (menuWasVisible && !menuVisible) confineMouseToClientCenter(window);
                     return 1;
                 }
             } else if (structure::handleGuiHotkeyKeyUp(mouseKey)) {
@@ -547,7 +575,9 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
         }
     }
-    if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized && structure::isGuiVisible()) {
+
+    if (!gShuttingDown.load(std::memory_order_acquire)
+        && gImGuiInitialized && anyMenuVisible()) {
         gMouseHandoffActive.store(false, std::memory_order_release);
         ClipCursor(nullptr);
         ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
@@ -558,19 +588,17 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         }
         if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
             gConsumeEscapeRelease.store(true, std::memory_order_release);
-            structure::requestOpenGui();
-            confineMouseToClientCenter(window);
+            if (structure::isGuiVisible()) structure::requestOpenGui();
+            else companion::close();
+            if (!anyMenuVisible()) confineMouseToClientCenter(window);
             return 1;
         }
         if (isMenuInputMessage(message)) {
             return consumeMenuInputMessage(window, message, wParam, lParam);
         }
-        // The handler above already installed the cursor shape ImGui asked for.
-        // Passing WM_SETCURSOR on to the game lets it hide the cursor again, and
-        // other mods read a hidden cursor as "gameplay has the mouse".
         if (message == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) return 1;
     }
-    if (structure::isMenuInputCaptured()
+    if (anyMenuInputCaptured()
         && isMenuInputMessage(message)
         && !isFullscreenKeyMessage(message, wParam)) {
         return consumeMenuInputMessage(window, message, wParam, lParam);
@@ -678,8 +706,12 @@ void render(IDXGISwapChain* swapChain) {
     // attempt is intentionally retried on the next Present.
     if (!initializeImGui(swapChain)) return;
     structure::processPendingActions();
-    auto const showGui = structure::isGuiVisible();
-    auto const showHud = !showGui && structure::hasHudInfo();
+
+    auto const showLholoGui = structure::isGuiVisible();
+    auto const showCompanionGui = companion::isVisible();
+    auto const showGui = showLholoGui || showCompanionGui;
+    auto const showHud = !showGui
+        && (structure::hasHudInfo() || companion::hudNeeded());
     if (gGuiVisibleLastFrame != showGui) {
         if (!showGui) {
             prepareMouseHandoff(gWindow);
@@ -708,18 +740,22 @@ void render(IDXGISwapChain* swapChain) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+
         if (structure::isGuiVisible()) {
             structure::renderGui();
-            // The close button changes visibility during this render call,
-            // after the frame-level transition check above.
-            if (!structure::isGuiVisible()) {
-                prepareMouseHandoff(gWindow);
-                PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
-                gGuiVisibleLastFrame = false;
-            }
+        } else if (companion::isVisible()) {
+            companion::drawGui(ImGui::GetCurrentContext());
         } else {
             structure::renderHud();
             structure::renderMaterialHud();
+            companion::drawHud(ImGui::GetCurrentContext());
+        }
+
+        // Either menu may close itself from inside its draw callback.
+        if (gGuiVisibleLastFrame && !anyMenuVisible()) {
+            prepareMouseHandoff(gWindow);
+            PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
+            gGuiVisibleLastFrame = false;
         }
         structure::renderActionHint();
         ImGui::Render();
@@ -1000,6 +1036,7 @@ namespace {
 
 void shutdownLocked() {
     gShuttingDown.store(true, std::memory_order_release);
+    companion::shutdown();
     gMouseHandoffActive.store(false, std::memory_order_release);
     // Best effort: leave the cursor exactly where Minecraft expects it if the
     // mod is unloaded while the menu is still open.
