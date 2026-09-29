@@ -497,6 +497,79 @@ std::uint32_t packedPaletteIndex(
     return static_cast<std::uint32_t>(packed & mask);
 }
 
+std::optional<std::string> normalizeLegacyMcstructureBlockIndices(
+    std::string const& bytes
+) {
+    // Bedrock's legacy mcstructure encoding stores block_indices as
+    // List<List<Int>>. For large volumes the generic NBT loader materializes
+    // more than a million individual IntTag objects. 1.26.51 also accepts the
+    // modern List<IntArray> representation, whose binary payload is identical
+    // except that each inner list's element-type byte is omitted.
+    static constexpr std::string_view name{"block_indices"};
+    std::string needle;
+    needle.reserve(3 + name.size());
+    needle.push_back(static_cast<char>(9)); // TAG_List
+    needle.push_back(static_cast<char>(name.size() & 0xFFU));
+    needle.push_back(static_cast<char>((name.size() >> 8U) & 0xFFU));
+    needle.append(name);
+
+    auto const header = bytes.find(needle);
+    if (header == std::string::npos) return std::nullopt;
+
+    auto const payload = header + needle.size();
+    if (payload + 5 > bytes.size()) return std::nullopt;
+    auto const readI32 = [&](std::size_t offset) -> std::optional<std::int32_t> {
+        if (offset + 4 > bytes.size()) return std::nullopt;
+        auto const* data = reinterpret_cast<unsigned char const*>(bytes.data() + offset);
+        return static_cast<std::int32_t>(
+            static_cast<std::uint32_t>(data[0])
+            | (static_cast<std::uint32_t>(data[1]) << 8U)
+            | (static_cast<std::uint32_t>(data[2]) << 16U)
+            | (static_cast<std::uint32_t>(data[3]) << 24U)
+        );
+    };
+
+    if (static_cast<unsigned char>(bytes[payload]) != 9U) return std::nullopt;
+    auto const layerCount = readI32(payload + 1);
+    if (!layerCount || *layerCount <= 0 || *layerCount > 2) return std::nullopt;
+
+    auto cursor = payload + 5;
+    for (int layer = 0; layer < *layerCount; ++layer) {
+        if (cursor + 5 > bytes.size()
+            || static_cast<unsigned char>(bytes[cursor]) != 3U) {
+            return std::nullopt;
+        }
+        auto const count = readI32(cursor + 1);
+        if (!count || *count < 0) return std::nullopt;
+        auto const dataBytes = static_cast<std::uint64_t>(*count) * 4ULL;
+        if (dataBytes > bytes.size()
+            || cursor + 5ULL + dataBytes > bytes.size()) {
+            return std::nullopt;
+        }
+        cursor += 5ULL + static_cast<std::size_t>(dataBytes);
+    }
+
+    std::string normalized;
+    normalized.reserve(bytes.size() - static_cast<std::size_t>(*layerCount));
+    normalized.append(bytes.data(), payload);
+    normalized.push_back(static_cast<char>(11)); // TAG_Int_Array
+    normalized.append(bytes.data() + payload + 1, 4); // outer list length
+
+    cursor = payload + 5;
+    for (int layer = 0; layer < *layerCount; ++layer) {
+        auto const count = readI32(cursor + 1);
+        auto const payloadBytes = 4ULL + static_cast<std::uint64_t>(*count) * 4ULL;
+        // Skip legacy inner TAG_Int element-type byte; keep length + raw ints.
+        normalized.append(
+            bytes.data() + cursor + 1,
+            static_cast<std::size_t>(payloadBytes)
+        );
+        cursor += 1ULL + static_cast<std::size_t>(payloadBytes);
+    }
+    normalized.append(bytes.data() + cursor, bytes.size() - cursor);
+    return normalized;
+}
+
 std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     std::filesystem::path const& path,
     std::string&                 error
@@ -504,7 +577,9 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     auto bytes = readFile(path, error);
     if (!bytes) return nullptr;
 
-    auto root = CompoundTag::fromBinaryNbt(*bytes, true);
+    auto normalized = normalizeLegacyMcstructureBlockIndices(*bytes);
+    auto const& nbtBytes = normalized ? *normalized : *bytes;
+    auto root = CompoundTag::fromBinaryNbt(nbtBytes, true);
     if (!root) {
         error = "不是有效的 Bedrock little-endian NBT: " + root.error().message();
         return nullptr;
@@ -512,7 +587,10 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
 
     auto prepared = std::make_shared<PreparedStructureLoad>();
     prepared->path = path;
-    prepared->root = std::make_shared<CompoundTag>(*root);
+    // fromBinaryNbt already owns the parsed tree. Moving it into the staged
+    // result avoids a second deep copy of multi-megabyte block_indices/palette
+    // data before the game-thread finalize step.
+    prepared->root = std::make_shared<CompoundTag>(std::move(*root));
 
     auto const* size = findList(*prepared->root, "size");
     auto const* structure = findCompound(*prepared->root, "structure");
