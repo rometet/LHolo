@@ -3,6 +3,7 @@
 
 #include "input/MenuInputGuard.h"
 
+#include "overlay/CompanionBridge.h"
 #include "structure/StructureLoader.h"
 
 #include "ll/api/memory/Hook.h"
@@ -21,7 +22,9 @@ MenuInputGuardStatus gInstallStatus{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
-    return gInputHandoffDepth == 0 && structure::isMenuInputCaptured();
+    return gInputHandoffDepth == 0
+        && (structure::isMenuInputCaptured()
+            || lholo::overlay::companion::isVisible());
 }
 
 bool projectionOwnsMouseWheel(char actionButtonId) {

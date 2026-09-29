@@ -39,10 +39,12 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
 #include <fstream>
+#include <future>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -95,6 +97,187 @@ std::filesystem::path settingsPath() {
 
 unsigned int currentHotkeyModifiers() {
     return uiState().currentHotkeyModifiers();
+}
+
+enum class PendingStructureLoadMode : std::uint8_t {
+    Normal,
+    Restore,
+};
+
+struct PreparedStructureLoadResult {
+    std::shared_ptr<detail::PreparedStructureLoad> prepared;
+    std::string                                    error;
+};
+
+struct PendingStructureLoad {
+    PendingStructureLoadMode            mode{PendingStructureLoadMode::Normal};
+    std::string                         path;
+    detail::SavedProjectionSnapshot     saved;
+    std::future<PreparedStructureLoadResult> future;
+    std::chrono::steady_clock::time_point started;
+    bool                                cancelled{};
+};
+
+std::optional<PendingStructureLoad> gPendingStructureLoad;
+
+void cancelPendingStructureLoad() {
+    if (gPendingStructureLoad) gPendingStructureLoad->cancelled = true;
+}
+
+void commitNormalStructureLoad(
+    std::shared_ptr<LoadedStructure> loaded,
+    std::string const&               pathText
+) {
+    auto& session = detail::StructureSession::getInstance();
+    auto const renderBlocks = loaded->renderBlocks.size();
+    auto const status = makeLoadedStatusMessage(*loaded);
+
+    projection::cancelNextStructureAnchorRequest();
+    session.resetTransform();
+    session.replaceLoaded(std::move(loaded), pathText, status);
+    detail::invalidateMaterialList();
+    saveSettings();
+    logger().info("Loaded structure {}: {} renderable blocks", pathText, renderBlocks);
+}
+
+void commitRestoredStructureLoad(
+    std::shared_ptr<LoadedStructure> loaded,
+    detail::SavedProjectionSnapshot const& saved
+) {
+    auto& session = detail::StructureSession::getInstance();
+    session.setRotation(saved.transform.rotation);
+    session.setMirror(std::clamp(saved.transform.mirror, 0, 2));
+    session.setOffsetX(saved.transform.offsetX);
+    session.setOffsetY(saved.transform.offsetY);
+    session.setOffsetZ(saved.transform.offsetZ);
+    session.setLayerDisplayMode(saved.transform.layerDisplayMode);
+    session.setDisplayLayer(saved.transform.displayLayer);
+    session.setLayerAxis(saved.transform.layerAxis);
+    projection::requestNextStructureAnchor(
+        saved.anchorX, saved.anchorY, saved.anchorZ
+    );
+    session.replaceLoaded(
+        std::move(loaded),
+        saved.structurePath,
+        i18n::Message{i18n::TextKey::StatusRestoredPending}
+    );
+    detail::invalidateMaterialList();
+    logger().info(
+        "Restoring projection {} at ({}, {}, {})",
+        saved.structurePath,
+        saved.anchorX,
+        saved.anchorY,
+        saved.anchorZ
+    );
+}
+
+bool startPreparedStructureLoad(
+    PendingStructureLoadMode                 mode,
+    std::string                              pathText,
+    detail::SavedProjectionSnapshot const&   saved = {}
+) {
+    if (gPendingStructureLoad) {
+        if (gPendingStructureLoad->future.wait_for(std::chrono::milliseconds{0})
+            != std::future_status::ready) {
+            logger().warn("A structure load is already being prepared; ignoring {}", pathText);
+            return false;
+        }
+    }
+
+    auto path = detail::pathFromUtf8(pathText);
+    if (!detail::supportsAsyncStructurePreparation(path)) return false;
+
+    PendingStructureLoad pending;
+    pending.mode = mode;
+    pending.path = std::move(pathText);
+    pending.saved = saved;
+    pending.started = std::chrono::steady_clock::now();
+    pending.future = std::async(
+        std::launch::async,
+        [path = std::move(path)]() mutable {
+            PreparedStructureLoadResult result;
+            try {
+                result.prepared = detail::prepareStructureFile(path, result.error);
+            } catch (std::exception const& exception) {
+                result.error = exception.what();
+            } catch (...) {
+                result.error = "结构后台预解析发生未知异常";
+            }
+            return result;
+        }
+    );
+    gPendingStructureLoad.emplace(std::move(pending));
+    logger().info("Preparing structure asynchronously: {}", gPendingStructureLoad->path);
+    return true;
+}
+
+void processPreparedStructureLoad() {
+    if (!gPendingStructureLoad) return;
+    if (gPendingStructureLoad->future.wait_for(std::chrono::milliseconds{0})
+        != std::future_status::ready) {
+        return;
+    }
+
+    auto const mode = gPendingStructureLoad->mode;
+    auto const path = gPendingStructureLoad->path;
+    auto const saved = gPendingStructureLoad->saved;
+    auto const started = gPendingStructureLoad->started;
+    auto const cancelled = gPendingStructureLoad->cancelled;
+
+    PreparedStructureLoadResult preparedResult;
+    try {
+        preparedResult = gPendingStructureLoad->future.get();
+    } catch (std::exception const& exception) {
+        preparedResult.error = exception.what();
+    } catch (...) {
+        preparedResult.error = "结构后台预解析发生未知异常";
+    }
+    gPendingStructureLoad.reset();
+
+    if (cancelled) return;
+
+    auto& session = detail::StructureSession::getInstance();
+    if (!preparedResult.prepared) {
+        auto const message = mode == PendingStructureLoadMode::Restore
+            ? i18n::Message{i18n::TextKey::StatusRestoreFailed, {preparedResult.error}}
+            : i18n::Message{i18n::TextKey::StatusLoadFailed, {preparedResult.error}};
+        session.setStatus(std::move(message));
+        logger().error("Could not prepare structure {}: {}", path, preparedResult.error);
+        return;
+    }
+
+    auto const finalizeStarted = std::chrono::steady_clock::now();
+    std::string error;
+    auto loaded = detail::finalizePreparedStructureFile(
+        std::move(preparedResult.prepared), error
+    );
+    auto const finalized = std::chrono::steady_clock::now();
+    if (!loaded) {
+        auto const message = mode == PendingStructureLoadMode::Restore
+            ? i18n::Message{i18n::TextKey::StatusRestoreFailed, {error}}
+            : i18n::Message{i18n::TextKey::StatusLoadFailed, {error}};
+        session.setStatus(std::move(message));
+        logger().error("Could not finalize structure {}: {}", path, error);
+        return;
+    }
+
+    auto const prepareMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        finalizeStarted - started
+    ).count();
+    auto const finalizeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        finalized - finalizeStarted
+    ).count();
+    logger().info(
+        "Structure staged load timings: background={}ms game-thread-finalize={}ms",
+        prepareMs,
+        finalizeMs
+    );
+
+    if (mode == PendingStructureLoadMode::Restore) {
+        commitRestoredStructureLoad(std::move(loaded), saved);
+    } else {
+        commitNormalStructureLoad(std::move(loaded), path);
+    }
 }
 
 // Resolve one move hotkey into a world-space step and queue it. The direction
@@ -303,6 +486,8 @@ void processPendingActions() {
         );
         return;
     }
+
+    processPreparedStructureLoad();
 
     auto& session = detail::StructureSession::getInstance();
     auto const pending = uiState().consumePendingHotkeyActions();
@@ -976,41 +1161,62 @@ bool scrollLockActive() {
     return getLoaded() != nullptr && uiState().altWheelOffsetEnabled() && uiState().altHeld();
 }
 
+void requestStructureFileLoad(std::string pathText) {
+    auto& session = detail::StructureSession::getInstance();
+    if (pathText.empty()) {
+        session.setStatus(i18n::Message{i18n::TextKey::StatusPathEmpty});
+        return;
+    }
+
+    auto const path = detail::pathFromUtf8(pathText);
+    if (detail::supportsAsyncStructurePreparation(path)) {
+        (void)startPreparedStructureLoad(
+            PendingStructureLoadMode::Normal,
+            std::move(pathText)
+        );
+        return;
+    }
+
+    std::string error;
+    auto loaded = detail::loadStructureFile(path, error);
+    if (!loaded) {
+        session.setStatus(i18n::Message{i18n::TextKey::StatusLoadFailed, {error}});
+        logger().error("Could not load structure {}: {}", pathText, error);
+        return;
+    }
+    commitNormalStructureLoad(std::move(loaded), pathText);
+}
+
 void restoreSavedProjection() {
     auto& session = detail::StructureSession::getInstance();
     auto const saved = session.savedProjection();
     auto const& savedPath = saved.structurePath;
+
+    auto const path = detail::pathFromUtf8(savedPath);
+    if (detail::supportsAsyncStructurePreparation(path)) {
+        (void)startPreparedStructureLoad(
+            PendingStructureLoadMode::Restore,
+            savedPath,
+            saved
+        );
+        return;
+    }
+
     std::string error;
-    auto loaded = detail::loadStructureFile(detail::pathFromUtf8(savedPath), error);
+    auto loaded = detail::loadStructureFile(path, error);
     if (!loaded) {
         session.setStatus(i18n::Message{i18n::TextKey::StatusRestoreFailed, {error}});
         logger().error("Could not restore structure {}: {}", savedPath, error);
         return;
     }
-    session.setRotation(saved.transform.rotation);
-    session.setMirror(std::clamp(saved.transform.mirror, 0, 2));
-    session.setOffsetX(saved.transform.offsetX);
-    session.setOffsetY(saved.transform.offsetY);
-    session.setOffsetZ(saved.transform.offsetZ);
-    session.setLayerDisplayMode(saved.transform.layerDisplayMode);
-    session.setDisplayLayer(saved.transform.displayLayer);
-    session.setLayerAxis(saved.transform.layerAxis);
-    projection::requestNextStructureAnchor(saved.anchorX, saved.anchorY, saved.anchorZ);
-    session.replaceLoaded(
-        std::move(loaded),
-        savedPath,
-        i18n::Message{i18n::TextKey::StatusRestoredPending}
-    );
-    detail::invalidateMaterialList();
-    logger().info(
-        "Restoring projection {} at ({}, {}, {})",
-        savedPath, saved.anchorX, saved.anchorY, saved.anchorZ
-    );
+    commitRestoredStructureLoad(std::move(loaded), saved);
 }
 
 namespace {
 
 void clearProjectionSession(i18n::Message status) {
+    cancelPendingStructureLoad();
+
     // Withdraw the requested structure before waiting for the mesh worker.
     // Otherwise the render hook can observe the old loaded structure in the gap after
     // projection::disable() and immediately enable the projection again.

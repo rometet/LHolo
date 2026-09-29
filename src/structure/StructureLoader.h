@@ -131,6 +131,9 @@ void recordProjectionAnchor(int x, int y, int z);
 // movement: a projection is loaded and the fixed Alt trigger is held.
 bool scrollLockActive();
 void clear();
+// Queue a normal structure load. .mcstructure preparation runs off the render
+// thread; unsupported formats retain the existing synchronous path.
+void requestStructureFileLoad(std::string path);
 // Reload the last saved projection at its saved anchor/transform. Standalone so
 // both the menu action and the load hotkey can trigger it.
 void restoreSavedProjection();

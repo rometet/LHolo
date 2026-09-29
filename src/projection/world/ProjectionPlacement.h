@@ -28,12 +28,13 @@ struct ProjectionPlacementSettings {
     bool identityTransform{};
 };
 
-void rebuildProjectionPlacement(
+bool rebuildProjectionPlacement(
     ProjectionState&                   state,
     BlockSource&                       region,
     BlockActorRenderDispatcher&        dispatcher,
     LegacyStructureSettings const&     transformSettings,
-    ProjectionPlacementSettings const& settings
+    ProjectionPlacementSettings const& settings,
+    bool                               restart
 );
 
 } // namespace lholo::projection::detail
