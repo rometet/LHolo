@@ -1,3 +1,5 @@
+[Reading 24 lines from start (total: 24 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -19,6 +21,8 @@
 namespace lholo::overlay {
 
 bool ensureInstalled();
-void shutdown();
+bool shutdown();
 
 } // namespace lholo::overlay
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

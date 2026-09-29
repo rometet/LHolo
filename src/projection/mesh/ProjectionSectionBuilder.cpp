@@ -1,3 +1,5 @@
+[Reading 2097 lines from start (total: 2097 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -424,6 +426,54 @@ void buildProjectionSection(
     Tessellator::UploadMode               uploadMode,
     ProjectionSectionBuildSettings const& sectionBuildSettings
 ) {
+    if (!state.structure
+        || !state.expectedWorldBlocks
+        || !state.expectedWorldLiquids
+        || !state.expectedWorldBlockActors
+        || !state.expectedWorldBlockIndices
+        || section >= state.sections.size()
+        || section >= state.sectionBlockIndices.size()
+        || section >= state.sectionExtraBlockPositions.size()
+        || section >= state.warningFillSectionMeshes.size()
+        || section >= state.correctionOutlineSectionMeshes.size()
+        || section >= state.wrongFillSectionMeshes.size()
+        || section >= state.wrongOutlineSectionMeshes.size()
+        || section >= state.nativeLiquidSectionMeshes.size()
+        || section >= state.praxisCompatLiquidSections.size()
+        || section >= state.liquidProxySectionMeshes.size()
+        || section >= state.nativeLiquidSectionCellCounts.size()
+        || section >= state.liquidProxySectionCellCounts.size()
+        || section >= state.blockEntityPlaceholderSectionMeshes.size()) {
+        logger().error(
+            "Projection section build rejected invalid storage at section {}",
+            section
+        );
+        return;
+    }
+
+    auto const blockCount = state.structure->renderBlocks.size();
+    if (state.correctionStates.size() < blockCount
+        || state.blockActorRendererAvailable.size() < blockCount) {
+        logger().error(
+            "Projection section build rejected per-block storage mismatch: blocks={} correction={} blockActor={}",
+            blockCount,
+            state.correctionStates.size(),
+            state.blockActorRendererAvailable.size()
+        );
+        return;
+    }
+    for (auto const index : state.sectionBlockIndices[section]) {
+        if (index >= blockCount) {
+            logger().error(
+                "Projection section build rejected index {} >= {} in section {}",
+                index,
+                blockCount,
+                section
+            );
+            return;
+        }
+    }
+
     auto const mirror                   = sectionBuildSettings.mirror;
     auto const rotation                 = sectionBuildSettings.rotation;
     auto const mirrorMode               = sectionBuildSettings.mirrorMode;
@@ -1574,6 +1624,7 @@ void buildLiquidProxySectionMesh(
                     worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
                 });
                 return found == state.expectedWorldBlockIndices->end()
+                        || found->second >= state.structure->renderBlocks.size()
                     ? nullptr : &state.structure->renderBlocks[found->second];
             };
             auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
@@ -1925,6 +1976,7 @@ void buildCorrectionSectionMeshes(
                 worldPosition.x, worldPosition.y, worldPosition.z
             });
             auto priority = expected == state.expectedWorldBlockIndices->end()
+                    || expected->second >= state.correctionStates.size()
                 ? 0 : correctionPriority(state.correctionStates[expected->second]);
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
@@ -2045,3 +2097,5 @@ void buildStructureBoundsMesh(
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

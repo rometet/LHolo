@@ -1,3 +1,5 @@
+[Reading 148 lines from start (total: 148 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -131,6 +133,10 @@ void recordProjectionAnchor(int x, int y, int z);
 // movement: a projection is loaded and the fixed Alt trigger is held.
 bool scrollLockActive();
 void clear();
+// Drain any in-flight asynchronous structure preparation before native module
+// teardown. This is stronger than cancellation: it joins code executing inside
+// the LHolo DLL so no worker can return into an unloaded image.
+void shutdownPendingStructureLoad();
 // Queue a normal structure load. .mcstructure preparation runs off the render
 // thread; unsupported formats retain the existing synchronous path.
 void requestStructureFileLoad(std::string path);
@@ -142,3 +148,5 @@ void restoreSavedProjection();
 i18n::Message makeLoadedStatusMessage(LoadedStructure const& loaded);
 
 } // namespace lholo::structure
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

@@ -1,3 +1,5 @@
+[Reading 1024 lines from start (total: 1024 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -112,9 +114,15 @@ constexpr std::uint64_t kManualRequestTimeoutMs = 400;
 
 
 std::int64_t packBlockPos(BlockPos const& p) {
-    return (static_cast<std::int64_t>(p.x) & 0x3FFFFFF) << 38
-         | (static_cast<std::int64_t>(p.z) & 0x3FFFFFF) << 12
-         | (static_cast<std::int64_t>(p.y) & 0xFFF);
+    // Pack in unsigned space. Shifting a signed value into bit 63 is UB even
+    // though the bit layout itself is intentional.
+    auto const x = static_cast<std::uint64_t>(static_cast<std::int64_t>(p.x))
+        & 0x3FFFFFFULL;
+    auto const z = static_cast<std::uint64_t>(static_cast<std::int64_t>(p.z))
+        & 0x3FFFFFFULL;
+    auto const y = static_cast<std::uint64_t>(static_cast<std::int64_t>(p.y))
+        & 0xFFFULL;
+    return static_cast<std::int64_t>((x << 38U) | (z << 12U) | y);
 }
 
 bool recentlyPlaced(BlockPos const& cell, std::uint64_t now) {
@@ -153,11 +161,19 @@ struct ItemFind {
     ItemStack const* item;
 };
 
+constexpr uchar kInvalidFace = std::numeric_limits<uchar>::max();
+
+bool validFace(uchar face) {
+    return face < 6;
+}
+
 BlockPos neighborOf(BlockPos const& position, uchar face) {
+    if (!validFace(face)) return position;
     return position + Facing::DIRECTION()[face];
 }
 
 uchar oppositeFace(uchar face) {
+    if (!validFace(face)) return kInvalidFace;
     return Facing::OPPOSITE_FACING()[face];
 }
 
@@ -410,6 +426,10 @@ std::optional<ProjectionTarget> findProjectionTarget(
 }
 
 bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, ItemStack const& item) {
+    // Never serialize an out-of-range face. Facing's lookup tables are fixed
+    // six-entry arrays and an invalid face would be both an OOB read locally
+    // and malformed placement data on the wire.
+    if (!validFace(target.face)) return false;
     auto& region = player.getDimensionBlockSource();
     if (!region.getBlock(target.cell).isAir()) return false;
 
@@ -1004,3 +1024,5 @@ void tickEasyPlace() {
 } // namespace lholo::place::detail
 
 } // namespace lholo::place
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

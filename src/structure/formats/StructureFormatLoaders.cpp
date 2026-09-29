@@ -1,3 +1,5 @@
+[Reading 1649 lines from start (total: 1649 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -194,6 +196,23 @@ bool readThreeInts(ListTag const& list, int& x, int& y, int& z) {
     return read(0, x) && read(1, y) && read(2, z);
 }
 
+bool checkedVolume3(
+    std::uint64_t x,
+    std::uint64_t y,
+    std::uint64_t z,
+    std::uint64_t& result
+) {
+    if (x == 0 || y == 0 || z == 0) return false;
+    auto const max = std::numeric_limits<std::uint64_t>::max();
+    if (x > max / y) return false;
+    auto const xy = x * y;
+    if (xy > max / z) return false;
+    result = xy * z;
+    return result <= static_cast<std::uint64_t>(
+        std::numeric_limits<std::size_t>::max()
+    );
+}
+
 bool inspectBlockLayer(
     ListTag const&             layer,
     std::uint64_t              volume,
@@ -374,7 +393,11 @@ private:
         return static_cast<std::size_t>(length);
     }
 
-    JavaNbtTag readPayload(std::uint8_t type) {
+    JavaNbtTag readPayload(std::uint8_t type, std::size_t depth = 0) {
+        constexpr std::size_t kMaximumNbtDepth = 128;
+        if (depth > kMaximumNbtDepth) {
+            throw std::runtime_error("Litematic NBT nesting is too deep");
+        }
         JavaNbtTag tag;
         switch (type) {
         case 1: tag.value = static_cast<std::int8_t>(readU8()); break;
@@ -399,7 +422,9 @@ private:
             if (count > kMaximumInflatedFileSize) throw std::runtime_error("Litematic NBT 列表过大");
             JavaNbtTag::List values;
             values.reserve(count);
-            for (std::size_t i = 0; i < count; ++i) values.push_back(readPayload(elementType));
+            for (std::size_t i = 0; i < count; ++i) {
+                values.push_back(readPayload(elementType, depth + 1));
+            }
             tag.value = std::move(values);
             break;
         }
@@ -409,7 +434,10 @@ private:
                 auto const childType = readU8();
                 if (childType == 0) break;
                 auto name = readString();
-                values.insert_or_assign(std::move(name), readPayload(childType));
+                values.insert_or_assign(
+                    std::move(name),
+                    readPayload(childType, depth + 1)
+                );
             }
             tag.value = std::move(values);
             break;
@@ -693,13 +721,16 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
         return nullptr;
     }
     if (!readThreeInts(*size, prepared->sizeX, prepared->sizeY, prepared->sizeZ)
-        || prepared->sizeX <= 0 || prepared->sizeY <= 0 || prepared->sizeZ <= 0) {
-        error = "结构尺寸无效";
+        || prepared->sizeX <= 0 || prepared->sizeY <= 0 || prepared->sizeZ <= 0
+        || !checkedVolume3(
+            static_cast<std::uint64_t>(prepared->sizeX),
+            static_cast<std::uint64_t>(prepared->sizeY),
+            static_cast<std::uint64_t>(prepared->sizeZ),
+            prepared->volume
+        )) {
+        error = "结构尺寸无效或体积溢出";
         return nullptr;
     }
-    prepared->volume = static_cast<std::uint64_t>(prepared->sizeX)
-        * static_cast<std::uint64_t>(prepared->sizeY)
-        * static_cast<std::uint64_t>(prepared->sizeZ);
 
     auto const* palette = findCompound(*structure, "palette");
     auto const* defaultPalette = palette ? findCompound(*palette, "default") : nullptr;
@@ -1132,8 +1163,15 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         error = "结构尺寸无效";
         return nullptr;
     }
-    loaded->volume = static_cast<std::uint64_t>(loaded->sizeX)
-        * static_cast<std::uint64_t>(loaded->sizeY) * static_cast<std::uint64_t>(loaded->sizeZ);
+    if (!checkedVolume3(
+            static_cast<std::uint64_t>(loaded->sizeX),
+            static_cast<std::uint64_t>(loaded->sizeY),
+            static_cast<std::uint64_t>(loaded->sizeZ),
+            loaded->volume
+        )) {
+        error = "Structure volume overflow";
+        return nullptr;
+    }
     loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ});
 
     auto const* blockIndices = findList(*structure, "block_indices");
@@ -1413,8 +1451,15 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
     loaded->sizeX = static_cast<int>(extentX);
     loaded->sizeY = static_cast<int>(extentY);
     loaded->sizeZ = static_cast<int>(extentZ);
-    loaded->volume = static_cast<std::uint64_t>(extentX)
-        * static_cast<std::uint64_t>(extentY) * static_cast<std::uint64_t>(extentZ);
+    if (!checkedVolume3(
+            static_cast<std::uint64_t>(extentX),
+            static_cast<std::uint64_t>(extentY),
+            static_cast<std::uint64_t>(extentZ),
+            loaded->volume
+        )) {
+        error = "Litematic merged volume overflow";
+        return nullptr;
+    }
     loaded->paletteEntries = paletteEntries;
     loaded->regions.reserve(parsedRegions.size());
     struct MergedJavaCell {
@@ -1424,8 +1469,16 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
     std::unordered_map<std::uint64_t, MergedJavaCell> mergedBlocks;
 
     for (auto const& region : parsedRegions) {
-        auto const regionVolume = static_cast<std::uint64_t>(region.sizeX)
-            * static_cast<std::uint64_t>(region.sizeY) * static_cast<std::uint64_t>(region.sizeZ);
+        std::uint64_t regionVolume{};
+        if (!checkedVolume3(
+                static_cast<std::uint64_t>(region.sizeX),
+                static_cast<std::uint64_t>(region.sizeY),
+                static_cast<std::uint64_t>(region.sizeZ),
+                regionVolume
+            )) {
+            error = "Litematic region volume overflow";
+            return nullptr;
+        }
         // Litematica stores BlockStates from the region's minimum corner even
         // when Size is negative. The sign only records which selection corner
         // is Position; it must not mirror the block data.
@@ -1447,7 +1500,12 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
             2u,
             static_cast<unsigned>(std::bit_width(static_cast<unsigned>(region.palette.size() - 1)))
         );
-        auto const requiredLongs = (regionVolume * bits + 63) / 64;
+        if (bits == 0
+            || regionVolume > (std::numeric_limits<std::uint64_t>::max() - 63ULL) / bits) {
+            error = "Litematic BlockStates bit count overflow";
+            return nullptr;
+        }
+        auto const requiredLongs = (regionVolume * bits + 63ULL) / 64ULL;
         if (requiredLongs > region.states->size()) {
             error = "Litematic 的 BlockStates 数量与区域尺寸不匹配";
             return nullptr;
@@ -1547,16 +1605,25 @@ std::shared_ptr<PreparedStructureLoad> prepareStructureFile(
 std::shared_ptr<LoadedStructure> finalizePreparedStructureFile(
     std::shared_ptr<PreparedStructureLoad> prepared,
     std::string&                          error
-) {
+) try {
     auto loaded = finalizeMcstructure(prepared, error);
     if (loaded && loaded->renderBlocks.empty()) {
         error = "结构中没有可投影方块";
         return nullptr;
     }
     return loaded;
+} catch (std::exception const& exception) {
+    error = std::string{"结构 finalization 失败: "} + exception.what();
+    return nullptr;
+} catch (...) {
+    error = "结构 finalization 发生未知异常";
+    return nullptr;
 }
 
-std::shared_ptr<LoadedStructure> loadStructureFile(std::filesystem::path const& path, std::string& error) {
+std::shared_ptr<LoadedStructure> loadStructureFile(
+    std::filesystem::path const& path,
+    std::string&                 error
+) try {
     auto extension = path.extension().wstring();
     std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t value) {
         return static_cast<wchar_t>(std::towlower(value));
@@ -1573,6 +1640,14 @@ std::shared_ptr<LoadedStructure> loadStructureFile(std::filesystem::path const& 
         return nullptr;
     }
     return loaded;
+} catch (std::exception const& exception) {
+    error = std::string{"结构加载失败: "} + exception.what();
+    return nullptr;
+} catch (...) {
+    error = "结构加载发生未知异常";
+    return nullptr;
 }
 
 } // namespace lholo::structure::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

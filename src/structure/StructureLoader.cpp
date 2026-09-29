@@ -1,3 +1,5 @@
+[Reading 1327 lines from start (total: 1327 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -117,6 +119,9 @@ struct PendingStructureLoad {
     detail::SavedProjectionSnapshot     saved;
     std::future<PreparedStructureLoadResult> future;
     std::chrono::steady_clock::time_point started;
+    Level*                              sourceLevel{};
+    int                                 sourceDimensionId{};
+    bool                                hasSourceWorld{};
     bool                                cancelled{};
 };
 
@@ -194,6 +199,13 @@ bool startPreparedStructureLoad(
     pending.path = std::move(pathText);
     pending.saved = saved;
     pending.started = std::chrono::steady_clock::now();
+    if (auto client = ll::service::getClientInstance()) {
+        if (auto* player = client->getLocalPlayer()) {
+            pending.sourceLevel = &player->getLevel();
+            pending.sourceDimensionId = static_cast<int>(player->getDimensionId());
+            pending.hasSourceWorld = true;
+        }
+    }
     pending.future = std::async(
         std::launch::async,
         [path = std::move(path)]() mutable {
@@ -224,6 +236,9 @@ void processPreparedStructureLoad() {
     auto const path = gPendingStructureLoad->path;
     auto const saved = gPendingStructureLoad->saved;
     auto const started = gPendingStructureLoad->started;
+    auto* const sourceLevel = gPendingStructureLoad->sourceLevel;
+    auto const sourceDimensionId = gPendingStructureLoad->sourceDimensionId;
+    auto const hasSourceWorld = gPendingStructureLoad->hasSourceWorld;
     auto const cancelled = gPendingStructureLoad->cancelled;
 
     PreparedStructureLoadResult preparedResult;
@@ -237,6 +252,23 @@ void processPreparedStructureLoad() {
     gPendingStructureLoad.reset();
 
     if (cancelled) return;
+
+    // A prepared NBT tree is world-independent, but palette finalization is
+    // not. Never resolve an old-world request against a newly joined world or
+    // a different dimension.
+    if (hasSourceWorld) {
+        auto client = ll::service::getClientInstance();
+        auto* player = client ? client->getLocalPlayer() : nullptr;
+        if (!player
+            || &player->getLevel() != sourceLevel
+            || static_cast<int>(player->getDimensionId()) != sourceDimensionId) {
+            logger().info(
+                "Discarded prepared structure {} because the world/dimension changed",
+                path
+            );
+            return;
+        }
+    }
 
     auto& session = detail::StructureSession::getInstance();
     if (!preparedResult.prepared) {
@@ -1273,9 +1305,27 @@ void resetWorldSession() {
     uiState().resetWorldSession();
 }
 
+void shutdownPendingStructureLoad() {
+    if (!gPendingStructureLoad) return;
+
+    gPendingStructureLoad->cancelled = true;
+    try {
+        if (gPendingStructureLoad->future.valid()) {
+            gPendingStructureLoad->future.wait();
+            (void)gPendingStructureLoad->future.get();
+        }
+    } catch (...) {
+        // Teardown is interested only in joining the worker. Any parse error is
+        // irrelevant once the owning native module is leaving.
+    }
+    gPendingStructureLoad.reset();
+}
+
 void clear() {
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusProjectionClosed});
     uiState().clearMaterials();
 }
 
 } // namespace lholo::structure
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

@@ -1,3 +1,5 @@
+[Reading 600 lines from start (total: 600 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <tuple>
 
@@ -42,6 +45,42 @@ SubChunkKey localSectionKey(BlockPos const& position) {
     return {floorDiv16(position.x), floorDiv16(position.y), floorDiv16(position.z)};
 }
 
+constexpr std::size_t kInvalidSection = std::numeric_limits<std::size_t>::max();
+
+bool sectionStorageAligned(ProjectionState const& state) {
+    auto const count = state.sections.size();
+    return state.localSectionKeys.size() == count
+        && state.sectionBlockIndices.size() == count
+        && state.sectionExtraBlockPositions.size() == count
+        && state.warningFillSectionMeshes.size() == count
+        && state.correctionOutlineSectionMeshes.size() == count
+        && state.wrongFillSectionMeshes.size() == count
+        && state.wrongOutlineSectionMeshes.size() == count
+        && state.nativeLiquidSectionMeshes.size() == count
+        && state.praxisCompatLiquidSections.size() == count
+        && state.liquidProxySectionMeshes.size() == count
+        && state.nativeLiquidSectionCellCounts.size() == count
+        && state.liquidProxySectionCellCounts.size() == count
+        && state.blockEntityPlaceholderSectionMeshes.size() == count;
+}
+
+bool sectionStorageContains(ProjectionState const& state, std::size_t section) {
+    return section < state.sections.size()
+        && section < state.localSectionKeys.size()
+        && section < state.sectionBlockIndices.size()
+        && section < state.sectionExtraBlockPositions.size()
+        && section < state.warningFillSectionMeshes.size()
+        && section < state.correctionOutlineSectionMeshes.size()
+        && section < state.wrongFillSectionMeshes.size()
+        && section < state.wrongOutlineSectionMeshes.size()
+        && section < state.nativeLiquidSectionMeshes.size()
+        && section < state.praxisCompatLiquidSections.size()
+        && section < state.liquidProxySectionMeshes.size()
+        && section < state.nativeLiquidSectionCellCounts.size()
+        && section < state.liquidProxySectionCellCounts.size()
+        && section < state.blockEntityPlaceholderSectionMeshes.size();
+}
+
 std::size_t ensureCorrectionSection(
     ProjectionState& state,
     BlockPos const&  position,
@@ -50,40 +89,129 @@ std::size_t ensureCorrectionSection(
     auto const key = localSectionKey(position);
     if (auto const found = state.localSectionIndices.find(key);
         found != state.localSectionIndices.end()) {
-        if (state.sectionBlockIndices[found->second].empty()) {
-            state.sections[found->second].center = Vec3{
+        auto const section = found->second;
+        if (!sectionStorageContains(state, section)) return kInvalidSection;
+        if (state.sectionBlockIndices[section].empty()) {
+            state.sections[section].center = Vec3{
                 static_cast<float>(transformedPosition.x) + 0.5f,
                 static_cast<float>(transformedPosition.y) + 0.5f,
                 static_cast<float>(transformedPosition.z) + 0.5f,
             };
         }
-        return found->second;
+        return section;
     }
+
+    // All parallel section stores are an ABI of their own. If one is already
+    // out of sync, do not extend or index any of them.
+    if (!sectionStorageAligned(state)) return kInvalidSection;
+
     auto const section = state.sections.size();
-    state.localSectionIndices.emplace(key, section);
-    state.localSectionKeys.push_back(key);
-    state.sectionBlockIndices.emplace_back();
-    state.sectionExtraBlockPositions.emplace_back();
-    SectionState sectionState;
-    sectionState.center = Vec3{
-        static_cast<float>(transformedPosition.x) + 0.5f,
-        static_cast<float>(transformedPosition.y) + 0.5f,
-        static_cast<float>(transformedPosition.z) + 0.5f,
-    };
-    sectionState.dirty = true;
-    sectionState.requestedRevision = 1;
-    state.sections.push_back(std::move(sectionState));
-    state.warningFillSectionMeshes.emplace_back();
-    state.correctionOutlineSectionMeshes.emplace_back();
-    state.wrongFillSectionMeshes.emplace_back();
-    state.wrongOutlineSectionMeshes.emplace_back();
-    state.nativeLiquidSectionMeshes.emplace_back();
-    state.praxisCompatLiquidSections.emplace_back();
-    state.liquidProxySectionMeshes.emplace_back();
-    state.nativeLiquidSectionCellCounts.emplace_back();
-    state.liquidProxySectionCellCounts.emplace_back();
-    state.blockEntityPlaceholderSectionMeshes.emplace_back();
-    return section;
+    auto const targetSize = section + 1;
+    try {
+        // Reserve every vector before changing any size. A reserve failure can
+        // change capacity but leaves all logical sizes aligned.
+        state.sections.reserve(targetSize);
+        state.localSectionKeys.reserve(targetSize);
+        state.sectionBlockIndices.reserve(targetSize);
+        state.sectionExtraBlockPositions.reserve(targetSize);
+        state.warningFillSectionMeshes.reserve(targetSize);
+        state.correctionOutlineSectionMeshes.reserve(targetSize);
+        state.wrongFillSectionMeshes.reserve(targetSize);
+        state.wrongOutlineSectionMeshes.reserve(targetSize);
+        state.nativeLiquidSectionMeshes.reserve(targetSize);
+        state.praxisCompatLiquidSections.reserve(targetSize);
+        state.liquidProxySectionMeshes.reserve(targetSize);
+        state.nativeLiquidSectionCellCounts.reserve(targetSize);
+        state.liquidProxySectionCellCounts.reserve(targetSize);
+        state.blockEntityPlaceholderSectionMeshes.reserve(targetSize);
+
+        SectionState sectionState;
+        sectionState.center = Vec3{
+            static_cast<float>(transformedPosition.x) + 0.5f,
+            static_cast<float>(transformedPosition.y) + 0.5f,
+            static_cast<float>(transformedPosition.z) + 0.5f,
+        };
+        sectionState.dirty = true;
+        sectionState.requestedRevision = 1;
+
+        state.sections.push_back(std::move(sectionState));
+        state.localSectionKeys.push_back(key);
+        state.sectionBlockIndices.emplace_back();
+        state.sectionExtraBlockPositions.emplace_back();
+        state.warningFillSectionMeshes.emplace_back();
+        state.correctionOutlineSectionMeshes.emplace_back();
+        state.wrongFillSectionMeshes.emplace_back();
+        state.wrongOutlineSectionMeshes.emplace_back();
+        state.nativeLiquidSectionMeshes.emplace_back();
+        state.praxisCompatLiquidSections.emplace_back();
+        state.liquidProxySectionMeshes.emplace_back();
+        state.nativeLiquidSectionCellCounts.emplace_back();
+        state.liquidProxySectionCellCounts.emplace_back();
+        state.blockEntityPlaceholderSectionMeshes.emplace_back();
+
+        auto const [found, inserted] = state.localSectionIndices.emplace(key, section);
+        if (inserted) return section;
+
+        // Defensive only: this function is render-thread owned, but if an
+        // unexpected duplicate appears, roll back the newly appended stores.
+        state.sections.resize(section);
+        state.localSectionKeys.resize(section);
+        state.sectionBlockIndices.resize(section);
+        state.sectionExtraBlockPositions.resize(section);
+        state.warningFillSectionMeshes.resize(section);
+        state.correctionOutlineSectionMeshes.resize(section);
+        state.wrongFillSectionMeshes.resize(section);
+        state.wrongOutlineSectionMeshes.resize(section);
+        state.nativeLiquidSectionMeshes.resize(section);
+        state.praxisCompatLiquidSections.resize(section);
+        state.liquidProxySectionMeshes.resize(section);
+        state.nativeLiquidSectionCellCounts.resize(section);
+        state.liquidProxySectionCellCounts.resize(section);
+        state.blockEntityPlaceholderSectionMeshes.resize(section);
+        return sectionStorageContains(state, found->second)
+            ? found->second : kInvalidSection;
+    } catch (...) {
+        // Any append after successful reserves is expected not to allocate, but
+        // keep a rollback barrier anyway so a future type change cannot leave
+        // the parallel stores at different sizes.
+        state.sections.resize(std::min(section, state.sections.size()));
+        state.localSectionKeys.resize(std::min(section, state.localSectionKeys.size()));
+        state.sectionBlockIndices.resize(std::min(section, state.sectionBlockIndices.size()));
+        state.sectionExtraBlockPositions.resize(
+            std::min(section, state.sectionExtraBlockPositions.size())
+        );
+        state.warningFillSectionMeshes.resize(
+            std::min(section, state.warningFillSectionMeshes.size())
+        );
+        state.correctionOutlineSectionMeshes.resize(
+            std::min(section, state.correctionOutlineSectionMeshes.size())
+        );
+        state.wrongFillSectionMeshes.resize(
+            std::min(section, state.wrongFillSectionMeshes.size())
+        );
+        state.wrongOutlineSectionMeshes.resize(
+            std::min(section, state.wrongOutlineSectionMeshes.size())
+        );
+        state.nativeLiquidSectionMeshes.resize(
+            std::min(section, state.nativeLiquidSectionMeshes.size())
+        );
+        state.praxisCompatLiquidSections.resize(
+            std::min(section, state.praxisCompatLiquidSections.size())
+        );
+        state.liquidProxySectionMeshes.resize(
+            std::min(section, state.liquidProxySectionMeshes.size())
+        );
+        state.nativeLiquidSectionCellCounts.resize(
+            std::min(section, state.nativeLiquidSectionCellCounts.size())
+        );
+        state.liquidProxySectionCellCounts.resize(
+            std::min(section, state.liquidProxySectionCellCounts.size())
+        );
+        state.blockEntityPlaceholderSectionMeshes.resize(
+            std::min(section, state.blockEntityPlaceholderSectionMeshes.size())
+        );
+        return kInvalidSection;
+    }
 }
 
 } // namespace
@@ -102,7 +230,22 @@ CorrectionProgressChanges updateCorrectionTracker(
     structure::LayerAxis            layerAxis
 ) {
     CorrectionProgressChanges changes;
+    if (!state.structure || !state.expectedWorldBlockIndices) return changes;
+
     auto const totalBlocks = state.structure->renderBlocks.size();
+    // All per-block arrays must be index-aligned with renderBlocks. If a prior
+    // allocation or lifecycle fault broke that invariant, skip correction
+    // work rather than turning it into an out-of-bounds access.
+    if (state.correctionStates.size() < totalBlocks
+        || state.progressCorrect.size() < totalBlocks
+        || state.progressErrorKind.size() < totalBlocks
+        || state.blockToSection.size() < totalBlocks) {
+        return changes;
+    }
+    if (state.correctionScanCursor > totalBlocks) {
+        state.correctionScanCursor = totalBlocks;
+    }
+
     // Share one fixed world-read budget between initial cache population and
     // incremental block notifications.
     constexpr std::size_t kCorrectionChecksPerFrame = 4096;
@@ -110,6 +253,7 @@ CorrectionProgressChanges updateCorrectionTracker(
     bool const identityTransform = mirrorMode == 0 && rotationTurns == 0;
 
     auto const updateCorrection = [&](std::size_t index) {
+        if (index >= totalBlocks) return;
         auto const& entry = state.structure->renderBlocks[index];
         auto const visible = isLayerVisible(
             layerAxis == structure::LayerAxis::X ? entry.x : entry.y,
@@ -161,12 +305,18 @@ CorrectionProgressChanges updateCorrectionTracker(
         if (nowCorrect != wasCorrect) {
             state.progressCorrect[index] = nowCorrect ? 1 : 0;
             ++state.progressRevision;
-            if (nowCorrect) ++state.progressCorrectCount;
-            else --state.progressCorrectCount;
+            if (nowCorrect) {
+                ++state.progressCorrectCount;
+            } else if (state.progressCorrectCount != 0) {
+                --state.progressCorrectCount;
+            }
             changes.overall = true;
             if (visible) {
-                if (nowCorrect) ++state.progressVisibleCorrectCount;
-                else --state.progressVisibleCorrectCount;
+                if (nowCorrect) {
+                    ++state.progressVisibleCorrectCount;
+                } else if (state.progressVisibleCorrectCount != 0) {
+                    --state.progressVisibleCorrectCount;
+                }
                 changes.visible = true;
             }
         }
@@ -175,8 +325,11 @@ CorrectionProgressChanges updateCorrectionTracker(
             : uchar{0};
         auto const previousErrorKind = state.progressErrorKind[index];
         if (nextErrorKind != previousErrorKind) {
-            if (previousErrorKind == 1) --state.progressWrongTypeCount;
-            else if (previousErrorKind == 2) --state.progressWrongStateCount;
+            if (previousErrorKind == 1) {
+                if (state.progressWrongTypeCount != 0) --state.progressWrongTypeCount;
+            } else if (previousErrorKind == 2) {
+                if (state.progressWrongStateCount != 0) --state.progressWrongStateCount;
+            }
             if (nextErrorKind == 1) ++state.progressWrongTypeCount;
             else if (nextErrorKind == 2) ++state.progressWrongStateCount;
             state.progressErrorKind[index] = nextErrorKind;
@@ -188,7 +341,10 @@ CorrectionProgressChanges updateCorrectionTracker(
         if (!visible) return;
         if (state.correctionStates[index] != nextState) {
             state.correctionStates[index] = nextState;
-            markSectionDirty(state, state.blockToSection[index]);
+            auto const section = state.blockToSection[index];
+            if (sectionStorageContains(state, section)) {
+                markSectionDirty(state, section);
+            }
             // A missing-cell shell omits faces shared with adjacent missing
             // cells. If either side changes, both section meshes may need an
             // exposed face added or removed (including across 16^3 borders).
@@ -200,8 +356,12 @@ CorrectionProgressChanges updateCorrectionTracker(
                 auto const neighbor = state.expectedWorldBlockIndices->find(std::tuple{
                     position.x + delta[0], position.y + delta[1], position.z + delta[2]
                 });
-                if (neighbor != state.expectedWorldBlockIndices->end()) {
-                    markSectionDirty(state, state.blockToSection[neighbor->second]);
+                if (neighbor != state.expectedWorldBlockIndices->end()
+                    && neighbor->second < state.blockToSection.size()) {
+                    auto const neighborSection = state.blockToSection[neighbor->second];
+                    if (sectionStorageContains(state, neighborSection)) {
+                        markSectionDirty(state, neighborSection);
+                    }
                 }
             }
         }
@@ -237,7 +397,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                 ++state.progressExtraCount;
             } else {
                 state.detectedExtraBlockPositions.erase(detected);
-                --state.progressExtraCount;
+                if (state.progressExtraCount != 0) --state.progressExtraCount;
             }
             changes.errors = true;
         }
@@ -252,12 +412,14 @@ CorrectionProgressChanges updateCorrectionTracker(
                 localPosition, *state.structure, mirrorMode, rotationTurns
             );
             section = ensureCorrectionSection(state, localPosition, transformedPosition);
+            if (section == kInvalidSection || !sectionStorageContains(state, section)) return;
             state.extraBlockPositions.insert(key);
             state.sectionExtraBlockPositions[section].insert(key);
         } else {
             auto const sectionFound = state.localSectionIndices.find(localSectionKey(localPosition));
             if (sectionFound == state.localSectionIndices.end()) return;
             section = sectionFound->second;
+            if (!sectionStorageContains(state, section)) return;
             state.extraBlockPositions.erase(rendered);
             state.sectionExtraBlockPositions[section].erase(key);
         }
@@ -273,7 +435,10 @@ CorrectionProgressChanges updateCorrectionTracker(
                 localPosition.z + delta[2],
             };
             auto const found = state.localSectionIndices.find(localSectionKey(neighbor));
-            if (found != state.localSectionIndices.end()) markSectionDirty(state, found->second);
+            if (found != state.localSectionIndices.end()
+                && sectionStorageContains(state, found->second)) {
+                markSectionDirty(state, found->second);
+            }
         }
     };
 
@@ -327,7 +492,10 @@ CorrectionProgressChanges updateCorrectionTracker(
     state.pendingLoadedSubChunks.insert(loadedSubChunks.begin(), loadedSubChunks.end());
 
     auto const scanRemaining = totalBlocks - state.correctionScanCursor;
-    auto const checks = std::min(scanRemaining, kCorrectionChecksPerFrame - correctionChecks);
+    auto const remainingBudget = correctionChecks >= kCorrectionChecksPerFrame
+        ? std::size_t{0}
+        : kCorrectionChecksPerFrame - correctionChecks;
+    auto const checks = std::min(scanRemaining, remainingBudget);
     for (std::size_t checked = 0; checked < checks; ++checked) {
         updateCorrection(state.correctionScanCursor++);
     }
@@ -339,6 +507,11 @@ CorrectionProgressChanges updateCorrectionTracker(
     while (correctionChecks < kCorrectionChecksPerFrame
         && state.extraScanRegion < state.structure->regions.size()) {
         auto const& box = state.structure->regions[state.extraScanRegion];
+        if (box.sizeX <= 0 || box.sizeY <= 0 || box.sizeZ <= 0) {
+            ++state.extraScanRegion;
+            state.extraScanCell = 0;
+            continue;
+        }
         auto const regionVolume = static_cast<std::uint64_t>(box.sizeX)
             * static_cast<std::uint64_t>(box.sizeY) * static_cast<std::uint64_t>(box.sizeZ);
         if (state.extraScanCell >= regionVolume) {
@@ -381,7 +554,7 @@ CorrectionProgressChanges updateCorrectionTracker(
     // A newly received client subchunk may not emit one block notification per
     // cell. Refresh only its projected cells, capped to one 16^3 region/frame.
     if (state.correctionScanCursor == totalBlocks
-        && state.extraScanRegion == state.structure->regions.size()
+        && state.extraScanRegion >= state.structure->regions.size()
         && correctionChecks == 0
         && !state.pendingLoadedSubChunks.empty()) {
         auto loaded = state.pendingLoadedSubChunks.begin();
@@ -427,3 +600,5 @@ CorrectionProgressChanges updateCorrectionTracker(
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

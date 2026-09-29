@@ -1,3 +1,5 @@
+[Reading 25 lines from start (total: 25 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -12,7 +14,7 @@ namespace lholo::projection::detail {
 class ProjectionController {
 public:
     bool installHooks();
-    void uninstallHooks();
+    bool uninstallHooks();
     void disableProjection();
 
 private:
@@ -23,3 +25,5 @@ private:
 ProjectionController& projectionController();
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

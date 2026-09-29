@@ -1,3 +1,5 @@
+[Reading 208 lines from start (total: 208 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 
@@ -38,6 +40,15 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     ProjectionInvalidationSettings const& settings
 ) {
     ProjectionInvalidationResult result;
+    if (!state.structure) return result;
+
+    auto const blockCount = state.structure->renderBlocks.size();
+    if (state.blockToSection.size() < blockCount
+        || state.correctionStates.size() < blockCount
+        || state.progressCorrect.size() < blockCount) {
+        return result;
+    }
+
     result.geometryTransformChanged = state.cachedRotation != settings.rotationTurns
         || state.cachedMirror != settings.mirrorMode;
     result.placementMoved = state.cachedOffsetX != settings.offsetX
@@ -98,7 +109,10 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             auto const& entry = state.structure->renderBlocks[index];
             auto const visible = layerIsVisible(entry);
             if (oldLayerVisible(entry) == visible) continue;
-            markSectionDirty(state, state.blockToSection[index], false);
+            auto const section = state.blockToSection[index];
+            if (section < state.sections.size()) {
+                markSectionDirty(state, section, false);
+            }
             state.correctionStates[index] = visible
                 ? CorrectionState::Unknown
                 : CorrectionState::Correct;
@@ -194,3 +208,5 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

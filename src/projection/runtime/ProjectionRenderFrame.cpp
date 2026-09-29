@@ -1,3 +1,5 @@
+[Reading 619 lines from start (total: 619 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -32,6 +34,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+
+#include <Windows.h>
 #include <exception>
 #include <memory>
 #include <tuple>
@@ -66,7 +71,28 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
     // for both the ScreenContext camera and IClientInstance::getCamera().
     auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
     if (!impl) return {};
-    return {impl[10], impl[11], impl[12]};
+
+    // mImpl is opaque in 1.26.x. Validate that the full span containing the
+    // three verified camera floats is readable before touching it, so a stale
+    // render context during teardown fails closed instead of AVing.
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(impl, &memory, sizeof(memory)) != sizeof(memory)
+        || memory.State != MEM_COMMIT
+        || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return {};
+    }
+    auto const begin = reinterpret_cast<std::uintptr_t>(impl);
+    auto const end = begin + 13U * sizeof(float);
+    auto const regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress)
+        + memory.RegionSize;
+    if (end < begin || end > regionEnd) return {};
+
+    Vec3 const camera{impl[10], impl[11], impl[12]};
+    if (!std::isfinite(camera.x) || !std::isfinite(camera.y)
+        || !std::isfinite(camera.z)) {
+        return {};
+    }
+    return camera;
 }
 
 void resetWorldAfterExit() {
@@ -92,6 +118,9 @@ bool enableStructureProjection(
     if (!prepareProjectionState(next, renderContext, std::move(loaded))) return false;
     auto& client = renderContext.mClientInstance;
     auto* player = client.getLocalPlayer();
+    // prepareProjectionState() checked the player earlier, but world/dimension
+    // transitions may invalidate it before this function continues.
+    if (!player) return false;
     if (auto const anchor = ProjectionSession::getInstance().consumeAnchor()) {
         next.anchor = BlockPos{anchor->x, anchor->y, anchor->z};
     } else {
@@ -158,10 +187,16 @@ void renderProjection(
     auto& client = renderContext.mClientInstance;
     auto* player  = client.getLocalPlayer();
 
+    // The render callback can race a world/dimension transition. Never
+    // dereference a player or immutable projection maps after they disappear.
+    if (!player || !state.structure || !state.blockTessellator
+        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
+        || !state.expectedWorldBlockIndices || !state.expectedWorldBlockActors) {
+        return;
+    }
+
     auto& tessellator = renderContext.mScreenContext.tessellator;
     Vec3 const camera = renderCameraPosition(renderContext);
-
-    if (!state.blockTessellator) return;
     if (!renderAlphaLayer) {
         auto const mirrorMode = structure::getMirrorMode();
         auto const rotationTurns = structure::getRotationQuarterTurns();
@@ -584,3 +619,5 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

@@ -1,3 +1,5 @@
+[Reading 1192 lines from start (total: 1192 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -40,6 +42,7 @@
 #include <cfloat>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 
 #include "input/MenuInputGuard.h"
 #include "plugin/LHolo.h"
@@ -92,6 +95,8 @@ WNDPROC gOriginalWndProc{};
 std::atomic_bool gInstalled{false};
 std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
+std::atomic_uint gHookCallbacks{};
+thread_local unsigned int gHookCallbackDepth{};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
 std::mutex       gInputStateMutex;
@@ -121,6 +126,36 @@ std::atomic_int gMenuCursorShowCount{};
 std::array<bool, 256> gGameKeysDown{};
 std::array<bool, 5>   gGameMouseButtonsDown{};
 std::atomic_bool      gConsumeEscapeRelease{false};
+
+struct HookCallbackGuard {
+    HookCallbackGuard() noexcept {
+        ++gHookCallbackDepth;
+        gHookCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    }
+    HookCallbackGuard(HookCallbackGuard const&) = delete;
+    HookCallbackGuard& operator=(HookCallbackGuard const&) = delete;
+    ~HookCallbackGuard() {
+        gHookCallbacks.fetch_sub(1, std::memory_order_acq_rel);
+        --gHookCallbackDepth;
+    }
+};
+
+bool insideHookCallback() noexcept {
+    return gHookCallbackDepth != 0;
+}
+
+void waitForHookCallbacks() noexcept {
+    // Hooks are disabled before this is called, so the count is converging to
+    // zero. Require it to remain zero across a yield to cover a detour that was
+    // already in flight while MinHook restored the target bytes.
+    for (;;) {
+        while (gHookCallbacks.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+        std::this_thread::yield();
+        if (gHookCallbacks.load(std::memory_order_acquire) == 0) return;
+    }
+}
 
 constexpr ULONGLONG kFullscreenGraphicsResumeDelayMs = 750;
 constexpr ULONGLONG kResizeGraphicsResumeDelayMs     = 100;
@@ -474,6 +509,12 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    HookCallbackGuard callbackGuard;
+    if (gShuttingDown.load(std::memory_order_acquire)) {
+        return gOriginalWndProc
+            ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
+            : DefWindowProcW(window, message, wParam, lParam);
+    }
     if (message == kMsgAcquireMenuCursor) {
         acquireMenuCursor();
         return 0;
@@ -607,7 +648,11 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 void executeCommandListsHook(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
-    if (!gGameQueue && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    HookCallbackGuard callbackGuard;
+    if (!gShuttingDown.load(std::memory_order_acquire)
+        && queue
+        && !gGameQueue
+        && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
         std::lock_guard lock(gResourceMutex);
         if (!gGameQueue) {
             gGameQueue = queue;
@@ -837,7 +882,8 @@ void render(IDXGISwapChain* swapChain) {
 }
 
 HRESULT __stdcall presentHook(IDXGISwapChain* swapChain, UINT interval, UINT flags) {
-    render(swapChain);
+    HookCallbackGuard callbackGuard;
+    if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
     return gOriginalPresent(swapChain, interval, flags);
 }
 
@@ -847,7 +893,8 @@ HRESULT __stdcall present1Hook(
     UINT flags,
     DXGI_PRESENT_PARAMETERS const* parameters
 ) {
-    render(swapChain);
+    HookCallbackGuard callbackGuard;
+    if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
     return gOriginalPresent1(swapChain, interval, flags, parameters);
 }
 
@@ -859,6 +906,10 @@ HRESULT __stdcall resizeHook(
     DXGI_FORMAT format,
     UINT flags
 ) {
+    HookCallbackGuard callbackGuard;
+    if (gShuttingDown.load(std::memory_order_acquire)) {
+        return gOriginalResizeBuffers(swapChain, count, width, height, format, flags);
+    }
     std::unique_lock lock(gResourceMutex);
     if (gActiveSwapChain != swapChain) {
         lock.unlock();
@@ -890,6 +941,19 @@ HRESULT __stdcall resize1Hook(
     UINT const* creationNodeMask,
     IUnknown* const* presentQueue
 ) {
+    HookCallbackGuard callbackGuard;
+    if (gShuttingDown.load(std::memory_order_acquire)) {
+        return gOriginalResizeBuffers1(
+            swapChain,
+            count,
+            width,
+            height,
+            format,
+            flags,
+            creationNodeMask,
+            presentQueue
+        );
+    }
     std::unique_lock lock(gResourceMutex);
     if (gActiveSwapChain != static_cast<IDXGISwapChain*>(swapChain)) {
         lock.unlock();
@@ -926,10 +990,15 @@ bool installHook(void* target, void* detour, void** original) {
     return target && MH_CreateHook(target, detour, original) == MH_OK && MH_EnableHook(target) == MH_OK;
 }
 
+bool disableHook(void* target) {
+    if (!target) return true;
+    auto const status = MH_DisableHook(target);
+    return status == MH_OK || status == MH_ERROR_DISABLED || status == MH_ERROR_NOT_CREATED;
+}
+
 void removeHook(void*& target) {
     if (!target) return;
-    MH_DisableHook(target);
-    MH_RemoveHook(target);
+    (void)MH_RemoveHook(target);
     target = nullptr;
 }
 
@@ -937,7 +1006,7 @@ void removeHook(void*& target) {
 
 namespace {
 
-void shutdownLocked();
+bool shutdownLocked();
 
 } // namespace
 
@@ -950,7 +1019,7 @@ bool ensureInstalled() {
     if (GetTickCount64() < gInstallRetryAt.load(std::memory_order_acquire)) return false;
 
     auto failInstall = [&]() {
-        shutdownLocked();
+        (void)shutdownLocked();
         gInstallRetryAt.store(
             GetTickCount64() + kInstallRetryIntervalMs,
             std::memory_order_release
@@ -1034,22 +1103,60 @@ bool ensureInstalled() {
 
 namespace {
 
-void shutdownLocked() {
+bool shutdownLocked() {
+    // Waiting for callbacks from inside one of those callbacks would deadlock,
+    // while removing the hook underneath the current instruction pointer can
+    // crash. Refuse the unload so LeviLamina keeps this DLL resident.
+    if (insideHookCallback()) {
+        logger().error("Overlay teardown requested from inside an overlay callback");
+        return false;
+    }
+
     gShuttingDown.store(true, std::memory_order_release);
-    companion::shutdown();
     gMouseHandoffActive.store(false, std::memory_order_release);
+
+    // First stop new detour entries. Do not remove the trampolines or destroy
+    // shared D3D/ImGui state until every callback that entered earlier leaves.
+    bool hooksDisabled = true;
+    hooksDisabled = disableHook(gExecuteTarget) && hooksDisabled;
+    hooksDisabled = disableHook(gResize1Target) && hooksDisabled;
+    hooksDisabled = disableHook(gPresent1Target) && hooksDisabled;
+    hooksDisabled = disableHook(gResizeTarget) && hooksDisabled;
+    hooksDisabled = disableHook(gPresentTarget) && hooksDisabled;
+    if (gOriginalWndProc && gWindow && IsWindow(gWindow)) {
+        SetLastError(0);
+        auto const previous = SetWindowLongPtrW(
+            gWindow,
+            GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(gOriginalWndProc)
+        );
+        if (previous == 0 && GetLastError() != 0) {
+            hooksDisabled = false;
+        }
+    }
+
+    if (!hooksDisabled) {
+        logger().error("Overlay hook disable failed; retaining LHolo DLL and graphics state");
+        return false;
+    }
+
+    waitForHookCallbacks();
+
+    // Praxis callbacks run inside Present/WndProc and have their own reader
+    // barrier. After the outer hook drain, clearing the bridge cannot race UI
+    // code executing in the companion DLL.
+    companion::shutdown();
+
     // Best effort: leave the cursor exactly where Minecraft expects it if the
     // mod is unloaded while the menu is still open.
     releaseMenuCursor();
     ClipCursor(nullptr);
+
     removeHook(gExecuteTarget);
     removeHook(gResize1Target);
     removeHook(gPresent1Target);
     removeHook(gResizeTarget);
     removeHook(gPresentTarget);
-    if (gOriginalWndProc && gWindow && IsWindow(gWindow)) {
-        SetWindowLongPtrW(gWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(gOriginalWndProc));
-    }
     gOriginalWndProc = nullptr;
 
     std::lock_guard lock(gResourceMutex);
@@ -1074,13 +1181,16 @@ void shutdownLocked() {
     gGuiVisibleLastFrame = false;
     gWindow = nullptr;
     gInstalled.store(false, std::memory_order_release);
+    return true;
 }
 
 } // namespace
 
-void shutdown() {
+bool shutdown() {
     std::lock_guard installLock(gInstallMutex);
-    shutdownLocked();
+    return shutdownLocked();
 }
 
 } // namespace lholo::overlay
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

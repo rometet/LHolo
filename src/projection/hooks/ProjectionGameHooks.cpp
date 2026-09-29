@@ -1,8 +1,11 @@
+[Reading 342 lines from start (total: 342 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/hooks/ProjectionGameHooks.h"
 
+#include "app/HookLifecycle.h"
 #include "overlay/ImGuiOverlay.h"
 #include "plugin/LHolo.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -69,7 +72,12 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
-    if (auto const* block = findTessellationBlock(position)) return *block;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
+    try {
+        if (auto const* block = findTessellationBlock(position)) return *block;
+    } catch (...) {
+    }
     return origin(position);
 }
 
@@ -82,10 +90,15 @@ LL_TYPE_INSTANCE_HOOK(
     BlockPos const& position,
     uint layer
 ) {
-    if (layer == 0) {
-        if (auto const* block = findTessellationBlock(position)) return *block;
-    } else if (layer == 1) {
-        if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position, layer);
+    try {
+        if (layer == 0) {
+            if (auto const* block = findTessellationBlock(position)) return *block;
+        } else if (layer == 1) {
+            if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+        }
+    } catch (...) {
     }
     return origin(position, layer);
 }
@@ -98,7 +111,12 @@ LL_TYPE_INSTANCE_HOOK(
     Block const&,
     BlockPos const& position
 ) {
-    if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
+    try {
+        if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+    } catch (...) {
+    }
     return origin(position);
 }
 
@@ -110,7 +128,12 @@ LL_TYPE_INSTANCE_HOOK(
     BlockActor const*,
     BlockPos const& position
 ) {
-    if (auto const* actor = findTessellationBlockActor(position)) return actor;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position);
+    try {
+        if (auto const* actor = findTessellationBlockActor(position)) return actor;
+    } catch (...) {
+    }
     return origin(position);
 }
 
@@ -131,7 +154,12 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
-    if (regionWritesSuppressed()) return true;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) return origin(position, block, updateFlags, syncMsg, changeSourceContext);
+    try {
+        if (regionWritesSuppressed()) return true;
+    } catch (...) {
+    }
     return origin(position, block, updateFlags, syncMsg, changeSourceContext);
 }
 
@@ -152,7 +180,14 @@ LL_TYPE_INSTANCE_HOOK(
     ActorBlockSyncMessage const*    syncMsg,
     BlockChangeContext const&       changeSourceContext
 ) {
-    if (regionWritesSuppressed()) return true;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
+    }
+    try {
+        if (regionWritesSuppressed()) return true;
+    } catch (...) {
+    }
     return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
 }
 
@@ -164,8 +199,18 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     Packet& packet
 ) {
-    if (filterProjectionPacket(packet)) return;
-    origin(packet);
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(packet);
+        return;
+    }
+    bool consumed{};
+    try {
+        consumed = filterProjectionPacket(packet);
+    } catch (...) {
+        consumed = false;
+    }
+    if (!consumed) origin(packet);
 }
 
 LL_TYPE_INSTANCE_HOOK(
@@ -176,75 +221,126 @@ LL_TYPE_INSTANCE_HOOK(
     void,
     Packet& packet
 ) {
-    if (filterProjectionPacket(packet)) return;
-    origin(packet);
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(packet);
+        return;
+    }
+    bool consumed{};
+    try {
+        consumed = filterProjectionPacket(packet);
+    } catch (...) {
+        consumed = false;
+    }
+    if (!consumed) origin(packet);
+}
+
+} // namespace
+
+namespace {
+
+struct ProjectionGameHookStatus {
+    bool getBlock{};
+    bool getBlockLayer{};
+    bool getBlockEntity{};
+    bool getLiquid{};
+    bool setBlock{};
+    bool setBlockWithActor{};
+    bool sendToServer{};
+    bool send{};
+};
+
+ProjectionGameHookStatus gProjectionGameHookStatus;
+
+template <class Unhook>
+void removeTrackedHook(bool& installed, Unhook&& unhook, bool& ok) {
+    if (!installed) return;
+    if (unhook()) installed = false;
+    else ok = false;
 }
 
 } // namespace
 
 bool installProjectionGameHooks() {
-    if (BlockSourceGetBlockHook::hook() < 0) return false;
-    if (BlockSourceGetBlockLayerHook::hook() < 0) {
-        BlockSourceGetBlockHook::unhook();
+    auto fail = [] {
+        (void)uninstallProjectionGameHooks();
         return false;
-    }
-    if (BlockSourceGetBlockEntityHook::hook() < 0) {
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceGetLiquidBlockHook::hook() < 0) {
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceSetBlockHook::hook() < 0) {
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (BlockSourceSetBlockWithActorHook::hook() < 0) {
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (LoopbackPacketSenderSendToServerHook::hook() < 0) {
-        BlockSourceSetBlockWithActorHook::unhook();
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
-    if (LoopbackPacketSenderSendHook::hook() < 0) {
-        LoopbackPacketSenderSendToServerHook::unhook();
-        BlockSourceSetBlockWithActorHook::unhook();
-        BlockSourceSetBlockHook::unhook();
-        BlockSourceGetLiquidBlockHook::unhook();
-        BlockSourceGetBlockEntityHook::unhook();
-        BlockSourceGetBlockLayerHook::unhook();
-        BlockSourceGetBlockHook::unhook();
-        return false;
-    }
+    };
+
+    gProjectionGameHookStatus.getBlock = BlockSourceGetBlockHook::hook() == 0;
+    if (!gProjectionGameHookStatus.getBlock) return false;
+
+    gProjectionGameHookStatus.getBlockLayer = BlockSourceGetBlockLayerHook::hook() == 0;
+    if (!gProjectionGameHookStatus.getBlockLayer) return fail();
+
+    gProjectionGameHookStatus.getBlockEntity = BlockSourceGetBlockEntityHook::hook() == 0;
+    if (!gProjectionGameHookStatus.getBlockEntity) return fail();
+
+    gProjectionGameHookStatus.getLiquid = BlockSourceGetLiquidBlockHook::hook() == 0;
+    if (!gProjectionGameHookStatus.getLiquid) return fail();
+
+    gProjectionGameHookStatus.setBlock = BlockSourceSetBlockHook::hook() == 0;
+    if (!gProjectionGameHookStatus.setBlock) return fail();
+
+    gProjectionGameHookStatus.setBlockWithActor =
+        BlockSourceSetBlockWithActorHook::hook() == 0;
+    if (!gProjectionGameHookStatus.setBlockWithActor) return fail();
+
+    gProjectionGameHookStatus.sendToServer =
+        LoopbackPacketSenderSendToServerHook::hook() == 0;
+    if (!gProjectionGameHookStatus.sendToServer) return fail();
+
+    gProjectionGameHookStatus.send = LoopbackPacketSenderSendHook::hook() == 0;
+    if (!gProjectionGameHookStatus.send) return fail();
+
     return true;
 }
 
-void uninstallProjectionGameHooks() {
-    LoopbackPacketSenderSendHook::unhook();
-    LoopbackPacketSenderSendToServerHook::unhook();
-    BlockSourceSetBlockWithActorHook::unhook();
-    BlockSourceSetBlockHook::unhook();
-    BlockSourceGetLiquidBlockHook::unhook();
-    BlockSourceGetBlockEntityHook::unhook();
-    BlockSourceGetBlockLayerHook::unhook();
-    BlockSourceGetBlockHook::unhook();
+bool uninstallProjectionGameHooks() {
+    bool ok = true;
+    removeTrackedHook(
+        gProjectionGameHookStatus.send,
+        [] { return LoopbackPacketSenderSendHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.sendToServer,
+        [] { return LoopbackPacketSenderSendToServerHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.setBlockWithActor,
+        [] { return BlockSourceSetBlockWithActorHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.setBlock,
+        [] { return BlockSourceSetBlockHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.getLiquid,
+        [] { return BlockSourceGetLiquidBlockHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.getBlockEntity,
+        [] { return BlockSourceGetBlockEntityHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.getBlockLayer,
+        [] { return BlockSourceGetBlockLayerHook::unhook(); },
+        ok
+    );
+    removeTrackedHook(
+        gProjectionGameHookStatus.getBlock,
+        [] { return BlockSourceGetBlockHook::unhook(); },
+        ok
+    );
+    return ok;
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]

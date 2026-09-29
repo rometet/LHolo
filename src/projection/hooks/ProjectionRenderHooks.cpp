@@ -1,8 +1,11 @@
+[Reading 112 lines from start (total: 112 lines, 0 remaining)]
+
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/hooks/ProjectionRenderHooks.h"
 
+#include "app/HookLifecycle.h"
 #include "overlay/ImGuiOverlay.h"
 #include "projection/runtime/ProjectionRenderFrame.h"
 
@@ -27,7 +30,16 @@ LL_TYPE_INSTANCE_HOOK(
     BlockPos const&         pos,
     bool                    fancyGraphics
 ) {
-    if (shouldSuppressProjectionHitSelect(pos)) return;
+    app::hook_lifecycle::DetourGuard guard;
+    if (!guard) {
+        origin(renderContext, region, pos, fancyGraphics);
+        return;
+    }
+    try {
+        if (shouldSuppressProjectionHitSelect(pos)) return;
+    } catch (...) {
+        // A projection query must never unwind through Minecraft's render hook.
+    }
     origin(renderContext, region, pos, fancyGraphics);
 }
 
@@ -40,29 +52,65 @@ LL_TYPE_INSTANCE_HOOK(
     BaseActorRenderContext& renderContext,
     bool                      renderAlphaLayer
 ) {
+    app::hook_lifecycle::DetourGuard guard;
     origin(renderContext, renderAlphaLayer);
-    // The first install attempt can happen before Minecraft exposes a usable
-    // swap chain. Keep retrying from the render path, which is active even
-    // while the menu is hidden and does not depend on Present already being
-    // hooked.
-    (void)overlay::ensureInstalled();
-    renderProjectionFrame(renderContext, renderAlphaLayer);
+    if (!guard) return;
+    try {
+        // The first install attempt can happen before Minecraft exposes a usable
+        // swap chain. Keep retrying from the render path, which is active even
+        // while the menu is hidden and does not depend on Present already being
+        // hooked.
+        (void)overlay::ensureInstalled();
+        renderProjectionFrame(renderContext, renderAlphaLayer);
+    } catch (...) {
+        // Rendering LHolo is optional; an exception here must not cross into
+        // Minecraft's renderer or take the game down.
+    }
 }
 
 } // namespace
 
+namespace {
+
+bool gHitSelectHookInstalled{};
+bool gBlockEntitiesHookInstalled{};
+
+} // namespace
+
 bool installProjectionRenderHooks() {
-    if (LevelRendererPlayerRenderHitSelectHook::hook() < 0) return false;
-    if (LevelRendererPlayerRenderBlockEntitiesHook::hook() < 0) {
-        LevelRendererPlayerRenderHitSelectHook::unhook();
+    gHitSelectHookInstalled = LevelRendererPlayerRenderHitSelectHook::hook() == 0;
+    if (!gHitSelectHookInstalled) return false;
+
+    gBlockEntitiesHookInstalled =
+        LevelRendererPlayerRenderBlockEntitiesHook::hook() == 0;
+    if (!gBlockEntitiesHookInstalled) {
+        if (LevelRendererPlayerRenderHitSelectHook::unhook()) {
+            gHitSelectHookInstalled = false;
+        }
         return false;
     }
     return true;
 }
 
-void uninstallProjectionRenderHooks() {
-    LevelRendererPlayerRenderBlockEntitiesHook::unhook();
-    LevelRendererPlayerRenderHitSelectHook::unhook();
+bool uninstallProjectionRenderHooks() {
+    bool ok = true;
+    if (gBlockEntitiesHookInstalled) {
+        if (LevelRendererPlayerRenderBlockEntitiesHook::unhook()) {
+            gBlockEntitiesHookInstalled = false;
+        } else {
+            ok = false;
+        }
+    }
+    if (gHitSelectHookInstalled) {
+        if (LevelRendererPlayerRenderHitSelectHook::unhook()) {
+            gHitSelectHookInstalled = false;
+        } else {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 } // namespace lholo::projection::detail
+
+[executed on device: ちひろのPC (a22d5426-96cc-488b-9398-cec6fdb0f382)]
