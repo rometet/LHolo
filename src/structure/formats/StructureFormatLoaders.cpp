@@ -71,9 +71,10 @@ struct PreparedStructureLoad {
     std::uint64_t               secondaryBlocks{};
     std::uint64_t               paletteEntries{};
     std::vector<std::uint64_t>  occupiedIndices;
-    // Present only when the background parser normalized a legacy
-    // List<List<Int>> index payload. Never feed the normalized tree to the
-    // vanilla StructureTemplate fallback; reparse these original bytes instead.
+    // Large block-index layers are kept as primitive arrays and deliberately
+    // omitted from the generic CompoundTag tree.
+    std::vector<std::vector<std::int32_t>> blockIndexLayers;
+    // Original bytes are retained only for the compatibility fallback.
     std::shared_ptr<std::string> fallbackOriginalBytes;
 };
 
@@ -262,6 +263,29 @@ bool collectRenderableCandidates(
     std::uint64_t&                   occupied,
     std::vector<std::uint8_t> const& airPalette,
     std::vector<std::uint8_t>&       candidateMask
+) {
+    if (static_cast<std::uint64_t>(layer.size()) != volume
+        || candidateMask.size() != static_cast<std::size_t>(volume)) {
+        return false;
+    }
+    occupied = 0;
+    for (std::size_t index = 0; index < layer.size(); ++index) {
+        auto const paletteIndex = static_cast<int>(layer[index]);
+        if (paletteIndex < 0) continue;
+        ++occupied;
+        auto const knownAir = static_cast<std::size_t>(paletteIndex) < airPalette.size()
+            && airPalette[static_cast<std::size_t>(paletteIndex)] != 0;
+        if (!knownAir) candidateMask[index] = 1;
+    }
+    return true;
+}
+
+bool collectRenderableCandidates(
+    std::vector<std::int32_t> const&  layer,
+    std::uint64_t                     volume,
+    std::uint64_t&                    occupied,
+    std::vector<std::uint8_t> const&  airPalette,
+    std::vector<std::uint8_t>&        candidateMask
 ) {
     if (static_cast<std::uint64_t>(layer.size()) != volume
         || candidateMask.size() != static_cast<std::size_t>(volume)) {
@@ -549,18 +573,21 @@ std::uint32_t packedPaletteIndex(
     return static_cast<std::uint32_t>(packed & mask);
 }
 
-std::optional<std::string> normalizeLegacyMcstructureBlockIndicesForParsing(
+struct StrippedMcstructureIndices {
+    std::string                              parseBytes;
+    std::vector<std::vector<std::int32_t>>  layers;
+};
+
+std::optional<StrippedMcstructureIndices> stripMcstructureBlockIndices(
     std::string const& bytes
 ) {
-    // Legacy mcstructure files encode block_indices as List<List<Int>>.
-    // CompoundTag's generic parser then allocates one IntTag object per cell.
-    // Convert only the in-memory parse copy to List<IntArray>, whose integer
-    // payload is identical. This normalized tree is never passed to vanilla's
-    // StructureTemplate compatibility path.
+    // Pull the huge block_indices payload out of the generic NBT tree entirely.
+    // The remaining NBT (palette, block_position_data, size, metadata) stays
+    // byte-for-byte unchanged.
     static constexpr std::string_view name{"block_indices"};
     std::string needle;
     needle.reserve(3 + name.size());
-    needle.push_back(static_cast<char>(9));
+    needle.push_back(static_cast<char>(9)); // TAG_List
     needle.push_back(static_cast<char>(name.size() & 0xFFU));
     needle.push_back(static_cast<char>((name.size() >> 8U) & 0xFFU));
     needle.append(name);
@@ -582,45 +609,55 @@ std::optional<std::string> normalizeLegacyMcstructureBlockIndicesForParsing(
         );
     };
 
-    if (static_cast<unsigned char>(bytes[payload]) != 9U) return std::nullopt;
+    auto const outerType = static_cast<unsigned char>(bytes[payload]);
+    if (outerType != 9U && outerType != 11U) return std::nullopt;
     auto const layerCount = readI32(payload + 1);
     if (!layerCount || *layerCount <= 0 || *layerCount > 2) return std::nullopt;
 
+    StrippedMcstructureIndices result;
+    result.layers.resize(static_cast<std::size_t>(*layerCount));
+
     auto cursor = payload + 5;
     for (int layer = 0; layer < *layerCount; ++layer) {
-        if (cursor + 5 > bytes.size()
-            || static_cast<unsigned char>(bytes[cursor]) != 3U) {
-            return std::nullopt;
+        std::size_t countOffset{};
+        std::size_t dataOffset{};
+        if (outerType == 9U) {
+            if (cursor + 5 > bytes.size()
+                || static_cast<unsigned char>(bytes[cursor]) != 3U) {
+                return std::nullopt;
+            }
+            countOffset = cursor + 1;
+            dataOffset = cursor + 5;
+        } else {
+            if (cursor + 4 > bytes.size()) return std::nullopt;
+            countOffset = cursor;
+            dataOffset = cursor + 4;
         }
-        auto const count = readI32(cursor + 1);
+
+        auto const count = readI32(countOffset);
         if (!count || *count < 0) return std::nullopt;
         auto const dataBytes = static_cast<std::uint64_t>(*count) * 4ULL;
         if (dataBytes > bytes.size()
-            || cursor + 5ULL + dataBytes > bytes.size()) {
+            || dataOffset + dataBytes > bytes.size()) {
             return std::nullopt;
         }
-        cursor += 5ULL + static_cast<std::size_t>(dataBytes);
+
+        auto& values = result.layers[static_cast<std::size_t>(layer)];
+        values.resize(static_cast<std::size_t>(*count));
+        if (!values.empty()) {
+            std::memcpy(values.data(), bytes.data() + dataOffset,
+                        static_cast<std::size_t>(dataBytes));
+        }
+        cursor = dataOffset + static_cast<std::size_t>(dataBytes);
     }
 
-    std::string normalized;
-    normalized.reserve(bytes.size() - static_cast<std::size_t>(*layerCount));
-    normalized.append(bytes.data(), payload);
-    normalized.push_back(static_cast<char>(11));
-    normalized.append(bytes.data() + payload + 1, 4);
-
-    cursor = payload + 5;
-    for (int layer = 0; layer < *layerCount; ++layer) {
-        auto const count = readI32(cursor + 1);
-        auto const payloadBytes =
-            4ULL + static_cast<std::uint64_t>(*count) * 4ULL;
-        normalized.append(
-            bytes.data() + cursor + 1,
-            static_cast<std::size_t>(payloadBytes)
-        );
-        cursor += 1ULL + static_cast<std::size_t>(payloadBytes);
-    }
-    normalized.append(bytes.data() + cursor, bytes.size() - cursor);
-    return normalized;
+    // Keep a valid but empty block_indices tag in the generic parse copy.
+    result.parseBytes.reserve(bytes.size() - (cursor - payload) + 5);
+    result.parseBytes.append(bytes.data(), payload);
+    result.parseBytes.push_back(static_cast<char>(11)); // List<IntArray>
+    result.parseBytes.append(4, '\0');                  // zero layers
+    result.parseBytes.append(bytes.data() + cursor, bytes.size() - cursor);
+    return result;
 }
 
 std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
@@ -630,8 +667,8 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     auto bytes = readFile(path, error);
     if (!bytes) return nullptr;
 
-    auto normalized = normalizeLegacyMcstructureBlockIndicesForParsing(*bytes);
-    auto const& parseBytes = normalized ? *normalized : *bytes;
+    auto stripped = stripMcstructureBlockIndices(*bytes);
+    auto const& parseBytes = stripped ? stripped->parseBytes : *bytes;
     auto root = CompoundTag::fromBinaryNbt(parseBytes, true);
     if (!root) {
         error = "不是有效的 Bedrock little-endian NBT: " + root.error().message();
@@ -640,7 +677,8 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
 
     auto prepared = std::make_shared<PreparedStructureLoad>();
     prepared->path = path;
-    if (normalized) {
+    if (stripped) {
+        prepared->blockIndexLayers = std::move(stripped->layers);
         prepared->fallbackOriginalBytes =
             std::make_shared<std::string>(std::move(*bytes));
     }
@@ -686,14 +724,27 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     }
 
     auto const* blockIndices = findList(*structure, "block_indices");
-    if (!blockIndices || blockIndices->empty()
-        || !((*blockIndices)[0].hold<ListTag>() || (*blockIndices)[0].hold<IntArrayTag>())) {
-        error = "block_indices 不是有效的双层索引";
-        return nullptr;
-    }
-    if (blockIndices->size() > 2) {
-        error = "block_indices 包含过多索引层";
-        return nullptr;
+    if (prepared->blockIndexLayers.empty()) {
+        if (!blockIndices || blockIndices->empty()
+            || !((*blockIndices)[0].hold<ListTag>() || (*blockIndices)[0].hold<IntArrayTag>())) {
+            error = "block_indices 不是有效的双层索引";
+            return nullptr;
+        }
+        if (blockIndices->size() > 2) {
+            error = "block_indices 包含过多索引层";
+            return nullptr;
+        }
+    } else {
+        if (prepared->blockIndexLayers.size() > 2) {
+            error = "block_indices 包含过多索引层";
+            return nullptr;
+        }
+        for (auto const& layer : prepared->blockIndexLayers) {
+            if (layer.size() != static_cast<std::size_t>(prepared->volume)) {
+                error = "方块索引数量与结构尺寸不匹配";
+                return nullptr;
+            }
+        }
     }
 
     // Union the two layers into a dense byte mask. This avoids pushing more
@@ -701,7 +752,29 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     std::vector<std::uint8_t> candidateMask(
         static_cast<std::size_t>(prepared->volume), 0
     );
-    if ((*blockIndices)[0].hold<ListTag>()) {
+    if (!prepared->blockIndexLayers.empty()) {
+        if (!collectRenderableCandidates(
+                prepared->blockIndexLayers[0],
+                prepared->volume,
+                prepared->primaryBlocks,
+                airPalette,
+                candidateMask
+            )) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+        if (prepared->blockIndexLayers.size() >= 2
+            && !collectRenderableCandidates(
+                prepared->blockIndexLayers[1],
+                prepared->volume,
+                prepared->secondaryBlocks,
+                airPalette,
+                candidateMask
+            )) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+    } else if ((*blockIndices)[0].hold<ListTag>()) {
         if (!collectRenderableCandidates(
                 (*blockIndices)[0].get<ListTag>(),
                 prepared->volume,
@@ -712,18 +785,17 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
             error = "方块索引数量或类型与结构尺寸不匹配";
             return nullptr;
         }
-        if (blockIndices->size() >= 2) {
-            if (!(*blockIndices)[1].hold<ListTag>()
+        if (blockIndices->size() >= 2
+            && (!(*blockIndices)[1].hold<ListTag>()
                 || !collectRenderableCandidates(
                     (*blockIndices)[1].get<ListTag>(),
                     prepared->volume,
                     prepared->secondaryBlocks,
                     airPalette,
                     candidateMask
-                )) {
-                error = "方块索引数量或类型与结构尺寸不匹配";
-                return nullptr;
-            }
+                ))) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
         }
     } else {
         if (!collectRenderableCandidates(
@@ -736,18 +808,17 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
             error = "方块索引数量或类型与结构尺寸不匹配";
             return nullptr;
         }
-        if (blockIndices->size() >= 2) {
-            if (!(*blockIndices)[1].hold<IntArrayTag>()
+        if (blockIndices->size() >= 2
+            && (!(*blockIndices)[1].hold<IntArrayTag>()
                 || !collectRenderableCandidates(
                     (*blockIndices)[1].get<IntArrayTag>(),
                     prepared->volume,
                     prepared->secondaryBlocks,
                     airPalette,
                     candidateMask
-                )) {
-                error = "方块索引数量或类型与结构尺寸不匹配";
-                return nullptr;
-            }
+                ))) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
         }
     }
 
@@ -800,7 +871,10 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
     // consume the already-parsed index arrays directly. This avoids
     // StructureTemplate::load walking the full structure volume again.
     auto const* stagedBlockIndices = findList(*structure, "block_indices");
-    if (stagedBlockIndices && !stagedBlockIndices->empty()) {
+    auto const stagedLayerCount = !prepared->blockIndexLayers.empty()
+        ? prepared->blockIndexLayers.size()
+        : (stagedBlockIndices ? stagedBlockIndices->size() : 0);
+    if (stagedLayerCount != 0) {
         StructureBlockPalette stagedPalette;
         if (stagedPalette._parseBlockPalette(*defaultPalette)
             == StructureBlockPaletteLoadResult::Success) {
@@ -819,7 +893,14 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
                 }
             }
 
-            auto const paletteIndexAt = [](auto const& layer, std::size_t index) -> int {
+            auto const paletteIndexAt = [&](std::size_t layerIndex, std::size_t index) -> int {
+                if (!prepared->blockIndexLayers.empty()) {
+                    if (layerIndex >= prepared->blockIndexLayers.size()) return -1;
+                    auto const& values = prepared->blockIndexLayers[layerIndex];
+                    return index < values.size() ? static_cast<int>(values[index]) : -1;
+                }
+                if (!stagedBlockIndices || layerIndex >= stagedBlockIndices->size()) return -1;
+                auto const& layer = (*stagedBlockIndices)[layerIndex];
                 if (layer.hold<ListTag>()) {
                     auto const& values = layer.get<ListTag>();
                     if (index >= values.size() || !values[index].hold<IntTag>()) return -1;
@@ -846,10 +927,10 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
             for (auto const index64 : prepared->occupiedIndices) {
                 auto const index = static_cast<std::size_t>(index64);
                 auto const* primary = resolveNative(
-                    paletteIndexAt((*stagedBlockIndices)[0], index)
+                    paletteIndexAt(0, index)
                 );
-                auto const* secondary = stagedBlockIndices->size() >= 2
-                    ? resolveNative(paletteIndexAt((*stagedBlockIndices)[1], index))
+                auto const* secondary = stagedLayerCount >= 2
+                    ? resolveNative(paletteIndexAt(1, index))
                     : nullptr;
 
                 Block const* block{};
