@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+#include "app/HookLifecycle.h"
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
 #include "i18n/Message.h"
@@ -1096,6 +1097,45 @@ void testViewMoveBasis() {
     LHOLO_CHECK(!viewForwardStep(0.0f, 0.0f, -1.0f, 0).valid);
 }
 
+void testHookLifecycle() {
+    using namespace lholo::app::hook_lifecycle;
+
+    LHOLO_CHECK(state() == State::Disabled);
+    LHOLO_CHECK(beginEnable());
+    LHOLO_CHECK(isRunning());
+
+    {
+        DetourGuard runningGuard;
+        LHOLO_CHECK(static_cast<bool>(runningGuard));
+
+        beginQuiesce();
+        LHOLO_CHECK(state() == State::Quiescing);
+        LHOLO_CHECK(!isRunning());
+
+        // A nested LHolo detour on the already-admitted thread stays inside
+        // the outer lease even after quiescing starts; rejecting it mid-stack
+        // could leave the outer callback only partially executed.
+        DetourGuard nestedGuard;
+        LHOLO_CHECK(static_cast<bool>(nestedGuard));
+        LHOLO_CHECK(insideDetour());
+    }
+
+    // New top-level entries are rejected once the admitted outer detour exits.
+    DetourGuard blockedAfterQuiesce;
+    LHOLO_CHECK(!static_cast<bool>(blockedAfterQuiesce));
+
+    waitForQuiescence();
+    markDisabled();
+    LHOLO_CHECK(state() == State::Disabled);
+
+    // Re-enable after a complete teardown must be valid and deterministic.
+    LHOLO_CHECK(beginEnable());
+    beginQuiesce();
+    waitForQuiescence();
+    markDisabled();
+    LHOLO_CHECK(state() == State::Disabled);
+}
+
 void testBlockPlacementRules() {
     using lholo::block::placeableBaseName;
     using lholo::block::materialKey;
@@ -1255,6 +1295,7 @@ int main() {
     testStructureUiState();
     testHotkeyFormat();
     testViewMoveBasis();
+    testHookLifecycle();
     testBlockPlacementRules();
     testJavaTextComponents();
     testI18n();
