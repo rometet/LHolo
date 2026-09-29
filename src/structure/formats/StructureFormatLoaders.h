@@ -17,6 +17,21 @@ struct LoadedStructure;
 
 namespace detail {
 
+struct PreparedStructureLoad;
+
+// .mcstructure can do file I/O, NBT parsing, validation and occupied-cell
+// compaction off the render thread. The final game-registry resolution stays
+// on the render/game thread.
+bool supportsAsyncStructurePreparation(std::filesystem::path const& path);
+std::shared_ptr<PreparedStructureLoad> prepareStructureFile(
+    std::filesystem::path const& path,
+    std::string&                 error
+);
+std::shared_ptr<LoadedStructure> finalizePreparedStructureFile(
+    std::shared_ptr<PreparedStructureLoad> prepared,
+    std::string&                          error
+);
+
 std::shared_ptr<LoadedStructure> loadStructureFile(std::filesystem::path const& path, std::string& error);
 
 } // namespace lholo::structure::detail

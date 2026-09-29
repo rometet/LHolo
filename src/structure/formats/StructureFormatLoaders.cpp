@@ -59,6 +59,20 @@
 #include "mc/world/level/Level.h"
 
 namespace lholo::structure::detail {
+
+struct PreparedStructureLoad {
+    std::filesystem::path       path;
+    std::shared_ptr<CompoundTag> root;
+    int                         sizeX{};
+    int                         sizeY{};
+    int                         sizeZ{};
+    std::uint64_t               volume{};
+    std::uint64_t               primaryBlocks{};
+    std::uint64_t               secondaryBlocks{};
+    std::uint64_t               paletteEntries{};
+    std::vector<std::uint64_t>  occupiedIndices;
+};
+
 namespace {
 
 constexpr std::uintmax_t kMaximumStructureFileSize = 512ull * 1024ull * 1024ull;
@@ -175,23 +189,40 @@ bool readThreeInts(ListTag const& list, int& x, int& y, int& z) {
     return read(0, x) && read(1, y) && read(2, z);
 }
 
-bool inspectBlockLayer(ListTag const& layer, std::uint64_t volume, std::uint64_t& occupied) {
+bool inspectBlockLayer(
+    ListTag const&             layer,
+    std::uint64_t              volume,
+    std::uint64_t&             occupied,
+    std::vector<std::uint64_t>* occupiedIndices = nullptr
+) {
     if (static_cast<std::uint64_t>(layer.size()) != volume) return false;
     occupied = 0;
-    for (auto const& value : layer) {
+    for (std::size_t index = 0; index < layer.size(); ++index) {
+        auto const& value = layer[index];
         if (!value.hold<IntTag>()) return false;
-        if (static_cast<int>(value.get<IntTag>()) >= 0) ++occupied;
+        if (static_cast<int>(value.get<IntTag>()) >= 0) {
+            ++occupied;
+            if (occupiedIndices) occupiedIndices->push_back(index);
+        }
     }
     return true;
 }
 
 // format 2 (1.26.5x+) stores each index layer as a TAG_Int_Array instead of
 // a nested TAG_List of ints.
-bool inspectBlockLayer(IntArrayTag const& layer, std::uint64_t volume, std::uint64_t& occupied) {
+bool inspectBlockLayer(
+    IntArrayTag const&         layer,
+    std::uint64_t              volume,
+    std::uint64_t&             occupied,
+    std::vector<std::uint64_t>* occupiedIndices = nullptr
+) {
     if (static_cast<std::uint64_t>(layer.size()) != volume) return false;
     occupied = 0;
-    for (auto const& value : layer) {
-        if (static_cast<int>(value) >= 0) ++occupied;
+    for (std::size_t index = 0; index < layer.size(); ++index) {
+        if (static_cast<int>(layer[index]) >= 0) {
+            ++occupied;
+            if (occupiedIndices) occupiedIndices->push_back(index);
+        }
     }
     return true;
 }
@@ -464,6 +495,247 @@ std::uint32_t packedPaletteIndex(
     }
     auto const mask = bits == 32 ? 0xffffffffull : ((1ull << bits) - 1ull);
     return static_cast<std::uint32_t>(packed & mask);
+}
+
+std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
+    std::filesystem::path const& path,
+    std::string&                 error
+) {
+    auto bytes = readFile(path, error);
+    if (!bytes) return nullptr;
+
+    auto root = CompoundTag::fromBinaryNbt(*bytes, true);
+    if (!root) {
+        error = "不是有效的 Bedrock little-endian NBT: " + root.error().message();
+        return nullptr;
+    }
+
+    auto prepared = std::make_shared<PreparedStructureLoad>();
+    prepared->path = path;
+    prepared->root = std::make_shared<CompoundTag>(*root);
+
+    auto const* size = findList(*prepared->root, "size");
+    auto const* structure = findCompound(*prepared->root, "structure");
+    if (!size || !structure) {
+        error = "缺少 size 或 structure 标签";
+        return nullptr;
+    }
+    if (!readThreeInts(*size, prepared->sizeX, prepared->sizeY, prepared->sizeZ)
+        || prepared->sizeX <= 0 || prepared->sizeY <= 0 || prepared->sizeZ <= 0) {
+        error = "结构尺寸无效";
+        return nullptr;
+    }
+    prepared->volume = static_cast<std::uint64_t>(prepared->sizeX)
+        * static_cast<std::uint64_t>(prepared->sizeY)
+        * static_cast<std::uint64_t>(prepared->sizeZ);
+
+    auto const* blockIndices = findList(*structure, "block_indices");
+    if (!blockIndices || blockIndices->empty()
+        || !((*blockIndices)[0].hold<ListTag>() || (*blockIndices)[0].hold<IntArrayTag>())) {
+        error = "block_indices 不是有效的双层索引";
+        return nullptr;
+    }
+    if (blockIndices->size() > 2) {
+        error = "block_indices 包含过多索引层";
+        return nullptr;
+    }
+
+    prepared->occupiedIndices.reserve(std::min<std::uint64_t>(
+        prepared->volume, 1U << 20
+    ));
+    if ((*blockIndices)[0].hold<ListTag>()) {
+        if (!inspectBlockLayer(
+                (*blockIndices)[0].get<ListTag>(),
+                prepared->volume,
+                prepared->primaryBlocks,
+                &prepared->occupiedIndices
+            )) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+        if (blockIndices->size() >= 2) {
+            if (!(*blockIndices)[1].hold<ListTag>()
+                || !inspectBlockLayer(
+                    (*blockIndices)[1].get<ListTag>(),
+                    prepared->volume,
+                    prepared->secondaryBlocks,
+                    &prepared->occupiedIndices
+                )) {
+                error = "方块索引数量或类型与结构尺寸不匹配";
+                return nullptr;
+            }
+        }
+    } else {
+        if (!inspectBlockLayer(
+                (*blockIndices)[0].get<IntArrayTag>(),
+                prepared->volume,
+                prepared->primaryBlocks,
+                &prepared->occupiedIndices
+            )) {
+            error = "方块索引数量或类型与结构尺寸不匹配";
+            return nullptr;
+        }
+        if (blockIndices->size() >= 2) {
+            if (!(*blockIndices)[1].hold<IntArrayTag>()
+                || !inspectBlockLayer(
+                    (*blockIndices)[1].get<IntArrayTag>(),
+                    prepared->volume,
+                    prepared->secondaryBlocks,
+                    &prepared->occupiedIndices
+                )) {
+                error = "方块索引数量或类型与结构尺寸不匹配";
+                return nullptr;
+            }
+        }
+    }
+
+    std::sort(prepared->occupiedIndices.begin(), prepared->occupiedIndices.end());
+    prepared->occupiedIndices.erase(
+        std::unique(prepared->occupiedIndices.begin(), prepared->occupiedIndices.end()),
+        prepared->occupiedIndices.end()
+    );
+
+    auto const* palette = findCompound(*structure, "palette");
+    auto const* defaultPalette = palette ? findCompound(*palette, "default") : nullptr;
+    auto const* blockPalette = defaultPalette ? findList(*defaultPalette, "block_palette") : nullptr;
+    if (!blockPalette) {
+        error = "缺少 palette.default.block_palette";
+        return nullptr;
+    }
+    prepared->paletteEntries = static_cast<std::uint64_t>(blockPalette->size());
+    return prepared;
+}
+
+std::shared_ptr<LoadedStructure> finalizeMcstructure(
+    std::shared_ptr<PreparedStructureLoad> const& prepared,
+    std::string&                                  error
+) {
+    if (!prepared || !prepared->root) {
+        error = "结构预解析数据无效";
+        return nullptr;
+    }
+
+    auto loaded = std::make_shared<LoadedStructure>();
+    loaded->sizeX = prepared->sizeX;
+    loaded->sizeY = prepared->sizeY;
+    loaded->sizeZ = prepared->sizeZ;
+    loaded->volume = prepared->volume;
+    loaded->primaryBlocks = prepared->primaryBlocks;
+    loaded->secondaryBlocks = prepared->secondaryBlocks;
+    loaded->paletteEntries = prepared->paletteEntries;
+    loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ});
+
+    auto const* structure = findCompound(*prepared->root, "structure");
+    auto const* palette = structure ? findCompound(*structure, "palette") : nullptr;
+    auto const* defaultPalette = palette ? findCompound(*palette, "default") : nullptr;
+    auto const* blockPositionData = defaultPalette
+        ? findCompound(*defaultPalette, "block_position_data") : nullptr;
+    if (!structure || !defaultPalette) {
+        error = "结构预解析数据缺少 palette/default";
+        return nullptr;
+    }
+
+    auto const clientLevel = ll::service::getMultiPlayerLevel();
+    if (!clientLevel) {
+        error = "尚未进入世界，无法解析结构";
+        return nullptr;
+    }
+    auto nativeStructure = std::make_unique<StructureTemplate>(
+        "lholo:projection",
+        clientLevel->getUnknownBlockTypeRegistry()
+    );
+    if (!nativeStructure->load(*prepared->root)) {
+        error = "原版 StructureTemplate 无法加载该结构";
+        return nullptr;
+    }
+
+    auto const& nativeData = nativeStructure->mStructureTemplateData.get();
+    auto const& nativeSize = nativeData.mSize.get();
+    if (nativeSize.x != loaded->sizeX
+        || nativeSize.y != loaded->sizeY
+        || nativeSize.z != loaded->sizeZ) {
+        error = "原版 StructureTemplate 返回的尺寸与文件不一致";
+        return nullptr;
+    }
+    auto const* nativePalette = nativeData.getPalette(
+        StructureTemplateData::DEFAULT_PALETTE_NAME()
+    );
+    if (!nativePalette) {
+        error = "原版 StructureTemplate 缺少 default palette";
+        return nullptr;
+    }
+
+    auto const& nativePrimary = nativeData.mBlockIndices.get();
+    auto const& nativeSecondaryStorage = nativeData.mExtraBlockIndices.get();
+    if (nativePrimary.size() != loaded->volume
+        || (!nativeSecondaryStorage && loaded->secondaryBlocks > 0)
+        || (nativeSecondaryStorage && nativeSecondaryStorage->size() != loaded->volume)) {
+        error = "原版 StructureTemplate 的方块索引数量与结构体积不一致";
+        return nullptr;
+    }
+
+    auto const unknownRegistry = nativeStructure->mUnknownBlockRegistry.get();
+    auto const resolveNative = [&](int paletteIndex) -> Block const* {
+        if (paletteIndex < 0) return nullptr;
+        auto const* resolved = nativePalette->tryGetBlock(
+            static_cast<std::uint64_t>(paletteIndex), unknownRegistry
+        );
+        return resolved && !resolved->isAir() ? resolved : nullptr;
+    };
+
+    loaded->renderBlocks.reserve(prepared->occupiedIndices.size());
+    auto const yz = static_cast<std::uint64_t>(loaded->sizeY)
+        * static_cast<std::uint64_t>(loaded->sizeZ);
+    for (auto const index : prepared->occupiedIndices) {
+        if (index >= nativePrimary.size()) continue;
+        auto const* primary = resolveNative(
+            nativePrimary[static_cast<std::size_t>(index)]
+        );
+        auto const* secondary = nativeSecondaryStorage
+            ? resolveNative((*nativeSecondaryStorage)[static_cast<std::size_t>(index)])
+            : nullptr;
+
+        Block const* block{};
+        Block const* liquid{};
+        auto const assign = [&](Block const* value) {
+            if (!value) return;
+            if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+            else if (!block) block = value;
+        };
+        assign(primary);
+        assign(secondary);
+        if (!block && !liquid) continue;
+
+        auto const x = index / yz;
+        auto const remainder = index % yz;
+        auto const y = remainder / static_cast<std::uint64_t>(loaded->sizeZ);
+        auto const z = remainder % static_cast<std::uint64_t>(loaded->sizeZ);
+
+        std::shared_ptr<CompoundTag const> blockEntityNbt;
+        if (blockPositionData) {
+            auto const* positionData = findCompound(
+                *blockPositionData, std::to_string(index)
+            );
+            auto const* entityData = positionData
+                ? findCompound(*positionData, "block_entity_data") : nullptr;
+            if (entityData) {
+                blockEntityNbt = std::make_shared<CompoundTag const>(*entityData);
+            }
+        }
+        loaded->renderBlocks.push_back({
+            static_cast<int>(x),
+            static_cast<int>(y),
+            static_cast<int>(z),
+            block,
+            liquid,
+            std::move(blockEntityNbt)
+        });
+    }
+
+    assignMaterialIndices(*loaded);
+    loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    loaded->sourcePath = prepared->path;
+    return loaded;
 }
 
 std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& path, std::string& error) {
@@ -881,6 +1153,37 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
 }
 
 } // namespace
+
+bool supportsAsyncStructurePreparation(std::filesystem::path const& path) {
+    auto extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t value) {
+        return static_cast<wchar_t>(std::towlower(value));
+    });
+    return extension == L".mcstructure";
+}
+
+std::shared_ptr<PreparedStructureLoad> prepareStructureFile(
+    std::filesystem::path const& path,
+    std::string&                 error
+) {
+    if (!supportsAsyncStructurePreparation(path)) {
+        error = "该格式暂不支持异步预解析";
+        return nullptr;
+    }
+    return prepareMcstructure(path, error);
+}
+
+std::shared_ptr<LoadedStructure> finalizePreparedStructureFile(
+    std::shared_ptr<PreparedStructureLoad> prepared,
+    std::string&                          error
+) {
+    auto loaded = finalizeMcstructure(prepared, error);
+    if (loaded && loaded->renderBlocks.empty()) {
+        error = "结构中没有可投影方块";
+        return nullptr;
+    }
+    return loaded;
+}
 
 std::shared_ptr<LoadedStructure> loadStructureFile(std::filesystem::path const& path, std::string& error) {
     auto extension = path.extension().wstring();
