@@ -72,6 +72,8 @@ constexpr std::size_t kLayerIncreaseHotkeyIndex = input::hotkeyIndex(input::Hotk
 constexpr std::size_t kLayerDecreaseHotkeyIndex = input::hotkeyIndex(input::HotkeyId::LayerDecrease);
 constexpr std::size_t kLoadProjectionHotkeyIndex = input::hotkeyIndex(input::HotkeyId::LoadProjection);
 constexpr std::size_t kCloseProjectionHotkeyIndex = input::hotkeyIndex(input::HotkeyId::CloseProjection);
+constexpr std::size_t kToggleManualPlacementHotkeyIndex
+    = input::hotkeyIndex(input::HotkeyId::ToggleManualPlacement);
 constexpr float kActionHintVerticalScreenRatio = 0.80f;
 // Background alpha shared by the projection HUD, the material HUD and the
 // transient action hint. The three on-screen bars deliberately share one
@@ -432,6 +434,15 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
         }
         return true;
     }
+    auto const toggleManualHotkey = uiState().inputHotkey(kToggleManualPlacementHotkeyIndex);
+    if (toggleManualHotkey.key != 0 && virtualKey == toggleManualHotkey.key
+        && modifiers == toggleManualHotkey.modifiers) {
+        if (GetTickCount64() >= uiState().ignoreHotkeyUntil()
+            && uiState().tryPressHotkey(kToggleManualPlacementHotkeyIndex)) {
+            uiState().queueToggleManualPlacement();
+        }
+        return true;
+    }
     return false;
 }
 
@@ -505,6 +516,25 @@ void processPendingActions() {
         clear();
         saveSettings();
         showActionHint(i18n::Message{i18n::TextKey::ActionHintCloseProjection});
+    }
+    if (pending.toggleManualPlacement) {
+        bool const enable = !place::isManualMode();
+        if (enable && !experimentalConsentGiven()) {
+            showActionHint(i18n::Message{i18n::TextKey::HintAssistedDisabledByConsent});
+        } else {
+            place::setManualMode(enable);
+            if (enable) {
+                // Assisted-placement modes are mutually exclusive everywhere,
+                // including when the mode is changed without opening the menu.
+                place::setEnabled(false);
+                place::setRangeEnabled(false);
+                i18n::Message message{i18n::TextKey::HintModeEnabled};
+                message.args[0] = i18n::tr(i18n::TextKey::ModeManual);
+                showActionHint(message);
+            } else {
+                showActionHint(i18n::Message{i18n::TextKey::HintAssistedDisabled});
+            }
+        }
     }
 
     changed = pending.settingsSave || changed;
@@ -1022,6 +1052,11 @@ void loadSettings() {
             std::clamp(settings.closeProjectionHotkey, 0, 255),
             std::clamp(settings.closeProjectionHotkeyModifiers, 0, 7)
         );
+        uiState().setHotkey(
+            kToggleManualPlacementHotkeyIndex,
+            std::clamp(settings.toggleManualHotkey, 0, 255),
+            std::clamp(settings.toggleManualHotkeyModifiers, 0, 7)
+        );
         session.setSavedProjection({
             settings.hasSavedProjection,
             settings.savedAnchorX,
@@ -1099,10 +1134,13 @@ void saveSettings() {
         }
         auto const loadProjectionHotkey = uiState().hotkey(kLoadProjectionHotkeyIndex);
         auto const closeProjectionHotkey = uiState().hotkey(kCloseProjectionHotkeyIndex);
+        auto const toggleManualHotkey = uiState().hotkey(kToggleManualPlacementHotkeyIndex);
         settings.loadProjectionHotkey = loadProjectionHotkey.key;
         settings.loadProjectionHotkeyModifiers = loadProjectionHotkey.modifiers;
         settings.closeProjectionHotkey = closeProjectionHotkey.key;
         settings.closeProjectionHotkeyModifiers = closeProjectionHotkey.modifiers;
+        settings.toggleManualHotkey = toggleManualHotkey.key;
+        settings.toggleManualHotkeyModifiers = toggleManualHotkey.modifiers;
         settings.altWheelOffsetEnabled = uiState().altWheelOffsetEnabled();
         settings.hasSavedProjection = sessionSnapshot.saved.available;
         settings.savedAnchorX = sessionSnapshot.saved.anchorX;

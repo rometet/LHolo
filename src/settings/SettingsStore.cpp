@@ -97,6 +97,11 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     out.closeProjectionHotkey = json.value("closeProjectionHotkey", out.closeProjectionHotkey);
     out.closeProjectionHotkeyModifiers
         = json.value("closeProjectionHotkeyModifiers", out.closeProjectionHotkeyModifiers);
+    // Restore the historic manual-placement toggle field only. Easy/range
+    // toggles remain intentionally absent from the current UI/runtime.
+    out.toggleManualHotkey = json.value("toggleManualHotkey", out.toggleManualHotkey);
+    out.toggleManualHotkeyModifiers
+        = json.value("toggleManualHotkeyModifiers", out.toggleManualHotkeyModifiers);
     out.altWheelOffsetEnabled
         = json.value("altWheelOffsetEnabled", out.altWheelOffsetEnabled);
 
@@ -206,6 +211,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"loadProjectionHotkeyModifiers", settings.loadProjectionHotkeyModifiers},
         {"closeProjectionHotkey", settings.closeProjectionHotkey},
         {"closeProjectionHotkeyModifiers", settings.closeProjectionHotkeyModifiers},
+        {"toggleManualHotkey", settings.toggleManualHotkey},
+        {"toggleManualHotkeyModifiers", settings.toggleManualHotkeyModifiers},
         {"altWheelOffsetEnabled", settings.altWheelOffsetEnabled},
         {"moveLeftHotkey", settings.moveHotkeys[0]},
         {"moveRightHotkey", settings.moveHotkeys[1]},

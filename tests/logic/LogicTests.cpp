@@ -466,10 +466,14 @@ void testSettingsStore() {
     LHOLO_CHECK(settings.language == "ja_JP");
     LHOLO_CHECK(settings.guiHotkey == VK_INSERT);
     LHOLO_CHECK(settings.guiHotkeyModifiers == 0);
+    LHOLO_CHECK(settings.toggleManualHotkey == 0);
+    LHOLO_CHECK(settings.toggleManualHotkeyModifiers == 0);
     settings.language = "en_US";
     settings.uiScale = 1.25f;
     settings.guiHotkey = 'L';
     settings.guiHotkeyModifiers = 1;
+    settings.toggleManualHotkey = 'R';
+    settings.toggleManualHotkeyModifiers = 0;
     settings.hudShowProjectedBlockName = false;
     settings.hudShowExtraBlocks = false;
     settings.autoPlacementBreakCooldownSeconds = 27;
@@ -496,7 +500,8 @@ void testSettingsStore() {
         // read as a fallback (see the legacy config below).
         LHOLO_CHECK(contents.str().find("moveXMinusHotkey") == std::string::npos);
         LHOLO_CHECK(contents.str().find("moveYPlusHotkey") == std::string::npos);
-        LHOLO_CHECK(contents.str().find("toggleManualHotkey") == std::string::npos);
+        LHOLO_CHECK(contents.str().find("\"toggleManualHotkey\": 82") != std::string::npos);
+        LHOLO_CHECK(contents.str().find("\"toggleManualHotkeyModifiers\": 0") != std::string::npos);
         LHOLO_CHECK(contents.str().find("toggleEasyHotkey") == std::string::npos);
         LHOLO_CHECK(contents.str().find("toggleRangeHotkey") == std::string::npos);
     }
@@ -507,6 +512,8 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.uiScale == 1.25f);
     LHOLO_CHECK(loaded.guiHotkey == 'L');
     LHOLO_CHECK(loaded.guiHotkeyModifiers == 1);
+    LHOLO_CHECK(loaded.toggleManualHotkey == 'R');
+    LHOLO_CHECK(loaded.toggleManualHotkeyModifiers == 0);
     LHOLO_CHECK(!loaded.hudShowProjectedBlockName);
     LHOLO_CHECK(!loaded.hudShowExtraBlocks);
     LHOLO_CHECK(loaded.autoPlacementBreakCooldownSeconds == 27);
@@ -540,6 +547,10 @@ void testSettingsStore() {
     LHOLO_CHECK(migrated.language == "ja_JP");
     LHOLO_CHECK(migrated.guiHotkey == VK_INSERT);
     LHOLO_CHECK(migrated.guiHotkeyModifiers == 0);
+    // The historic manual-placement binding is accepted again when it is still
+    // present in an older config; easy/range bindings remain retired.
+    LHOLO_CHECK(migrated.toggleManualHotkey == 'R');
+    LHOLO_CHECK(migrated.toggleManualHotkeyModifiers == 0);
     // Likewise, a config written before the Alt+wheel switch existed keeps the
     // gesture enabled, so upgrading never silently changes input behavior.
     LHOLO_CHECK(migrated.altWheelOffsetEnabled);
@@ -815,12 +826,14 @@ void testStructureUiState() {
     auto const layerIncreaseSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::LayerIncrease);
     auto const loadProjectionSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::LoadProjection);
     auto const closeProjectionSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::CloseProjection);
+    auto const toggleManualSlot = lholo::input::hotkeyIndex(lholo::input::HotkeyId::ToggleManualPlacement);
     LHOLO_CHECK(state.hotkey(guiSlot).key == VK_INSERT);
     LHOLO_CHECK(state.hotkey(guiSlot).modifiers == 0);
     LHOLO_CHECK(state.hotkey(moveLeftSlot).key == VK_LEFT);
     LHOLO_CHECK(state.hotkey(layerIncreaseSlot).key == VK_UP);
     LHOLO_CHECK(state.hotkey(loadProjectionSlot).key == 0);
     LHOLO_CHECK(state.hotkey(closeProjectionSlot).key == 0);
+    LHOLO_CHECK(state.hotkey(toggleManualSlot).key == 0);
 
     state.beginHotkeyCapture(moveLeftSlot);
     LHOLO_CHECK(state.capturingHotkey() == moveLeftSlot);
@@ -852,6 +865,7 @@ void testStructureUiState() {
     state.queueLayerDelta(-1);
     state.queueLoadProjection();
     state.queueCloseProjection();
+    state.queueToggleManualPlacement();
     state.requestSettingsSave();
     auto const pending = state.consumePendingHotkeyActions();
     LHOLO_CHECK(pending.offsetX == -1);
@@ -860,6 +874,7 @@ void testStructureUiState() {
     LHOLO_CHECK(pending.layerDelta == -1);
     LHOLO_CHECK(pending.loadProjection);
     LHOLO_CHECK(pending.closeProjection);
+    LHOLO_CHECK(pending.toggleManualPlacement);
     LHOLO_CHECK(pending.settingsSave);
 
     state.clearMaterials();

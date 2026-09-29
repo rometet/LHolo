@@ -54,6 +54,9 @@ struct Settings {
     int loadProjectionHotkeyModifiers{0};
     int closeProjectionHotkey{0};
     int closeProjectionHotkeyModifiers{0};
+    // Session-mode toggle binding. The mode itself is never persisted.
+    int toggleManualHotkey{0};
+    int toggleManualHotkeyModifiers{0};
     // Fixed-gesture input, not a rebindable slot: while enabled, holding Alt
     // claims the wheel for the projection offset and locks the hotbar for as
     // long as Alt is down. The hotkeys page can turn it off so Alt and the
