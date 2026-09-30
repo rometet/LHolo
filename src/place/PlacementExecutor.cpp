@@ -226,13 +226,30 @@ void cacheFailedPlan(FailedPlanKey const& key, std::uint64_t now) {
 // redstone item carries no placement state, so the stricter
 // sameItemAndAuxAndBlockData never matched a ghost that does.
 ItemFind findItemSlot(Player& player, Block const& block) {
-    ItemStack const want = placementState().manualMode()
+    ItemStack const exactWant = placementState().manualMode()
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
-    if (want.isNull()) return {-1, nullptr};
+    ItemStack const neutralWant = block::makePlacementItem(block);
     auto& inventory = player.getInventory();
-    for (int slot = 0; slot < kInventorySlots; ++slot) {
-        auto const& item = inventory.getItem(slot);
-        if (!item.isNull() && item.getIdAux() == want.getIdAux()) return {slot, &item};
+
+    // First preserve the exact native Block -> Item conversion used by manual
+    // placement, including any true material aux value.
+    if (!exactWant.isNull()) {
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            auto const& item = inventory.getItem(slot);
+            if (!item.isNull() && item.getIdAux() == exactWant.getIdAux()) return {slot, &item};
+        }
+    }
+
+    // Direction/open/powered block states are not inventory variants. Some
+    // 26.51 Block -> Item conversions nevertheless expose a state-derived aux,
+    // which made a normal hopper/torch/trapdoor stack look "missing". Fall back
+    // to the neutral placement item only after the exact lookup failed.
+    if (!neutralWant.isNull()
+        && (exactWant.isNull() || neutralWant.getIdAux() != exactWant.getIdAux())) {
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            auto const& item = inventory.getItem(slot);
+            if (!item.isNull() && item.getIdAux() == neutralWant.getIdAux()) return {slot, &item};
+        }
     }
     return {-1, nullptr};
 }
@@ -254,14 +271,26 @@ InventorySnapshot snapshotInventory(Player& player) {
 }
 
 ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
-    ItemStack const want = placementState().manualMode()
+    ItemStack const exactWant = placementState().manualMode()
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
-    if (want.isNull()) return {-1, nullptr};
-    auto const [first, last] = snapshot.equal_range(want.getIdAux());
-    for (auto it = first; it != last; ++it) {
-        if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
+    ItemStack const neutralWant = block::makePlacementItem(block);
+
+    auto findByIdAux = [&](ItemStack const& want) -> ItemFind {
+        if (want.isNull()) return {-1, nullptr};
+        auto const [first, last] = snapshot.equal_range(want.getIdAux());
+        for (auto it = first; it != last; ++it) {
+            if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
+        }
+        return {-1, nullptr};
+    };
+
+    auto exact = findByIdAux(exactWant);
+    if (exact.slot >= 0) return exact;
+    if (neutralWant.isNull()
+        || (!exactWant.isNull() && neutralWant.getIdAux() == exactWant.getIdAux())) {
+        return {-1, nullptr};
     }
-    return {-1, nullptr};
+    return findByIdAux(neutralWant);
 }
 
 // Server-synced slot exchange expressed as a legacy NormalTransaction: both
