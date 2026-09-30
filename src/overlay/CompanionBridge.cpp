@@ -28,6 +28,7 @@ Registration     gRegistration;
 std::atomic_bool gRegistered{};
 std::atomic_bool gVisible{};
 std::atomic_uint gReaders{};
+thread_local unsigned int gReaderDepth{};
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
@@ -39,7 +40,9 @@ struct CallbackLease {
 
     CallbackLease() = default;
     CallbackLease(Registration value, bool ownsReader)
-        : registration(value), active(ownsReader) {}
+        : registration(value), active(ownsReader) {
+        if (active) ++gReaderDepth;
+    }
     CallbackLease(CallbackLease const&) = delete;
     CallbackLease& operator=(CallbackLease const&) = delete;
     CallbackLease(CallbackLease&& other) noexcept
@@ -49,7 +52,10 @@ struct CallbackLease {
     CallbackLease& operator=(CallbackLease&&) = delete;
 
     ~CallbackLease() {
-        if (active) gReaders.fetch_sub(1, std::memory_order_release);
+        if (active) {
+            --gReaderDepth;
+            gReaders.fetch_sub(1, std::memory_order_release);
+        }
     }
 };
 
@@ -76,7 +82,9 @@ bool setVisible(bool value) noexcept {
         if (callback) gReaders.fetch_add(1, std::memory_order_acq_rel);
     }
     if (callback) {
+        ++gReaderDepth;
         callback(value);
+        --gReaderDepth;
         gReaders.fetch_sub(1, std::memory_order_release);
     }
     return true;
@@ -131,6 +139,11 @@ bool registerProvider(
 }
 
 bool unregisterProvider(void* owner) noexcept {
+    // Unregistering from inside a provider callback would wait for the current
+    // callback's own reader lease forever. Tell the provider to keep its DLL
+    // loaded and retry from a safe lifecycle point.
+    if (gReaderDepth != 0) return false;
+
     StateFn stateChanged{};
     bool wasVisible{};
     {

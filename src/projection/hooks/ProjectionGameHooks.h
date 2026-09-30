@@ -9,6 +9,6 @@
 namespace lholo::projection::detail {
 
 bool installProjectionGameHooks();
-void uninstallProjectionGameHooks();
+bool uninstallProjectionGameHooks();
 
 } // namespace lholo::projection::detail

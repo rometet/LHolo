@@ -20,9 +20,15 @@ ProjectionQuery queryProjectionCell(
     ProjectionState const& state,
     BlockPos const&        worldPosition
 ) {
+    if (!state.expectedWorldBlockIndices || !state.expectedWorldBlocks) {
+        return {nullptr, false};
+    }
     auto const key = std::tuple{worldPosition.x, worldPosition.y, worldPosition.z};
     auto const foundIndex = state.expectedWorldBlockIndices->find(key);
-    if (foundIndex == state.expectedWorldBlockIndices->end()) return {nullptr, false};
+    if (foundIndex == state.expectedWorldBlockIndices->end()
+        || foundIndex->second >= state.correctionStates.size()) {
+        return {nullptr, false};
+    }
     auto const foundBlock = state.expectedWorldBlocks->find(key);
     Block const* block = foundBlock == state.expectedWorldBlocks->end()
         ? nullptr
@@ -39,6 +45,12 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
     float                  radius
 ) {
     std::vector<RangeCandidate> result;
+    if (!state.expectedWorldBlockIndices || !state.expectedWorldBlocks
+        || !std::isfinite(center.x) || !std::isfinite(center.y)
+        || !std::isfinite(center.z) || !std::isfinite(radius)
+        || radius < 0.0f || radius > 64.0f) {
+        return result;
+    }
     // Only visit cells in the axis-aligned box around the center: with a small
     // radius this is far cheaper than walking the whole virtual-world map.
     int const r = static_cast<int>(std::ceil(radius));
@@ -54,7 +66,10 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
             for (int x = minX; x <= maxX; ++x) {
                 auto const key = std::tuple{x, y, z};
                 auto const foundIndex = state.expectedWorldBlockIndices->find(key);
-                if (foundIndex == state.expectedWorldBlockIndices->end()) continue;
+                if (foundIndex == state.expectedWorldBlockIndices->end()
+                    || foundIndex->second >= state.correctionStates.size()) {
+                    continue;
+                }
                 if (state.correctionStates[foundIndex->second] != CorrectionState::Missing) continue;
                 float const dx = static_cast<float>(x) + 0.5f - center.x;
                 float const dy = static_cast<float>(y) + 0.5f - center.y;

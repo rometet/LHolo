@@ -3,6 +3,7 @@
 
 #include "app/AppKernel.h"
 
+#include "app/HookLifecycle.h"
 #include "i18n/LanguageStore.h"
 #include "input/MenuInputGuard.h"
 #include "overlay/ImGuiOverlay.h"
@@ -32,10 +33,25 @@ bool AppKernel::load() {
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    if (!hook_lifecycle::beginEnable()) {
+        logger.error("LHolo hook lifecycle was not ready for enable");
+        return false;
+    }
+
     projection::detail::resetMeshWorkerForSession();
 
     if (!projection::detail::projectionController().installHooks()) {
-        logger.error("Failed to install projection hooks");
+        hook_lifecycle::beginQuiesce();
+        auto const removed =
+            projection::detail::projectionController().uninstallHooks();
+        if (removed) {
+            hook_lifecycle::waitForQuiescence();
+            hook_lifecycle::markDisabled();
+        }
+        logger.error(
+            "Failed to install projection hooks; rollbackRemoved={}",
+            removed ? 1 : 0
+        );
         return false;
     }
 
@@ -66,21 +82,54 @@ bool AppKernel::enable() {
 bool AppKernel::disable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
 
+    if (hook_lifecycle::insideDetour()) {
+        logger.error("LHolo disable requested from inside a typed detour; refusing unsafe unload");
+        return false;
+    }
+
+    // First make every newly-entering typed detour origin-only. Keep all world,
+    // projection, ImGui, and worker state intact until the physical hooks are
+    // detached and every callback that could still return through LHolo drains.
+    hook_lifecycle::beginQuiesce();
+
+    bool hooksRemoved = true;
+    hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
+    hooksRemoved = place::uninstallHook() && hooksRemoved;
+    hooksRemoved = projection::detail::projectionController().uninstallHooks()
+        && hooksRemoved;
+    if (!hooksRemoved) {
+        logger.error(
+            "LHolo disable incomplete; one or more typed hooks remain installed and the native module must stay resident"
+        );
+        return false;
+    }
+
+    // Physical unhook prevents fresh entries. The guard counts both admitted
+    // Running callbacks and Quiescing origin-only callbacks, so state is not
+    // released until every already-entered typed detour has returned.
+    hook_lifecycle::waitForQuiescence();
+
+    // No typed render callback can reinstall the overlay after this point.
+    // The overlay has its own callback drain for Present/WndProc/D3D detours and
+    // the Praxis companion provider readers.
+    if (!overlay::shutdown()) {
+        logger.error(
+            "LHolo disable aborted because overlay teardown was incomplete; native module remains resident"
+        );
+        return false;
+    }
+
+    // Cancellation alone is not enough: std::async may still be executing code
+    // in this DLL. Join it before releasing structure or mapper state.
+    structure::shutdownPendingStructureLoad();
+
     structure::saveSettings();
     structure::detail::shutdownMaterialTracker();
-    // Drop all world-owned state before removing hooks. In particular, this
-    // resets held placement/input state and joins the projection mesh worker
-    // while its Level/Dimension pointers are still valid.
     place::resetWorldSession();
     structure::resetWorldSession();
     structure::capture::clear();
-    input::uninstallMenuInputGuard();
-    place::uninstallHook();
-    projection::detail::projectionController().uninstallHooks();
-    // Projection hooks contain the automatic overlay-install retry path, so
-    // remove them before tearing the overlay down.
-    overlay::shutdown();
 
+    hook_lifecycle::markDisabled();
     logger.info("LHolo disabled");
     return true;
 }
