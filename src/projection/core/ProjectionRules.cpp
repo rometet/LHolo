@@ -37,6 +37,20 @@ CompoundTag const* serializedBlockStates(Block const& block) {
     return nullptr;
 }
 
+bool serializedHorizontalDirectionMatches(Block const& expected, Block const& actual) {
+    auto const* expectedStates = serializedBlockStates(expected);
+    auto const* actualStates = serializedBlockStates(actual);
+    if (!expectedStates || !actualStates) return false;
+    for (auto const* key : {"minecraft:cardinal_direction", "direction"}) {
+        auto const found = expectedStates->mTags.find(key);
+        if (found == expectedStates->mTags.end()) continue;
+        auto const actualFound = actualStates->mTags.find(key);
+        return actualFound != actualStates->mTags.end()
+            && found->second == actualFound->second;
+    }
+    return false;
+}
+
 bool serializedStatesMatchExcept(
     Block const& expected,
     Block const& actual,
@@ -132,7 +146,7 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
         if (!actualUpper || *actualUpper != *expectedUpper) return false;
         return *expectedUpper
             ? stateMatches(VanillaStates::DoorHingeBit())
-            : stateMatches(VanillaStates::Direction())
+            : serializedHorizontalDirectionMatches(expected, actual)
                 && stateMatches(VanillaStates::OpenBit());
     }
 

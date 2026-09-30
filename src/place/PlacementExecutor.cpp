@@ -18,6 +18,7 @@
 
 #include "place/PlacementState.h"
 #include "place/ManualPlacementRules.h"
+#include "place/PlacementDirectionRules.h"
 #include "place/PlaceHelper.h"
 
 #include "block/BlockPlacementRules.h"
@@ -95,11 +96,12 @@ constexpr std::uint64_t kMinSendIntervalMs = 40;
 // Backoff for a rejected inventory swap. Without it a failed swap retries every
 // tick and spams the server.
 constexpr std::uint64_t kSwapRetryMs = 200;
-// Bound expensive getPlacementBlock planning in range mode. Failed plans are
-// cached by target, exact block state, item aux, eye position and view vector;
-// changing the player's aim invalidates the cache immediately.
-constexpr int           kRangePlanBudgetPerTick = 16;
-constexpr std::uint64_t kFailedPlanCacheMs      = 250;
+// Bound expensive getPlacementBlock planning in range mode. Complex/directional
+// candidates keep the old tight budget; ordinary opaque full blocks use a wider
+// cheap budget so a cluster of impossible oriented blocks cannot starve them.
+constexpr int           kRangePlanBudgetPerTick     = 16;
+constexpr int           kRangeFastPlanBudgetPerTick = 64;
+constexpr std::uint64_t kFailedPlanCacheMs          = 250;
 // Manual-mode typematic repeat: after the first block on press, holding pauses
 // for kManualInitialDelayMs and then auto-repeats every kManualRepeatIntervalMs
 // (like keyboard key-repeat), so a tap places one and a hold streams at a steady
@@ -195,7 +197,8 @@ FailedPlanKey makeFailedPlanKey(
     PlacementContext const& context,
     BlockPos const&         cell,
     Block const&            block,
-    int                     itemAux
+    int                     itemAux,
+    bool                    viewSensitive
 ) {
     return {
         packBlockPos(cell),
@@ -204,9 +207,9 @@ FailedPlanKey makeFailedPlanKey(
         context.eyeX,
         context.eyeY,
         context.eyeZ,
-        context.viewX,
-        context.viewY,
-        context.viewZ,
+        viewSensitive ? context.viewX : 0,
+        viewSensitive ? context.viewY : 0,
+        viewSensitive ? context.viewZ : 0,
     };
 }
 
@@ -223,13 +226,30 @@ void cacheFailedPlan(FailedPlanKey const& key, std::uint64_t now) {
 // redstone item carries no placement state, so the stricter
 // sameItemAndAuxAndBlockData never matched a ghost that does.
 ItemFind findItemSlot(Player& player, Block const& block) {
-    ItemStack const want = placementState().manualMode()
+    ItemStack const exactWant = placementState().manualMode()
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
-    if (want.isNull()) return {-1, nullptr};
+    ItemStack const neutralWant = block::makePlacementItem(block);
     auto& inventory = player.getInventory();
-    for (int slot = 0; slot < kInventorySlots; ++slot) {
-        auto const& item = inventory.getItem(slot);
-        if (!item.isNull() && item.getIdAux() == want.getIdAux()) return {slot, &item};
+
+    // First preserve the exact native Block -> Item conversion used by manual
+    // placement, including any true material aux value.
+    if (!exactWant.isNull()) {
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            auto const& item = inventory.getItem(slot);
+            if (!item.isNull() && item.getIdAux() == exactWant.getIdAux()) return {slot, &item};
+        }
+    }
+
+    // Direction/open/powered block states are not inventory variants. Some
+    // 26.51 Block -> Item conversions nevertheless expose a state-derived aux,
+    // which made a normal hopper/torch/trapdoor stack look "missing". Fall back
+    // to the neutral placement item only after the exact lookup failed.
+    if (!neutralWant.isNull()
+        && (exactWant.isNull() || neutralWant.getIdAux() != exactWant.getIdAux())) {
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            auto const& item = inventory.getItem(slot);
+            if (!item.isNull() && item.getIdAux() == neutralWant.getIdAux()) return {slot, &item};
+        }
     }
     return {-1, nullptr};
 }
@@ -251,14 +271,26 @@ InventorySnapshot snapshotInventory(Player& player) {
 }
 
 ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
-    ItemStack const want = placementState().manualMode()
+    ItemStack const exactWant = placementState().manualMode()
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
-    if (want.isNull()) return {-1, nullptr};
-    auto const [first, last] = snapshot.equal_range(want.getIdAux());
-    for (auto it = first; it != last; ++it) {
-        if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
+    ItemStack const neutralWant = block::makePlacementItem(block);
+
+    auto findByIdAux = [&](ItemStack const& want) -> ItemFind {
+        if (want.isNull()) return {-1, nullptr};
+        auto const [first, last] = snapshot.equal_range(want.getIdAux());
+        for (auto it = first; it != last; ++it) {
+            if (it->second.item->getIdAux() == want.getIdAux()) return it->second;
+        }
+        return {-1, nullptr};
+    };
+
+    auto exact = findByIdAux(exactWant);
+    if (exact.slot >= 0) return exact;
+    if (neutralWant.isNull()
+        || (!exactWant.isNull() && neutralWant.getIdAux() == exactWant.getIdAux())) {
+        return {-1, nullptr};
     }
-    return {-1, nullptr};
+    return findByIdAux(neutralWant);
 }
 
 // Server-synced slot exchange expressed as a legacy NormalTransaction: both
@@ -553,6 +585,98 @@ CompoundTag const* placementSerializedStates(Block const& block) {
     return nullptr;
 }
 
+bool sameFirstPresentSerializedState(
+    Block const& predicted,
+    Block const& ghost,
+    char const* primary,
+    char const* fallback
+) {
+    std::string const expectedPrimary = serializedState(ghost, primary);
+    if (!expectedPrimary.empty()) return serializedState(predicted, primary) == expectedPrimary;
+    std::string const expectedFallback = serializedState(ghost, fallback);
+    return !expectedFallback.empty() && serializedState(predicted, fallback) == expectedFallback;
+}
+
+bool placementDirectionMatches(Block const& predicted, Block const& ghost) {
+    using detail::PlacementDirectionRule;
+    switch (detail::placementDirectionRule(ghost.getTypeName())) {
+    case PlacementDirectionRule::Facing:
+        return sameFirstPresentSerializedState(
+            predicted, ghost, "minecraft:facing_direction", "facing_direction"
+        );
+    case PlacementDirectionRule::Horizontal:
+        return sameFirstPresentSerializedState(
+            predicted, ghost, "minecraft:cardinal_direction", "direction"
+        );
+    case PlacementDirectionRule::Orientation:
+        return sameSerializedState(predicted, ghost, "orientation");
+    case PlacementDirectionRule::Lever:
+        return sameSerializedState(predicted, ghost, "lever_direction");
+    case PlacementDirectionRule::Bell:
+        return sameSerializedState(predicted, ghost, "direction")
+            && sameSerializedState(predicted, ghost, "attachment");
+    case PlacementDirectionRule::Trapdoor:
+        // open_bit is never chosen by the initial block placement. Vanilla
+        // places the trapdoor closed; opening happens through a later use or
+        // redstone update. Requiring projected open_bit here made every open
+        // trapdoor impossible in easy/range mode. Direction and half are the
+        // actual placement-controlled states and remain strict.
+        return sameSerializedState(predicted, ghost, "direction")
+            && sameSerializedState(predicted, ghost, "upside_down_bit");
+    case PlacementDirectionRule::None:
+        return false;
+    }
+    return false;
+}
+
+std::optional<uchar> deterministicSupportDirection(Block const& ghost) {
+    auto const& name = ghost.getTypeName();
+
+    // Hopper output direction is exactly the support block that vanilla is
+    // clicked against. Bedrock 1.26.51 still serializes hopper facing as the
+    // legacy numeric facing_direction state.
+    if (name == "minecraft:hopper") {
+        auto facing = serializedState(ghost, "facing_direction");
+        if (facing.empty()) facing = serializedState(ghost, "minecraft:facing_direction");
+        if (facing == "0" || facing == "down")  return static_cast<uchar>(Facing::Name::Down);
+        if (facing == "2" || facing == "north") return static_cast<uchar>(Facing::Name::North);
+        if (facing == "3" || facing == "south") return static_cast<uchar>(Facing::Name::South);
+        if (facing == "4" || facing == "west")  return static_cast<uchar>(Facing::Name::West);
+        if (facing == "5" || facing == "east")  return static_cast<uchar>(Facing::Name::East);
+        return std::nullopt;
+    }
+
+    // torch_facing_direction names the support relative to the torch. "top"
+    // means the torch stands on the block below; side values name that side.
+    auto const torchFacing = serializedState(ghost, "torch_facing_direction");
+    if (torchFacing == "top")   return static_cast<uchar>(Facing::Name::Down);
+    if (torchFacing == "north") return static_cast<uchar>(Facing::Name::North);
+    if (torchFacing == "south") return static_cast<uchar>(Facing::Name::South);
+    if (torchFacing == "west")  return static_cast<uchar>(Facing::Name::West);
+    if (torchFacing == "east")  return static_cast<uchar>(Facing::Name::East);
+    return std::nullopt;
+}
+
+bool isFastOpaquePlacementCandidate(Block const& ghost) {
+    if (!ghost.getBlockType().mIsOpaqueFullBlock
+        || detail::placementDirectionRule(ghost.getTypeName())
+            != detail::PlacementDirectionRule::None) {
+        return false;
+    }
+    auto const* states = placementSerializedStates(ghost);
+    if (!states) return false;
+    for (auto const& [key, value] : states->mTags) {
+        (void)value;
+        if (detail::isPlacementControlledStateKey(key)) return false;
+    }
+    return true;
+}
+
+bool isViewSensitivePlan(Block const& ghost) {
+    if (detail::isEnvironmentOnlyPlacementBlock(ghost.getTypeName())) return false;
+    return !isFastOpaquePlacementCandidate(ghost);
+}
+
 bool manualSerializedPlacementMatches(Block const& predicted, Block const& ghost) {
     // Identity is checked by the caller before this function. Do not treat
     // missing/malformed serialization as permission to ignore a runtime ID.
@@ -619,27 +743,14 @@ bool placementPredictionMatches(
     if (!serializedState(ghost, "pillar_axis").empty()) {
         return sameSerializedState(predicted, ghost, "pillar_axis");
     }
-    // Walls, fences, glass panes and iron bars derive every connection state from
-    // their neighbours after placement (nothing is chosen at placement), so accept
-    // the placement on block identity alone — the connections resolve as the
-    // surrounding blocks fill in.
-    // Repeaters and comparators: only facing is chosen at placement (delay/mode
-    // are set by right-clicking afterwards, the powered bit is redstone-driven),
-    // so match on facing alone — including the powered name variants, which reach
-    // here via the shared placeable-base rule. This also lets a delay-adjusted repeater place.
-    if (name == "minecraft:unpowered_repeater" || name == "minecraft:powered_repeater"
-        || name == "minecraft:unpowered_comparator" || name == "minecraft:powered_comparator") {
-        return sameSerializedState(predicted, ghost, "minecraft:cardinal_direction");
-    }
     if (isTwoBlockDoor(ghost)) {
         // A door item places both cells. The lower ghost owns direction/open,
-        // the upper owns the hinge. Verify direction/half always; opening is an
-        // interaction after manual placement, not a material/facing mismatch. The hinge
-        // only when the upper half is visible (expectedDoorUpper). A layer cut
-        // hides the upper, leaving the hinge unverifiable — one DoorItem use
-        // still creates both halves, so accept the placement without it.
+        // the upper owns the hinge. 26.51 structures may expose either the new
+        // cardinal string key or the legacy integer direction key.
         bool matched = sameSerializedState(predicted, ghost, "upper_block_bit")
-            && sameSerializedState(predicted, ghost, "direction")
+            && sameFirstPresentSerializedState(
+                predicted, ghost, "minecraft:cardinal_direction", "direction"
+            )
             && (placementState().manualMode()
                 || sameSerializedState(predicted, ghost, "open_bit"));
         if (matched && expectedDoorUpper) {
@@ -649,6 +760,19 @@ bool placementPredictionMatches(
         }
         return matched;
     }
+
+    // High-use redstone/mechanical families have placement-controlled direction
+    // plus runtime/user-controlled states (powered, triggered, toggle, open,
+    // crafting, delay/mode). Require the direction exactly, then deliberately
+    // ignore those post-placement states so a valid plan is not rejected.
+    if (detail::placementDirectionRule(name) != detail::PlacementDirectionRule::None) {
+        return placementDirectionMatches(predicted, ghost);
+    }
+
+    // These families have no player-controlled orientation at placement; their
+    // serialized states are entirely environment-driven. Identity was already
+    // checked above, so signal/attachment changes must not block placement.
+    if (detail::isEnvironmentOnlyPlacementBlock(name)) return true;
     // A runtime lit/heat variant (lit lamp/ore, burning furnace) is placed as its
     // base block and switched on by the game afterwards, so the names only matched
     // after normalization and the runtime id is expected to differ. Accept on
@@ -737,6 +861,59 @@ bool resolveOrientedPlacement(
     };
 
     auto const searchCurrentRotation = [&](ProjectionTarget& result) {
+        // Hopper and torch orientation is determined by the clicked support
+        // face, not by arbitrary player rotation. The projection already gives
+        // us that support direction, so use it directly instead of depending on
+        // getPlacementBlock's version-sensitive prediction for these families.
+        if (auto const supportDirection = deterministicSupportDirection(ghost)) {
+            BlockPos const at = neighborOf(cell, *supportDirection);
+            if (!region.getBlock(at).isAir()) {
+                uchar const face = oppositeFace(*supportDirection);
+                bool matched = false;
+                forEachClickCandidate(cell, *supportDirection, [&](Vec3 const& clickPos) {
+                    if (matched || !isWithinPlacementReach(context, clickPos)) return;
+                    result = ProjectionTarget{cell, at, face, &ghost, clickPos};
+                    matched = true;
+                });
+                if (matched) return true;
+            }
+        }
+
+        // Ordinary opaque full blocks dominate large builds. Try the nearest
+        // sensible support once before the exhaustive face/height search. If
+        // vanilla prediction disagrees we fall back unchanged, so this is only
+        // a successful-common-case shortcut and cannot loosen placement rules.
+        if (isFastOpaquePlacementCandidate(ghost)) {
+            Vec3 approach{
+                static_cast<float>(cell.x) + 0.5f - context.eye.x,
+                static_cast<float>(cell.y) + 0.5f - context.eye.y,
+                static_cast<float>(cell.z) + 0.5f - context.eye.z,
+            };
+            float const lengthSquared =
+                approach.x * approach.x + approach.y * approach.y + approach.z * approach.z;
+            if (lengthSquared > 0.0001f) {
+                float const inverseLength = 1.0f / std::sqrt(lengthSquared);
+                approach = {
+                    approach.x * inverseLength,
+                    approach.y * inverseLength,
+                    approach.z * inverseLength,
+                };
+            }
+            auto const preferred = selectPlacementTarget(region, cell, approach, &ghost);
+            Vec3 clickPos{
+                static_cast<float>(preferred.at.x) + 0.5f,
+                static_cast<float>(preferred.at.y) + 0.5f,
+                static_cast<float>(preferred.at.z) + 0.5f,
+            };
+            if (preferred.at != cell && validFace(preferred.face)) {
+                auto const& faceOffset = Facing::DIRECTION()[preferred.face];
+                clickPos.x += static_cast<float>(faceOffset.x) * 0.5f;
+                clickPos.y += static_cast<float>(faceOffset.y) * 0.5f;
+                clickPos.z += static_cast<float>(faceOffset.z) * 0.5f;
+            }
+            if (tryPlacement(preferred.at, preferred.face, clickPos, result)) return true;
+        }
+
         uchar const firstSupport = isDoor ? static_cast<uchar>(Facing::Name::Down) : 0;
         uchar const supportEnd   = isDoor ? firstSupport + 1 : 6;
         for (uchar sf = firstSupport; sf < supportEnd; ++sf) {
@@ -794,7 +971,8 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     auto candidates = projection::queryMissingCellsInRange(player, center, radius);
     bool const suppressionsActive = placementState().autoPlacementSuppressionsActive(now);
     auto const inventorySnapshot = snapshotInventory(player);
-    int plannedCandidates = 0;
+    int complexPlannedCandidates = 0;
+    int fastPlannedCandidates = 0;
     for (auto const& cand : candidates) {
         BlockPos const cell{cand.x, cand.y, cand.z};
 
@@ -812,11 +990,24 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         auto const found = findItemSlot(inventorySnapshot, *cand.block);
         if (found.slot < 0) continue;
 
-        FailedPlanKey const failedKey =
-            makeFailedPlanKey(placementContext, cell, *cand.block, found.item->getAuxValue());
+        bool const fastPlan = isFastOpaquePlacementCandidate(*cand.block);
+        FailedPlanKey const failedKey = makeFailedPlanKey(
+            placementContext,
+            cell,
+            *cand.block,
+            found.item->getAuxValue(),
+            isViewSensitivePlan(*cand.block)
+        );
         if (isFailedPlanCached(failedKey, now)) continue;
-        if (plannedCandidates >= kRangePlanBudgetPerTick) return;
-        ++plannedCandidates;
+        if (fastPlan) {
+            if (fastPlannedCandidates >= kRangeFastPlanBudgetPerTick) continue;
+            ++fastPlannedCandidates;
+        } else {
+            // Do not return when the complex budget is exhausted: later cheap
+            // full-block candidates can still be filled this tick.
+            if (complexPlannedCandidates >= kRangePlanBudgetPerTick) continue;
+            ++complexPlannedCandidates;
+        }
 
         // Use the actual inventory stack's aux value for the same prediction
         // the server will perform. Reject impossible placements before sending.
