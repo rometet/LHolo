@@ -722,6 +722,9 @@ bool placementPredictionMatches(
         != block::placeableBaseName(ghost.getTypeName())) return false;
 
     auto const& name = ghost.getTypeName();
+    // Bamboo placement has no player-controlled orientation; age/leaves/
+    // thickness are updated dynamically by the engine.
+    if (name == "minecraft:bamboo") return true;
     if (name.ends_with("_stairs")) {
         return sameSerializedState(predicted, ghost, "weirdo_direction")
             && sameSerializedState(predicted, ghost, "upside_down_bit");
@@ -806,6 +809,9 @@ bool resolveOrientedPlacement(
     int                     itemAux,
     ProjectionTarget&       out
 ) {
+    // Reject stale projection targets before any orientation search.
+    if (!region.getBlock(cell).isAir()) return false;
+
     Block const* expectedDoorUpper = nullptr;
     bool const   isDoor = isTwoBlockDoor(ghost);
 
@@ -976,6 +982,10 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     for (auto const& cand : candidates) {
         BlockPos const cell{cand.x, cand.y, cand.z};
 
+        // Skip stale/already-filled cells before inventory scans and geometry
+        // planning. This also handles waterlogged bodies whose solid cell exists.
+        if (!region.getBlock(cell).isAir()) continue;
+
         // Empty suppression state takes one branch for the entire candidate
         // batch; hash lookups happen only during an active ten-second window.
         if (suppressionsActive
@@ -1037,8 +1047,12 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             return;
         }
         player.setSelectedSlot(found.slot);
-        if (placeBlock(player, target, found.slot, *found.item)) markPlaced(cell, now);
-        return;
+        if (placeBlock(player, target, found.slot, *found.item)) {
+            markPlaced(cell, now);
+            return;
+        }
+        // One stale/invalid cell must not consume the whole range-placement tick.
+        cacheFailedPlan(failedKey, now);
     }
 }
 
