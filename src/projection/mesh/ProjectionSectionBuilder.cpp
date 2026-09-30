@@ -161,7 +161,7 @@ constexpr std::uint32_t WrongBlockColorAbgrRgb = 0x003333FFU; // #FF3333
 constexpr std::uint32_t WrongStateColorAbgrRgb = 0x001090FFU; // #FF9010
 
 constexpr std::uint32_t LiquidWaterTintAbgrRgb = 0x00E4763FU; // #3F76E4
-constexpr std::uint32_t LiquidLavaTintAbgrRgb  = 0x00FFFFFFU; // white
+constexpr std::uint32_t LiquidLavaTintAbgrRgb  = 0x001080FFU; // #FF8010
 
 void setColorAbgr(Tessellator& tessellator, std::uint32_t colorAbgr) {
     tessellator.color(
@@ -1574,11 +1574,8 @@ void buildLiquidProxySectionMesh(
         nullptr,
         BoundingBox{}
     };
-    // Textured liquid proxy hulls. LHolo never lies to the vanilla
-    // world or chunk pipeline (that leaks into gameplay), so missing
-    // liquids draw as translucent hulls here. The hulls reuse the
-    // vanilla terrain-atlas water/lava tiles and travel the exact
-    // material path used for glass, keeping them purely cosmetic.
+    // Fallback only: the preferred path remains Praxis Exact Replay. Cells
+    // rejected by that path use this cosmetic terrain-atlas proxy.
     std::vector<std::size_t> liquidProxyIndices;
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
@@ -1606,11 +1603,31 @@ void buildLiquidProxySectionMesh(
         ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
-            auto const* expectedLiquid = transformExpectedBlock(entry.liquid, sectionTransformSettings, identityTransform);
+            auto const* expectedLiquid = transformExpectedBlock(
+                entry.liquid, sectionTransformSettings, identityTransform
+            );
             if (!expectedLiquid) continue;
+
+            bool const isLava = expectedLiquid->getTypeName().find("lava") != std::string::npos
+                || expectedLiquid->getBlockType().mMaterial.mSuperHot;
             auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
-            auto const* uvSet = graphics ? &graphics->getTexture(0, 0) : nullptr;
-            auto const p = transformStructurePosition(entry, *state.structure, mirrorMode, rotationTurns);
+            auto const* uvSetStill = graphics ? &graphics->getTexture(0, 0) : nullptr;
+            auto const* uvSetFlow = graphics ? &graphics->getTexture(2, 0) : nullptr;
+            if (!uvSetFlow) uvSetFlow = uvSetStill;
+
+            float const u0s = uvSetStill ? uvSetStill->_u0 : 0.0f;
+            float const v0s = uvSetStill ? uvSetStill->_v0 : 0.0f;
+            float const u1s = uvSetStill ? uvSetStill->_u1 : 0.0f;
+            float const v1s = uvSetStill ? uvSetStill->_v1 : 0.0f;
+            float const u0f = uvSetFlow ? uvSetFlow->_u0 : u0s;
+            float const v0f = uvSetFlow ? uvSetFlow->_v0 : v0s;
+            float const u1f = uvSetFlow ? uvSetFlow->_u1 : u1s;
+            float const v1f = uvSetFlow ? uvSetFlow->_v1 : v1s;
+            float const dvf = v1f - v0f;
+
+            auto const p = transformStructurePosition(
+                entry, *state.structure, mirrorMode, rotationTurns
+            );
             BlockPos const worldPosition{
                 state.anchor.x + offsetX + p.x,
                 state.anchor.y + offsetY + p.y,
@@ -1628,56 +1645,66 @@ void buildLiquidProxySectionMesh(
             auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
                 auto const* neighbor = neighborEntry(dx, dy, dz);
                 if (!neighbor || !neighbor->liquid) return false;
-                auto const* transformed = transformExpectedBlock(neighbor->liquid, sectionTransformSettings, identityTransform);
-                return transformed && transformed->getTypeName() == expectedLiquid->getTypeName();
+                auto const* transformed = transformExpectedBlock(
+                    neighbor->liquid, sectionTransformSettings, identityTransform
+                );
+                if (!transformed) return false;
+                bool const neighborIsLava =
+                    transformed->getTypeName().find("lava") != std::string::npos
+                    || transformed->getBlockType().mMaterial.mSuperHot;
+                return neighborIsLava == isLava;
             };
-            // Flow-aware surface. Source and submerged cells stay full;
-            // flowing cells taper by liquid_depth, and each top corner is
-            // averaged from the surrounding same-liquid columns (an air
-            // column pulls a corner down toward the spill). The result is
-            // a surface that slopes downhill, showing the flow direction.
+
             constexpr float surface = 8.0f / 9.0f;
             auto const liquidDepth = [](Block const& block) -> int {
                 for (auto const& [key, value] : block.mSerializationId.get()) {
                     if (key != "states" || !value.hold<::CompoundTag>()) continue;
                     for (auto const& [stateKey, stateValue] : value.get<::CompoundTag>()) {
-                        if (stateKey == "liquid_depth" && stateValue.getId() == ::Tag::Type::Int)
+                        if (stateKey == "liquid_depth"
+                            && stateValue.getId() == ::Tag::Type::Int) {
                             return stateValue.get<::IntTag>().data;
+                        }
                     }
                 }
                 return 0;
             };
             auto const fluidHeight = [](int depth) -> float {
-                if (depth <= 0) return 8.0f / 9.0f;   // source
-                if (depth >= 8) return 1.0f;          // falling counts as full
+                if (depth <= 0) return 8.0f / 9.0f;
+                if (depth >= 8) return 1.0f;
                 return (8.0f - static_cast<float>(depth)) / 9.0f;
             };
-            // Height (0..1) of the same-liquid column at (dx,dz); -1 for a
-            // solid/other block (ignored), 0 for air (spill).
             auto const columnHeight = [&](int dx, int dz) -> float {
-                auto const* n = (dx == 0 && dz == 0) ? &entry : neighborEntry(dx, 0, dz);
+                auto const* n = (dx == 0 && dz == 0)
+                    ? &entry : neighborEntry(dx, 0, dz);
                 if (!n) return 0.0f;
                 if (!n->liquid) return -1.0f;
-                auto const* t = transformExpectedBlock(n->liquid, sectionTransformSettings, identityTransform);
-                if (!t || t->getTypeName() != expectedLiquid->getTypeName()) return -1.0f;
-                if (neighborIsSameLiquid(dx, 1, dz)) return 1.0f;  // submerged
-                return fluidHeight(liquidDepth(*t));
+                auto const* transformed = transformExpectedBlock(
+                    n->liquid, sectionTransformSettings, identityTransform
+                );
+                if (!transformed) return -1.0f;
+                bool const neighborIsLava =
+                    transformed->getTypeName().find("lava") != std::string::npos
+                    || transformed->getBlockType().mMaterial.mSuperHot;
+                if (neighborIsLava != isLava) return -1.0f;
+                if (neighborIsSameLiquid(dx, 1, dz)) return 1.0f;
+                return fluidHeight(liquidDepth(*transformed));
             };
             auto const cornerHeight = [&](int dx, int dz) -> float {
                 float best = -1.0f, sum = 0.0f;
-                int   count = 0;
+                int count = 0;
                 int const offsets[4][2] = {{0, 0}, {dx, 0}, {0, dz}, {dx, dz}};
                 for (auto const& o : offsets) {
                     float const h = columnHeight(o[0], o[1]);
-                    if (h < 0.0f) continue;  // solid: does not affect the surface
+                    if (h < 0.0f) continue;
                     best = std::max(best, h);
                     sum += h;
                     ++count;
                 }
-                if (best >= surface) return best;  // a source/full column keeps it high
+                if (best >= surface) return best;
                 return count > 0 ? sum / static_cast<float>(count) : surface;
             };
-            auto const tint = expectedLiquid->getBlockType().mMaterial.mSuperHot
+
+            auto const tint = isLava
                 ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
                 : (LiquidWaterTintAbgrRgb | (alpha << 24U));
             float const x0 = static_cast<float>(p.x);
@@ -1685,38 +1712,61 @@ void buildLiquidProxySectionMesh(
             float const z0 = static_cast<float>(p.z);
             float const x1 = static_cast<float>(p.x + 1);
             float const z1 = static_cast<float>(p.z + 1);
-            // Per-corner top heights (world Y). c<x><z>: x0/x1, z0/z1.
             float const yc00 = y0 + cornerHeight(-1, -1);
             float const yc10 = y0 + cornerHeight( 1, -1);
             float const yc01 = y0 + cornerHeight(-1,  1);
             float const yc11 = y0 + cornerHeight( 1,  1);
-            // Full-tile UVs when the atlas tile is available; a tiny
-            // degenerate UV otherwise still renders as flat tint.
-            float const u0 = uvSet ? uvSet->_u0 : 0.0f;
-            float const v0 = uvSet ? uvSet->_v0 : 0.0f;
-            float const u1 = uvSet ? uvSet->_u1 : 0.0f;
-            float const v1 = uvSet ? uvSet->_v1 : 0.0f;
-            auto addLiquidFace = [&](
-                Vec3 const& a, Vec3 const& b, Vec3 const& c, Vec3 const& d
+
+            auto addQuad = [&](
+                Vec3 const& p0, float ua, float va,
+                Vec3 const& p1, float ub, float vb,
+                Vec3 const& p2, float uc, float vc,
+                Vec3 const& p3, float ud, float vd
             ) {
                 setColorAbgr(tessellator, tint);
-                tessellator.tex2({u0, v0}); tessellator.vertex(a.x, a.y, a.z);
-                tessellator.tex2({u0, v1}); tessellator.vertex(b.x, b.y, b.z);
-                tessellator.tex2({u1, v1}); tessellator.vertex(c.x, c.y, c.z);
-                tessellator.tex2({u1, v0}); tessellator.vertex(d.x, d.y, d.z);
+                tessellator.tex2({ua, va}); tessellator.vertex(p0.x, p0.y, p0.z);
+                tessellator.tex2({ub, vb}); tessellator.vertex(p1.x, p1.y, p1.z);
+                tessellator.tex2({uc, vc}); tessellator.vertex(p2.x, p2.y, p2.z);
+                tessellator.tex2({ud, vd}); tessellator.vertex(p3.x, p3.y, p3.z);
             };
-            if (!neighborEntry(0, -1, 0))
-                addLiquidFace({x0,y0,z1}, {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1});
-            if (!neighborIsSameLiquid(0, 1, 0))
-                addLiquidFace({x0,yc00,z0}, {x0,yc01,z1}, {x1,yc11,z1}, {x1,yc10,z0});
-            if (!neighborIsSameLiquid(0, 0, -1))
-                addLiquidFace({x0,y0,z0}, {x0,yc00,z0}, {x1,yc10,z0}, {x1,y0,z0});
-            if (!neighborIsSameLiquid(0, 0, 1))
-                addLiquidFace({x1,y0,z1}, {x1,yc11,z1}, {x0,yc01,z1}, {x0,y0,z1});
-            if (!neighborIsSameLiquid(-1, 0, 0))
-                addLiquidFace({x0,y0,z1}, {x0,yc01,z1}, {x0,yc00,z0}, {x0,y0,z0});
-            if (!neighborIsSameLiquid(1, 0, 0))
-                addLiquidFace({x1,y0,z0}, {x1,yc10,z0}, {x1,yc11,z1}, {x1,y0,z1});
+
+            auto const* bottom = neighborEntry(0, -1, 0);
+            bool const bottomIsSolid = bottom && bottom->block && !bottom->block->isAir();
+            bool const bottomIsSameLiquid = neighborIsSameLiquid(0, -1, 0);
+            if (!bottomIsSolid && !bottomIsSameLiquid) {
+                addQuad(
+                    {x0,y0,z1}, u0s,v1s,
+                    {x0,y0,z0}, u0s,v0s,
+                    {x1,y0,z0}, u1s,v0s,
+                    {x1,y0,z1}, u1s,v1s
+                );
+            }
+            if (!neighborIsSameLiquid(0, 1, 0)) {
+                addQuad(
+                    {x0,yc00,z0}, u0s,v0s,
+                    {x0,yc01,z1}, u0s,v1s,
+                    {x1,yc11,z1}, u1s,v1s,
+                    {x1,yc10,z0}, u1s,v0s
+                );
+            }
+
+            auto addSideFace = [&](
+                float xa, float za, float yca,
+                float xb, float zb, float ycb
+            ) {
+                float const ha = std::clamp(yca - y0, 0.0f, 1.0f);
+                float const hb = std::clamp(ycb - y0, 0.0f, 1.0f);
+                addQuad(
+                    {xa,y0, za}, u0f,v1f,
+                    {xa,yca,za}, u0f,v1f - dvf * ha,
+                    {xb,ycb,zb}, u1f,v1f - dvf * hb,
+                    {xb,y0, zb}, u1f,v1f
+                );
+            };
+            if (!neighborIsSameLiquid( 0, 0,-1)) addSideFace(x0,z0,yc00,x1,z0,yc10);
+            if (!neighborIsSameLiquid( 0, 0, 1)) addSideFace(x1,z1,yc11,x0,z1,yc01);
+            if (!neighborIsSameLiquid(-1, 0, 0)) addSideFace(x0,z1,yc01,x0,z0,yc00);
+            if (!neighborIsSameLiquid( 1, 0, 0)) addSideFace(x1,z0,yc10,x1,z1,yc11);
         }
         state.liquidProxySectionMeshes[section] = std::make_unique<mce::Mesh>(tessellator.end(
             uploadMode,
@@ -1726,7 +1776,6 @@ void buildLiquidProxySectionMesh(
     } else {
         state.liquidProxySectionMeshes[section].reset();
     }
-
 }
 
 void buildBlockEntityPlaceholderSectionMesh(
