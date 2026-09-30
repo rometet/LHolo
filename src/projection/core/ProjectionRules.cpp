@@ -119,11 +119,15 @@ Block const& withFlattenedConnections(
 
 bool projectionStatesMatch(Block const& expected, Block const& actual) {
     if (expected == actual) return true;
-    if (expected.getTypeName() != actual.getTypeName()) return false;
+    auto const& typeName = expected.getTypeName();
+    if (typeName != actual.getTypeName()) return false;
+    // Bamboo's age/leaves/thickness are dynamic growth states controlled by
+    // the engine rather than by player placement. Matching type is sufficient.
+    if (typeName == "minecraft:bamboo") return true;
     // Litematic's Java `stage` maps to Bedrock's dynamic `age_bit`, which is
     // reset when a player places a sapling. Ignore only that growth bit; any
     // other present or future sapling state remains part of correction.
-    if (isVanillaSaplingType(expected.getTypeName())) {
+    if (isVanillaSaplingType(typeName)) {
         return serializedStatesMatchExcept(expected, actual, "age_bit");
     }
 
