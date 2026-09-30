@@ -12,7 +12,7 @@ namespace lholo::projection::detail {
 class ProjectionController {
 public:
     bool installHooks();
-    void uninstallHooks();
+    bool uninstallHooks();
     void disableProjection();
 
 private:

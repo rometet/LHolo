@@ -2,6 +2,11 @@
 
 #include "render/OverlayMaterials.h"
 
+#include <cmath>
+#include <cstdint>
+
+#include <Windows.h>
+
 #include "mc/client/game/IClientInstance.h"
 #include "mc/client/gui/screens/ScreenContext.h"
 #include "mc/client/renderer/BaseActorRenderContext.h"
@@ -22,7 +27,24 @@ Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
     // ProjectionRenderFrame.cpp for why this reads through Impl on 1.26.40.
     auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
     if (!impl) return {};
-    return {impl[10], impl[11], impl[12]};
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(impl, &memory, sizeof(memory)) != sizeof(memory)
+        || memory.State != MEM_COMMIT
+        || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+        return {};
+    }
+    auto const begin = reinterpret_cast<std::uintptr_t>(impl);
+    auto const end = begin + 13U * sizeof(float);
+    auto const regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress)
+        + memory.RegionSize;
+    if (end < begin || end > regionEnd) return {};
+
+    Vec3 const camera{impl[10], impl[11], impl[12]};
+    if (!std::isfinite(camera.x) || !std::isfinite(camera.y)
+        || !std::isfinite(camera.z)) {
+        return {};
+    }
+    return camera;
 }
 
 OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
@@ -106,9 +128,11 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
     // whose shader outputs it as-is, keeping the vanilla selection outline
     // (uniform-driven color) as fallback.
     auto const* glowMaterial = render::resolveGlowSignMaterial();
+    auto* levelRendererPlayer = levelRenderer->mLevelRendererPlayer.get();
+    if (!glowMaterial && !levelRendererPlayer) return;
     auto const& material = glowMaterial
         ? *glowMaterial
-        : levelRenderer->mLevelRendererPlayer->mOutlineSelectionMaterial.get();
+        : levelRendererPlayer->mOutlineSelectionMaterial.get();
     if (material.mRenderMaterialInfoPtr.get() == nullptr) return;
     auto const texture = render::resolveWhiteTextureVariant(levelRenderer);
 

@@ -55,6 +55,6 @@ void resetDimensionSession();
 void resetWorldSession();
 
 bool installHook();
-void uninstallHook();
+bool uninstallHook();
 
 } // namespace lholo::place

@@ -9,6 +9,6 @@
 namespace lholo::projection::detail {
 
 bool installProjectionRenderHooks();
-void uninstallProjectionRenderHooks();
+bool uninstallProjectionRenderHooks();
 
 } // namespace lholo::projection::detail

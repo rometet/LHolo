@@ -26,21 +26,21 @@ bool ProjectionController::installHooks() {
     return true;
 }
 
-void ProjectionController::uninstallHooks() {
-    uninstallProjectionRenderHooks();
-    uninstallProjectionGameHooks();
-    ProjectionSession::getInstance().withLockedState(
-        [](ProjectionState&, overlay::BoundsWireframe& captureBounds) {
-            captureBounds.clear();
-        }
-    );
+bool ProjectionController::uninstallHooks() {
+    bool ok = true;
+    ok = uninstallProjectionRenderHooks() && ok;
+    ok = uninstallProjectionGameHooks() && ok;
+    // Do not mutate projection-owned state here. App teardown removes hooks and
+    // drains every typed detour first, then releases world/session state.
+    return ok;
 }
 
 void ProjectionController::disableProjection() {
     auto& session = ProjectionSession::getInstance();
     session.withLockedState(
-        [](ProjectionState& state, overlay::BoundsWireframe&) {
+        [](ProjectionState& state, overlay::BoundsWireframe& captureBounds) {
             resetProjectionState(state);
+            captureBounds.clear();
         }
     );
     // A requested restore anchor belongs only to the projection being

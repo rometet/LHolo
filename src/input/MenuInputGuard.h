@@ -21,6 +21,6 @@ public:
 };
 
 MenuInputGuardStatus installMenuInputGuard();
-void uninstallMenuInputGuard();
+bool uninstallMenuInputGuard();
 
 } // namespace lholo::input

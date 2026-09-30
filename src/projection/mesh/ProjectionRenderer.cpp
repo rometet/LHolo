@@ -569,7 +569,12 @@ void submitProjectedBlockActorPass(
     Vec3 const&             camera,
     bool                    renderAlphaLayer
 ) {
-    if (state.projectedBlockActors.empty()) return;
+    if (state.projectedBlockActors.empty()
+        || !state.expectedWorldBlocks
+        || !state.expectedWorldLiquids
+        || !state.expectedWorldBlockActors) {
+        return;
+    }
 
     alignas(mce::MaterialPtr) static const std::byte sNoForcedMaterialStorage[sizeof(mce::MaterialPtr)]{};
     auto const& noForcedMaterial = *reinterpret_cast<mce::MaterialPtr const*>(sNoForcedMaterialStorage);
@@ -580,26 +585,43 @@ void submitProjectedBlockActorPass(
         *state.expectedWorldBlockActors
     );
     for (auto const& projected : state.projectedBlockActors) {
-        auto const correctionState = state.correctionStates[projected.structureIndex];
-        auto* renderComponent = projected.actor->_getRenderComponent();
-        if (correctionState == CorrectionState::Correct
-            || correctionState == CorrectionState::WrongType
-            || correctionState == CorrectionState::WrongState
-            || !renderComponent
-            || !renderComponent->isWithinRenderDistance(camera)) {
+        if (!projected.actor || !projected.block
+            || projected.structureIndex >= state.correctionStates.size()) {
             continue;
         }
-        dispatcher.render(
-            renderContext,
-            region,
-            *renderComponent,
-            *projected.block,
-            renderAlphaLayer,
-            noForcedMaterial,
-            nullptr,
-            -1,
-            std::nullopt
-        );
+        auto const correctionState = state.correctionStates[projected.structureIndex];
+        try {
+            auto* renderComponent = projected.actor->_getRenderComponent();
+            if (correctionState == CorrectionState::Correct
+                || correctionState == CorrectionState::WrongType
+                || correctionState == CorrectionState::WrongState
+                || !renderComponent) {
+                continue;
+            }
+            auto const rendererId = renderComponent->getRendererId();
+            if (static_cast<unsigned int>(rendererId)
+                >= static_cast<unsigned int>(BlockActorRendererId::Count)) {
+                continue;
+            }
+            if (!dispatcher.mRenderers.get()[rendererId]
+                || !renderComponent->isWithinRenderDistance(camera)) {
+                continue;
+            }
+            dispatcher.render(
+                renderContext,
+                region,
+                *renderComponent,
+                *projected.block,
+                renderAlphaLayer,
+                noForcedMaterial,
+                nullptr,
+                -1,
+                std::nullopt
+            );
+        } catch (...) {
+            // A version-mismatched block actor renderer must not unwind out of
+            // Minecraft's render callback.
+        }
     }
 }
 
@@ -615,6 +637,8 @@ void submitProjectionMeshPass(
     bool                    correctionSeeThrough,
     bool                    missingSeeThrough
 ) {
+    if (!state.terrainTextureVariant || state.sections.empty()) return;
+
     auto& itemRenderer = renderContext.mItemInHandRenderer;
     auto const& blendMaterial = itemRenderer.mMatBlendBlock.get();
 
@@ -644,13 +668,16 @@ void submitProjectionMeshPass(
         telemetry.praxisCompatVerticesReplayedPerFrame = 0;
         telemetry.praxisCompatReplayMicros = 0;
         telemetry.praxisCompatSubmitMicros = 0;
+        auto const nativeLiquidSectionCount = std::min({
+            state.sections.size(),
+            state.nativeLiquidSectionMeshes.size(),
+            state.praxisCompatLiquidSections.size()
+        });
         for (std::size_t section = 0;
-             section < state.nativeLiquidSectionMeshes.size();
-            ++section) {
+             section < nativeLiquidSectionCount;
+             ++section) {
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
-            auto const* compat = section < state.praxisCompatLiquidSections.size()
-                ? state.praxisCompatLiquidSections[section].get()
-                : nullptr;
+            auto const* compat = state.praxisCompatLiquidSections[section].get();
             if ((mesh && mesh->isValid()) || (compat && compat->ready())) {
                 nativeLiquidSections.push_back(section);
             }
@@ -972,8 +999,13 @@ void submitProjectionMeshPass(
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
         std::vector<std::size_t> liquidSections;
+        auto const liquidProxySectionCount = std::min({
+            state.sections.size(),
+            state.liquidProxySectionMeshes.size(),
+            state.liquidProxySectionCellCounts.size()
+        });
         for (std::size_t liquidSection = 0;
-             liquidSection < state.liquidProxySectionMeshes.size();
+             liquidSection < liquidProxySectionCount;
              ++liquidSection) {
             auto const& mesh = state.liquidProxySectionMeshes[liquidSection];
             if (mesh && mesh->isValid()) liquidSections.push_back(liquidSection);
@@ -1018,8 +1050,11 @@ void submitProjectionMeshPass(
     if (!renderAlphaLayer) return;
 
     auto* levelRenderer = client.getLevelRenderer();
-    auto const& outlineMaterial = levelRenderer
-        ? levelRenderer->mLevelRendererPlayer->mOutlineSelectionMaterial.get()
+    auto* levelRendererPlayer = levelRenderer
+        ? levelRenderer->mLevelRendererPlayer.get()
+        : nullptr;
+    auto const& outlineMaterial = levelRendererPlayer
+        ? levelRendererPlayer->mOutlineSelectionMaterial.get()
         : itemRenderer.mMatBlendBlock.get();
     auto const overlayTexture = render::resolveWhiteTextureVariant(levelRenderer);
     // Prefer the glow sign text material for the bounds box: its shader reads
@@ -1039,8 +1074,8 @@ void submitProjectionMeshPass(
             nullptr
         );
     }
-    auto const& warningMaterial = levelRenderer
-        ? levelRenderer->mLevelRendererPlayer->selectionBlockEntityOverlayColorMaterial.get()
+    auto const& warningMaterial = levelRendererPlayer
+        ? levelRendererPlayer->selectionBlockEntityOverlayColorMaterial.get()
         : itemRenderer.mMatBlendBlockNoColor.get();
     // seeThroughMeshes is passed per call so the "missing" correction meshes stay
     // depth-tested while only the "wrong" ones honor the X-ray toggle.

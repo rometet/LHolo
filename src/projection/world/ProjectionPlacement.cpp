@@ -54,7 +54,7 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
         *state.expectedWorldBlockActors
     };
     for (auto const& [key, actor] : *state.expectedWorldBlockActors) {
-        if (actor->mType != BlockActorType::Chest) continue;
+        if (!actor || actor->mType != BlockActorType::Chest) continue;
         auto* chest = static_cast<ChestBlockActor*>(actor.get());
         if (chest->mLargeChestPaired != nullptr) continue;
 
@@ -65,6 +65,7 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
                 std::tuple{neighbor.x, neighbor.y, neighbor.z}
             );
             if (found == state.expectedWorldBlockActors->end()
+                || !found->second
                 || found->second->mType != BlockActorType::Chest) {
                 continue;
             }
@@ -86,6 +87,16 @@ bool rebuildProjectionPlacement(
     bool                               restart
 ) {
     constexpr std::size_t kPlacementCellsPerFrame = 4096;
+
+    if (!state.structure || !state.level || !state.blockTessellator
+        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
+        || !state.expectedWorldBlockActors || !state.expectedWorldBlockIndices
+        || state.correctionStates.size() < state.structure->renderBlocks.size()
+        || state.blockActorRendererAvailable.size() < state.structure->renderBlocks.size()
+        || state.blockToSection.size() < state.structure->renderBlocks.size()) {
+        state.placementBuildActive = false;
+        return false;
+    }
 
     if (restart) {
         // A moved placement keeps its local GPU geometry, but the virtual world
@@ -156,26 +167,37 @@ bool rebuildProjectionPlacement(
         if (transformedBlock) {
             state.expectedWorldBlocks->emplace(worldKey, transformedBlock);
             if (transformedBlock->getBlockType().getBlockEntityType() != BlockActorType::Undefined) {
-                auto blockActor = VanillaBlockActorFactory::createBlockActor(
-                    worldPosition, transformedBlock->getBlockType()
-                );
-                if (blockActor) {
-                    if (entry.blockEntityNbt) {
-                        NewUniqueIdsDataLoadHelper dataLoadHelper;
-                        dataLoadHelper.mLevel = state.level;
-                        blockActor->load(*state.level, *entry.blockEntityNbt, dataLoadHelper);
-                        blockActor->mPosition = worldPosition;
+                try {
+                    auto blockActor = VanillaBlockActorFactory::createBlockActor(
+                        worldPosition, transformedBlock->getBlockType()
+                    );
+                    if (blockActor) {
+                        if (entry.blockEntityNbt) {
+                            NewUniqueIdsDataLoadHelper dataLoadHelper;
+                            dataLoadHelper.mLevel = state.level;
+                            blockActor->load(*state.level, *entry.blockEntityNbt, dataLoadHelper);
+                            blockActor->mPosition = worldPosition;
+                        }
+                        auto* actor = blockActor.get();
+                        state.expectedWorldBlockActors->emplace(worldKey, std::move(blockActor));
+                        auto* renderComponent = actor->_getRenderComponent();
+                        if (renderComponent) {
+                            auto const rendererId = renderComponent->getRendererId();
+                            auto const rendererIndex = static_cast<unsigned int>(rendererId);
+                            if (rendererIndex
+                                    < static_cast<unsigned int>(BlockActorRendererId::Count)
+                                && dispatcher.mRenderers.get()[rendererId]) {
+                                state.projectedBlockActors.push_back({
+                                    worldPosition, transformedBlock, actor, index
+                                });
+                                state.blockActorRendererAvailable[index] = 1;
+                            }
+                        }
                     }
-                    auto* actor = blockActor.get();
-                    state.expectedWorldBlockActors->emplace(worldKey, std::move(blockActor));
-                    auto* renderComponent = actor->_getRenderComponent();
-                    if (renderComponent
-                        && dispatcher.mRenderers.get()[renderComponent->getRendererId()]) {
-                        state.projectedBlockActors.push_back({
-                            worldPosition, transformedBlock, actor, index
-                        });
-                        state.blockActorRendererAvailable[index] = 1;
-                    }
+                } catch (...) {
+                    // Block-entity NBT is file-controlled. A malformed or
+                    // version-incompatible actor must not unwind through the
+                    // render hook; the ghost block itself remains renderable.
                 }
             }
         }
@@ -215,14 +237,16 @@ bool rebuildProjectionPlacement(
         }
     }
 
-    auto* stateAddress = &state;
+    auto expectedWorldBlocks = state.expectedWorldBlocks;
     auto* regionAddress = &region;
     state.blockTessellator->mCachedGetBlock.get()
-        = [stateAddress, regionAddress](BlockPos const& position) -> Block const& {
-            auto const found = stateAddress->expectedWorldBlocks->find(
+        = [expectedWorldBlocks = std::move(expectedWorldBlocks), regionAddress](
+              BlockPos const& position
+          ) -> Block const& {
+            auto const found = expectedWorldBlocks->find(
                 std::tuple{position.x, position.y, position.z}
             );
-            return found == stateAddress->expectedWorldBlocks->end()
+            return found == expectedWorldBlocks->end()
                 ? regionAddress->getBlock(position) : *found->second;
         };
 
