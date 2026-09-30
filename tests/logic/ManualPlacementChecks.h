@@ -1,6 +1,7 @@
 // Regression tests shared by LHoloLogicTests and the portable audit runner.
 #pragma once
 #include "place/ManualPlacementRules.h"
+#include "place/PlacementDirectionRules.h"
 #include "place/PlacementState.h"
 
 #include <map>
@@ -12,6 +13,51 @@ namespace lholo::tests {
 template <typename Check>
 void runManualPlacementChecks(Check check) {
     using namespace place::detail;
+
+    using Rule = PlacementDirectionRule;
+    check(placementDirectionRule("minecraft:hopper") == Rule::Facing);
+    check(placementDirectionRule("minecraft:observer") == Rule::Facing);
+    check(placementDirectionRule("minecraft:dispenser") == Rule::Facing);
+    check(placementDirectionRule("minecraft:dropper") == Rule::Facing);
+    check(placementDirectionRule("minecraft:piston") == Rule::Facing);
+    check(placementDirectionRule("minecraft:sticky_piston") == Rule::Facing);
+    check(placementDirectionRule("minecraft:barrel") == Rule::Facing);
+    check(placementDirectionRule("minecraft:lightning_rod") == Rule::Facing);
+    check(placementDirectionRule("minecraft:waxed_oxidized_lightning_rod") == Rule::Facing);
+    check(placementDirectionRule("minecraft:stone_button") == Rule::Facing);
+    check(placementDirectionRule("minecraft:unpowered_repeater") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:powered_comparator") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:tripwire_hook") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:lectern") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:calibrated_sculk_sensor") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:chiseled_bookshelf") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:oak_fence_gate") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:bamboo_shelf") == Rule::Horizontal);
+    check(placementDirectionRule("minecraft:crafter") == Rule::Orientation);
+    check(placementDirectionRule("minecraft:lever") == Rule::Lever);
+    check(placementDirectionRule("minecraft:bell") == Rule::Bell);
+    check(placementDirectionRule("minecraft:oak_trapdoor") == Rule::Trapdoor);
+    check(placementDirectionRule("minecraft:stone") == Rule::None);
+    check(isEnvironmentOnlyPlacementBlock("minecraft:redstone_wire"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:heavy_weighted_pressure_plate"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:trip_wire"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:tripwire"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:sculk_sensor"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:copper_bulb"));
+    check(isEnvironmentOnlyPlacementBlock("minecraft:waxed_oxidized_copper_bulb"));
+    check(!isEnvironmentOnlyPlacementBlock("minecraft:hopper"));
+    for (auto state : {
+             "direction", "minecraft:cardinal_direction", "facing_direction",
+             "minecraft:facing_direction", "orientation", "pillar_axis",
+             "weirdo_direction", "upside_down_bit", "minecraft:vertical_half",
+             "torch_facing_direction", "rail_direction", "lever_direction"
+         }) {
+        check(isPlacementControlledStateKey(state));
+    }
+    for (auto state : {"redstone_signal", "powered_bit", "triggered_bit", "toggle_bit", "open_bit"}) {
+        check(!isPlacementControlledStateKey(state));
+    }
+
     check(normalizeManualPlacementItemId(" dirt ") == "minecraft:dirt");
     check(normalizeManualPlacementItemId("MINECRAFT:SCAFFOLDING") == "minecraft:scaffolding");
     check(normalizeManualPlacementItemId("addon:temporary/block") == "addon:temporary/block");
@@ -56,14 +102,30 @@ void runManualPlacementChecks(Check check) {
         {"minecraft:oak_fence_gate", "in_wall_bit"},
         {"minecraft:fence_gate", "open_bit"},
         {"minecraft:observer", "powered_bit"},
+        {"minecraft:lightning_rod", "powered_bit"},
         {"minecraft:hopper", "toggle_bit"},
+        {"minecraft:bell", "toggle_bit"},
+        {"minecraft:dispenser", "triggered_bit"},
+        {"minecraft:dropper", "triggered_bit"},
+        {"minecraft:crafter", "crafting"},
+        {"minecraft:crafter", "triggered_bit"},
+        {"minecraft:barrel", "open_bit"},
+        {"minecraft:lectern", "powered_bit"},
+        {"minecraft:sculk_sensor", "sculk_sensor_phase"},
+        {"minecraft:calibrated_sculk_sensor", "sculk_sensor_phase"},
+        {"minecraft:chiseled_bookshelf", "books_stored"},
+        {"minecraft:bamboo_shelf", "powered_bit"},
+        {"minecraft:bamboo_shelf", "powered_shelf_type"},
+        {"minecraft:copper_bulb", "lit"},
+        {"minecraft:copper_bulb", "powered_bit"},
         {"minecraft:heavy_weighted_pressure_plate", "redstone_signal"},
         {"minecraft:golden_rail", "rail_data_bit"},
         {"minecraft:activator_rail", "rail_data_bit"},
         {"minecraft:detector_rail", "rail_data_bit"},
         {"minecraft:tripwire_hook", "attached_bit"},
+        {"minecraft:trip_wire", "powered_bit"},
+        {"minecraft:trip_wire", "suspended_bit"},
         {"minecraft:tripwire", "powered_bit"},
-        {"minecraft:tripwire", "suspended_bit"},
         {"minecraft:scaffolding", "stability"},
         {"minecraft:scaffolding", "stability_check"}
     };
