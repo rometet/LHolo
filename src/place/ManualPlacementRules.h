@@ -80,13 +80,27 @@ inline bool isManualPlacementDerivedState(std::string_view name, std::string_vie
     if (name.ends_with("_fence_gate") || name == "fence_gate") {
         return state == "open_bit" || state == "in_wall_bit";
     }
-    if (name == "observer") return state == "powered_bit";
-    if (name == "hopper") return state == "toggle_bit";
+    if (name == "observer" || name.ends_with("lightning_rod")) {
+        return state == "powered_bit";
+    }
+    if (name == "hopper" || name == "bell") return state == "toggle_bit";
+    if (name == "dispenser" || name == "dropper") return state == "triggered_bit";
+    if (name == "crafter") return state == "crafting" || state == "triggered_bit";
+    if (name == "barrel") return state == "open_bit";
+    if (name == "lectern") return state == "powered_bit";
+    if (name == "sculk_sensor" || name == "calibrated_sculk_sensor") {
+        return state == "sculk_sensor_phase";
+    }
+    if (name == "chiseled_bookshelf") return state == "books_stored";
+    if (name.ends_with("_shelf")) {
+        return state == "powered_bit" || state == "powered_shelf_type";
+    }
+    if (name.ends_with("copper_bulb")) return state == "lit" || state == "powered_bit";
     if (name.ends_with("_pressure_plate")) return state == "redstone_signal";
     if (name == "golden_rail" || name == "detector_rail" || name == "activator_rail") {
         return state == "rail_data_bit"; // rail_direction remains strict.
     }
-    if (name == "tripwire" || name == "tripwire_hook") {
+    if (name == "trip_wire" || name == "tripwire" || name == "tripwire_hook") {
         return state == "attached_bit" || state == "powered_bit" || state == "suspended_bit";
     }
     if (name == "scaffolding") return state == "stability" || state == "stability_check";
