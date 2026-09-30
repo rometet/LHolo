@@ -616,10 +616,13 @@ bool placementDirectionMatches(Block const& predicted, Block const& ghost) {
         return sameSerializedState(predicted, ghost, "direction")
             && sameSerializedState(predicted, ghost, "attachment");
     case PlacementDirectionRule::Trapdoor:
+        // open_bit is never chosen by the initial block placement. Vanilla
+        // places the trapdoor closed; opening happens through a later use or
+        // redstone update. Requiring projected open_bit here made every open
+        // trapdoor impossible in easy/range mode. Direction and half are the
+        // actual placement-controlled states and remain strict.
         return sameSerializedState(predicted, ghost, "direction")
-            && sameSerializedState(predicted, ghost, "upside_down_bit")
-            && (placementState().manualMode()
-                || sameSerializedState(predicted, ghost, "open_bit"));
+            && sameSerializedState(predicted, ghost, "upside_down_bit");
     case PlacementDirectionRule::None:
         return false;
     }
