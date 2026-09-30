@@ -95,6 +95,8 @@ std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
 std::atomic_uint gHookCallbacks{};
 thread_local unsigned int gHookCallbackDepth{};
+thread_local char const*  gHookCallbackKind{"none"};
+thread_local UINT         gHookCallbackMessage{};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
 std::mutex       gInputStateMutex;
@@ -126,7 +128,13 @@ std::array<bool, 5>   gGameMouseButtonsDown{};
 std::atomic_bool      gConsumeEscapeRelease{false};
 
 struct HookCallbackGuard {
-    HookCallbackGuard() noexcept {
+    char const* previousKind{};
+    UINT previousMessage{};
+
+    explicit HookCallbackGuard(char const* kind, UINT message = 0) noexcept
+        : previousKind(gHookCallbackKind), previousMessage(gHookCallbackMessage) {
+        gHookCallbackKind = kind;
+        gHookCallbackMessage = message;
         ++gHookCallbackDepth;
         gHookCallbacks.fetch_add(1, std::memory_order_acq_rel);
     }
@@ -135,6 +143,8 @@ struct HookCallbackGuard {
     ~HookCallbackGuard() {
         gHookCallbacks.fetch_sub(1, std::memory_order_acq_rel);
         --gHookCallbackDepth;
+        gHookCallbackKind = previousKind;
+        gHookCallbackMessage = previousMessage;
     }
 };
 
@@ -142,16 +152,17 @@ bool insideHookCallback() noexcept {
     return gHookCallbackDepth != 0;
 }
 
-void waitForHookCallbacks() noexcept {
-    // Hooks are disabled before this is called, so the count is converging to
-    // zero. Require it to remain zero across a yield to cover a detour that was
-    // already in flight while MinHook restored the target bytes.
+void waitForHookCallbacks(unsigned allowedCurrentThreadDepth = 0) noexcept {
+    // Hooks are disabled before this is called, so the count converges to the
+    // callbacks already executing on this thread. During normal teardown that
+    // value is zero. During process-exit WM_DESTROY teardown, the current WndProc
+    // is intentionally allowed to remain until the original WndProc returns.
     for (;;) {
-        while (gHookCallbacks.load(std::memory_order_acquire) != 0) {
+        while (gHookCallbacks.load(std::memory_order_acquire) > allowedCurrentThreadDepth) {
             std::this_thread::yield();
         }
         std::this_thread::yield();
-        if (gHookCallbacks.load(std::memory_order_acquire) == 0) return;
+        if (gHookCallbacks.load(std::memory_order_acquire) <= allowedCurrentThreadDepth) return;
     }
 }
 
@@ -211,6 +222,9 @@ HWND findProcessWindow() {
 }
 
 void releaseGraphicsBackend() {
+    // A v3 companion owns its own ImGui/DX11 backend on the same device/context.
+    // Tear it down before LHolo releases or recreates the shared graphics device.
+    companion::resetGraphics();
     if (gGraphicsInitialized) {
         ImGui_ImplDX11_Shutdown();
         gGraphicsInitialized = false;
@@ -507,7 +521,7 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
 }
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"WndProc", message};
     if (gShuttingDown.load(std::memory_order_acquire)) {
         return gOriginalWndProc
             ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
@@ -619,7 +633,15 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         && gImGuiInitialized && anyMenuVisible()) {
         gMouseHandoffActive.store(false, std::memory_order_release);
         ClipCursor(nullptr);
-        ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+        if (companion::isVisible() && companion::usesIndependentRenderer()) {
+            companion::forwardWindowMessage(
+                window, message,
+                static_cast<std::uintptr_t>(wParam),
+                static_cast<std::intptr_t>(lParam)
+            );
+        } else {
+            ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+        }
         if (isFullscreenKeyMessage(message, wParam)) {
             return gOriginalWndProc
                 ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
@@ -646,7 +668,7 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
 }
 
 void executeCommandListsHook(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"ExecuteCommandLists"};
     if (!gShuttingDown.load(std::memory_order_acquire)
         && queue
         && !gGameQueue
@@ -780,18 +802,39 @@ void render(IDXGISwapChain* swapChain) {
 
     auto draw = [](ID3D11RenderTargetView* target) {
         gDeviceContext->OMSetRenderTargets(1, &target, nullptr);
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
 
-        if (structure::isGuiVisible()) {
-            structure::renderGui();
-        } else if (companion::isVisible()) {
-            companion::drawGui(ImGui::GetCurrentContext());
+        auto const companionVisible = companion::isVisible();
+        auto const independentCompanion = companion::usesIndependentRenderer();
+
+        if (companionVisible && independentCompanion) {
+            // Bridge v3: Praxis owns a completely separate ImGui context, font
+            // atlas and style. LHolo only lends the already-hooked render target
+            // and D3D11 device/context for this frame.
+            companion::renderIndependent(gDevice, gDeviceContext, gWindow, true);
         } else {
-            structure::renderHud();
-            structure::renderMaterialHud();
-            companion::drawHud(ImGui::GetCurrentContext());
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+
+            if (structure::isGuiVisible()) {
+                structure::renderGui();
+            } else if (companionVisible) {
+                // Legacy bridge v2 fallback.
+                companion::drawGui(ImGui::GetCurrentContext());
+            } else {
+                structure::renderHud();
+                structure::renderMaterialHud();
+                if (!independentCompanion)
+                    companion::drawHud(ImGui::GetCurrentContext());
+            }
+
+            structure::renderActionHint();
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        if (!companionVisible && independentCompanion && companion::hudNeeded()) {
+            companion::renderIndependent(gDevice, gDeviceContext, gWindow, false);
         }
 
         // Either menu may close itself from inside its draw callback.
@@ -800,9 +843,7 @@ void render(IDXGISwapChain* swapChain) {
             PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
             gGuiVisibleLastFrame = false;
         }
-        structure::renderActionHint();
-        ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
         ID3D11RenderTargetView* empty{};
         gDeviceContext->OMSetRenderTargets(1, &empty, nullptr);
     };
@@ -880,7 +921,7 @@ void render(IDXGISwapChain* swapChain) {
 }
 
 HRESULT __stdcall presentHook(IDXGISwapChain* swapChain, UINT interval, UINT flags) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"Present"};
     if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
     return gOriginalPresent(swapChain, interval, flags);
 }
@@ -891,7 +932,7 @@ HRESULT __stdcall present1Hook(
     UINT flags,
     DXGI_PRESENT_PARAMETERS const* parameters
 ) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"Present1"};
     if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
     return gOriginalPresent1(swapChain, interval, flags, parameters);
 }
@@ -904,7 +945,7 @@ HRESULT __stdcall resizeHook(
     DXGI_FORMAT format,
     UINT flags
 ) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"ResizeBuffers"};
     if (gShuttingDown.load(std::memory_order_acquire)) {
         return gOriginalResizeBuffers(swapChain, count, width, height, format, flags);
     }
@@ -939,7 +980,7 @@ HRESULT __stdcall resize1Hook(
     UINT const* creationNodeMask,
     IUnknown* const* presentQueue
 ) {
-    HookCallbackGuard callbackGuard;
+    HookCallbackGuard callbackGuard{"ResizeBuffers1"};
     if (gShuttingDown.load(std::memory_order_acquire)) {
         return gOriginalResizeBuffers1(
             swapChain,
@@ -1102,12 +1143,39 @@ bool ensureInstalled() {
 namespace {
 
 bool shutdownLocked() {
-    // Waiting for callbacks from inside one of those callbacks would deadlock,
-    // while removing the hook underneath the current instruction pointer can
-    // crash. Refuse the unload so LeviLamina keeps this DLL resident.
-    if (insideHookCallback()) {
-        logger().error("Overlay teardown requested from inside an overlay callback");
+    unsigned allowedCurrentThreadDepth = 0;
+    bool const processExitWndProc = insideHookCallback()
+        && gHookCallbackKind
+        && std::string_view{gHookCallbackKind} == "WndProc"
+        && (gHookCallbackMessage == WM_DESTROY || gHookCallbackMessage == WM_NCDESTROY);
+
+    if (insideHookCallback() && !processExitWndProc) {
+        logger().error(
+            "Overlay teardown requested from inside overlay callback kind={} message=0x{:X}",
+            gHookCallbackKind ? gHookCallbackKind : "unknown",
+            static_cast<unsigned>(gHookCallbackMessage)
+        );
         return false;
+    }
+
+    if (processExitWndProc) {
+        // LeviLamina disables mods synchronously from Minecraft's WM_DESTROY
+        // path. The original WndProc will return into this wrapper after disable
+        // completes, so pin LHolo until process exit before dismantling the hooks.
+        HMODULE self{};
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&shutdownLocked),
+                &self
+            )) {
+            logger().error("Failed to pin LHolo for WM_DESTROY teardown");
+            return false;
+        }
+        allowedCurrentThreadDepth = gHookCallbackDepth;
+        logger().info(
+            "Process-exit overlay teardown from WndProc message=0x{:X}; module pinned until process exit",
+            static_cast<unsigned>(gHookCallbackMessage)
+        );
     }
 
     gShuttingDown.store(true, std::memory_order_release);
@@ -1138,7 +1206,7 @@ bool shutdownLocked() {
         return false;
     }
 
-    waitForHookCallbacks();
+    waitForHookCallbacks(allowedCurrentThreadDepth);
 
     // Praxis callbacks run inside Present/WndProc and have their own reader
     // barrier. After the outer hook drain, clearing the bridge cannot race UI
