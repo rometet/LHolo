@@ -139,14 +139,17 @@ LL_TYPE_INSTANCE_HOOK(
             origin(pos, face, handSlot);
             return;
         }
-        if (aimedBlockAcceptsRightClick(*this, pos)) {
-            cancelPendingManualPress();
-            origin(pos, face, handSlot);  // let vanilla open/use the block
-            return;
-        }
         auto const targetStatus = detail::manualTargetStatusUnderCrosshair();
+        // A ready projection target takes precedence over the interaction of the
+        // real support block behind it. This is essential for hoppers/torches
+        // placed against containers, droppers, dispensers and other interactive
+        // supports: vanilla must not open/use the support instead of placing.
         if (targetStatus == detail::ManualTargetStatus::Ready) {
             (void)placementState().beginManualPress(GetTickCount64());
+        } else if (aimedBlockAcceptsRightClick(*this, pos)) {
+            cancelPendingManualPress();
+            origin(pos, face, handSlot);  // no ready ghost: preserve vanilla interaction
+            return;
         } else if (targetStatus == detail::ManualTargetStatus::MissingMaterial) {
             cancelPendingManualPress();
             structure::showActionHint(i18n::Message{i18n::TextKey::ActionHintNoMatchingItem});

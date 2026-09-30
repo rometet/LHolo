@@ -597,6 +597,34 @@ bool placementDirectionMatches(Block const& predicted, Block const& ghost) {
     return false;
 }
 
+std::optional<uchar> deterministicSupportDirection(Block const& ghost) {
+    auto const& name = ghost.getTypeName();
+
+    // Hopper output direction is exactly the support block that vanilla is
+    // clicked against. Bedrock 1.26.51 still serializes hopper facing as the
+    // legacy numeric facing_direction state.
+    if (name == "minecraft:hopper") {
+        auto facing = serializedState(ghost, "facing_direction");
+        if (facing.empty()) facing = serializedState(ghost, "minecraft:facing_direction");
+        if (facing == "0" || facing == "down")  return static_cast<uchar>(Facing::Name::Down);
+        if (facing == "2" || facing == "north") return static_cast<uchar>(Facing::Name::North);
+        if (facing == "3" || facing == "south") return static_cast<uchar>(Facing::Name::South);
+        if (facing == "4" || facing == "west")  return static_cast<uchar>(Facing::Name::West);
+        if (facing == "5" || facing == "east")  return static_cast<uchar>(Facing::Name::East);
+        return std::nullopt;
+    }
+
+    // torch_facing_direction names the support relative to the torch. "top"
+    // means the torch stands on the block below; side values name that side.
+    auto const torchFacing = serializedState(ghost, "torch_facing_direction");
+    if (torchFacing == "top")   return static_cast<uchar>(Facing::Name::Down);
+    if (torchFacing == "north") return static_cast<uchar>(Facing::Name::North);
+    if (torchFacing == "south") return static_cast<uchar>(Facing::Name::South);
+    if (torchFacing == "west")  return static_cast<uchar>(Facing::Name::West);
+    if (torchFacing == "east")  return static_cast<uchar>(Facing::Name::East);
+    return std::nullopt;
+}
+
 bool isFastOpaquePlacementCandidate(Block const& ghost) {
     if (!ghost.getBlockType().mIsOpaqueFullBlock
         || detail::placementDirectionRule(ghost.getTypeName())
@@ -801,6 +829,24 @@ bool resolveOrientedPlacement(
     };
 
     auto const searchCurrentRotation = [&](ProjectionTarget& result) {
+        // Hopper and torch orientation is determined by the clicked support
+        // face, not by arbitrary player rotation. The projection already gives
+        // us that support direction, so use it directly instead of depending on
+        // getPlacementBlock's version-sensitive prediction for these families.
+        if (auto const supportDirection = deterministicSupportDirection(ghost)) {
+            BlockPos const at = neighborOf(cell, *supportDirection);
+            if (!region.getBlock(at).isAir()) {
+                uchar const face = oppositeFace(*supportDirection);
+                bool matched = false;
+                forEachClickCandidate(cell, *supportDirection, [&](Vec3 const& clickPos) {
+                    if (matched || !isWithinPlacementReach(context, clickPos)) return;
+                    result = ProjectionTarget{cell, at, face, &ghost, clickPos};
+                    matched = true;
+                });
+                if (matched) return true;
+            }
+        }
+
         // Ordinary opaque full blocks dominate large builds. Try the nearest
         // sensible support once before the exhaustive face/height search. If
         // vanilla prediction disagrees we fall back unchanged, so this is only
