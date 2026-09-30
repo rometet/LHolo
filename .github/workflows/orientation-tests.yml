@@ -1,0 +1,21 @@
+name: Orientation regressions
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  orientation:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Production comparisons and negative controls (engine doubles)
+        run: python3 tests/orientation/run_tests.py --cxx '${{ matrix.cxx }}' --sanitize --negative-controls

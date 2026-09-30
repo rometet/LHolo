@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/core/ProjectionRules.h"
+#include "block/BlockOrientationRules.h"
 
 #include <string>
 #include <type_traits>
@@ -35,6 +36,14 @@ CompoundTag const* serializedBlockStates(Block const& block) {
         if (key == "states" && value.hold<CompoundTag>()) return &value.get<CompoundTag>();
     }
     return nullptr;
+}
+
+bool serializedHorizontalDirectionMatches(Block const& expected, Block const& actual) {
+    auto const* expectedStates = serializedBlockStates(expected);
+    auto const* actualStates = serializedBlockStates(actual);
+    return expectedStates && actualStates && block::horizontalDirectionStatesMatch(
+        expectedStates->mTags, actualStates->mTags
+    );
 }
 
 bool serializedStatesMatchExcept(
@@ -132,7 +141,7 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
         if (!actualUpper || *actualUpper != *expectedUpper) return false;
         return *expectedUpper
             ? stateMatches(VanillaStates::DoorHingeBit())
-            : stateMatches(VanillaStates::Direction())
+            : serializedHorizontalDirectionMatches(expected, actual)
                 && stateMatches(VanillaStates::OpenBit());
     }
 
