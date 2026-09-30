@@ -211,6 +211,9 @@ HWND findProcessWindow() {
 }
 
 void releaseGraphicsBackend() {
+    // A v3 companion owns its own ImGui/DX11 backend on the same device/context.
+    // Tear it down before LHolo releases or recreates the shared graphics device.
+    companion::resetGraphics();
     if (gGraphicsInitialized) {
         ImGui_ImplDX11_Shutdown();
         gGraphicsInitialized = false;
@@ -619,7 +622,15 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         && gImGuiInitialized && anyMenuVisible()) {
         gMouseHandoffActive.store(false, std::memory_order_release);
         ClipCursor(nullptr);
-        ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+        if (companion::isVisible() && companion::usesIndependentRenderer()) {
+            companion::forwardWindowMessage(
+                window, message,
+                static_cast<std::uintptr_t>(wParam),
+                static_cast<std::intptr_t>(lParam)
+            );
+        } else {
+            ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+        }
         if (isFullscreenKeyMessage(message, wParam)) {
             return gOriginalWndProc
                 ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
@@ -780,18 +791,39 @@ void render(IDXGISwapChain* swapChain) {
 
     auto draw = [](ID3D11RenderTargetView* target) {
         gDeviceContext->OMSetRenderTargets(1, &target, nullptr);
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
 
-        if (structure::isGuiVisible()) {
-            structure::renderGui();
-        } else if (companion::isVisible()) {
-            companion::drawGui(ImGui::GetCurrentContext());
+        auto const companionVisible = companion::isVisible();
+        auto const independentCompanion = companion::usesIndependentRenderer();
+
+        if (companionVisible && independentCompanion) {
+            // Bridge v3: Praxis owns a completely separate ImGui context, font
+            // atlas and style. LHolo only lends the already-hooked render target
+            // and D3D11 device/context for this frame.
+            companion::renderIndependent(gDevice, gDeviceContext, gWindow, true);
         } else {
-            structure::renderHud();
-            structure::renderMaterialHud();
-            companion::drawHud(ImGui::GetCurrentContext());
+            ImGui_ImplDX11_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+
+            if (structure::isGuiVisible()) {
+                structure::renderGui();
+            } else if (companionVisible) {
+                // Legacy bridge v2 fallback.
+                companion::drawGui(ImGui::GetCurrentContext());
+            } else {
+                structure::renderHud();
+                structure::renderMaterialHud();
+                if (!independentCompanion)
+                    companion::drawHud(ImGui::GetCurrentContext());
+            }
+
+            structure::renderActionHint();
+            ImGui::Render();
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        }
+
+        if (!companionVisible && independentCompanion && companion::hudNeeded()) {
+            companion::renderIndependent(gDevice, gDeviceContext, gWindow, false);
         }
 
         // Either menu may close itself from inside its draw callback.
@@ -800,9 +832,7 @@ void render(IDXGISwapChain* swapChain) {
             PostMessageW(gWindow, kMsgRestoreNativeCursor, 0, 0);
             gGuiVisibleLastFrame = false;
         }
-        structure::renderActionHint();
-        ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
         ID3D11RenderTargetView* empty{};
         gDeviceContext->OMSetRenderTargets(1, &empty, nullptr);
     };
