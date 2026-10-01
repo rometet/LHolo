@@ -8,17 +8,21 @@
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/mesh/TransparentQuadSort.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <utility>
@@ -64,6 +68,8 @@ std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
+std::atomic_bool gTransparentQuadSortLogged{};
+std::atomic_bool gTransparentQuadSortFailureLogged{};
 
 // Candidate A remains available as an explicit diagnostic build. Phase 4B
 // uses Candidate B and changes only the MaterialPtr passed to Exact Replay.
@@ -77,6 +83,63 @@ inline constexpr PraxisLiquidMaterialCandidate ActivePraxisLiquidMaterial =
 
 bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;
+}
+
+enum class TransparentMeshSortResult : std::uint8_t { Invalid, Unchanged, Changed };
+
+TransparentMeshSortResult sortTransparentMeshDataBackToFront(
+    mce::MeshData& data,
+    glm::vec3      camera
+) {
+    auto& positions = data.mPositions.get();
+    std::size_t const corners = data.mMode == mce::PrimitiveMode::QuadList ? 4U
+        : (data.mMode == mce::PrimitiveMode::TriangleList ? 3U : 0U);
+    if (!corners) return TransparentMeshSortResult::Invalid;
+    auto& indices = data.mIndices.get();
+    if (!indices.empty()) {
+        auto const order = transparentIndexedPrimitiveOrder(
+            std::span<glm::vec3 const>{positions.data(), positions.size()},
+            std::span<unsigned int const>{indices.data(), indices.size()}, corners, camera);
+        if (!order) return TransparentMeshSortResult::Invalid;
+        if (!transparentQuadOrderChanged(*order)) return TransparentMeshSortResult::Unchanged;
+        if (!reorderPrimitiveField(indices, *order, corners)) return TransparentMeshSortResult::Invalid;
+        return TransparentMeshSortResult::Changed;
+    }
+    auto order = transparentPrimitiveOrder(
+        std::span<glm::vec3 const>{positions.data(), positions.size()}, corners, camera
+    );
+    if (!order) return TransparentMeshSortResult::Invalid;
+
+    auto const vertexCount = positions.size();
+    auto compatible = [vertexCount](auto const& field) {
+        return field.empty() || field.size() == vertexCount;
+    };
+    if (!compatible(data.mNormals.get()) || !compatible(data.mTangents.get())
+        || !compatible(data.mColors.get()) || !compatible(data.mBoneId0s.get())
+        || !compatible(data.mTextureUVs[0].get()) || !compatible(data.mTextureUVs[1].get())
+        || !compatible(data.mTextureUVs[2].get()) || !compatible(data.mPBRTextureIndices.get())
+        || !compatible(data.mMERS.get()) || !compatible(data.mGeoType.get())) {
+        return TransparentMeshSortResult::Invalid;
+    }
+    if (!transparentQuadOrderChanged(*order)) {
+        return TransparentMeshSortResult::Unchanged;
+    }
+
+    auto const ordering = std::span<std::size_t const>{order->data(), order->size()};
+    if (!reorderPrimitiveField(positions, ordering, corners)
+        || !reorderPrimitiveField(data.mNormals.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mTangents.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mColors.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mBoneId0s.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mTextureUVs[0].get(), ordering, corners)
+        || !reorderPrimitiveField(data.mTextureUVs[1].get(), ordering, corners)
+        || !reorderPrimitiveField(data.mTextureUVs[2].get(), ordering, corners)
+        || !reorderPrimitiveField(data.mPBRTextureIndices.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mMERS.get(), ordering, corners)
+        || !reorderPrimitiveField(data.mGeoType.get(), ordering, corners)) {
+        return TransparentMeshSortResult::Invalid;
+    }
+    return TransparentMeshSortResult::Changed;
 }
 
 mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
@@ -892,8 +955,11 @@ void submitProjectionMeshPass(
     };
     auto sortBackToFront = [&](std::vector<VisibleMesh>& meshes) {
         std::sort(meshes.begin(), meshes.end(), [&](VisibleMesh const& lhs, VisibleMesh const& rhs) {
-            return distanceSquared(worldCenter(lhs.section))
-                > distanceSquared(worldCenter(rhs.section));
+            auto const leftDistance = distanceSquared(worldCenter(lhs.section));
+            auto const rightDistance = distanceSquared(worldCenter(rhs.section));
+            if (leftDistance != rightDistance) return leftDistance > rightDistance;
+            if (lhs.section != rhs.section) return lhs.section < rhs.section;
+            return lhs.bucket < rhs.bucket;
         });
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
@@ -927,6 +993,67 @@ void submitProjectionMeshPass(
     auto const alphaBucket = static_cast<std::size_t>(RenderBucket::Alpha);
     auto const alphaOneSidedBucket = static_cast<std::size_t>(RenderBucket::AlphaOneSided);
     auto const blendBucket = static_cast<std::size_t>(RenderBucket::Blend);
+
+    auto prepareSortedBlendMeshes = [&] {
+        glm::vec3 const localCamera{
+            camera.x - static_cast<float>(renderOrigin.x),
+            camera.y - static_cast<float>(renderOrigin.y),
+            camera.z - static_cast<float>(renderOrigin.z)
+        };
+        auto const cameraSortKey = transparentSortKey(localCamera);
+        auto bufferService = renderContext.mScreenContext.tessellator.mBufferResourceService.lock();
+        if (!cameraSortKey || !bufferService || state.sections.empty()) return;
+        constexpr std::size_t kMaxResortsPerFrame = 4;
+        auto const started = std::chrono::steady_clock::now();
+        std::size_t resorts{};
+        for (std::size_t checked = 0; checked < state.sections.size(); ++checked) {
+            if (resorts >= kMaxResortsPerFrame
+                || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
+            auto const section = state.blendSortCursor++ % state.sections.size();
+            auto& sectionState = state.sections[section];
+            if (sectionState.blendSortUnsupported || (sectionState.blendSortKeyValid
+                && sectionState.blendSortKey == *cameraSortKey)) continue;
+            auto& mesh = sectionState.meshes[blendBucket];
+            if (!mesh || !mesh->isValid()) continue;
+            ++resorts;
+            try {
+                auto sortedData = mesh->mMeshData.get();
+                auto const vertexCount = sortedData.mPositions.get().size();
+                auto const result = sortTransparentMeshDataBackToFront(sortedData, localCamera);
+                if (result == TransparentMeshSortResult::Invalid) {
+                    // A new upload clears this flag. Do not destroy/rebuild an
+                    // unknown engine layout and do not retry it every frame.
+                    sectionState.blendSortUnsupported = true;
+                    if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                        logger().warn("TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout");
+                    }
+                    continue;
+                }
+                if (result == TransparentMeshSortResult::Changed) {
+                    auto replacement = std::make_unique<mce::Mesh>(
+                        bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
+                    if (!replacement->isValid()) {
+                        if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                            logger().warn("TRANSPARENT_PRIMITIVE_SORT upload failed; retaining previous blend mesh");
+                        }
+                        continue;
+                    }
+                    mesh = std::move(replacement);
+                    if (!gTransparentQuadSortLogged.exchange(true, std::memory_order_acq_rel)) {
+                        logger().info("TRANSPARENT_PRIMITIVE_SORT enabled=1 quantum=0.25 budget=4/1ms firstSection={} vertices={}",
+                            section, vertexCount);
+                    }
+                }
+                sectionState.blendSortKey = *cameraSortKey;
+                sectionState.blendSortKeyValid = true;
+            } catch (std::exception const& exception) {
+                app::reportNativeCallbackFailure("transparent primitive sort", exception.what());
+            } catch (...) {
+                app::reportNativeCallbackFailure("transparent primitive sort", "unknown C++ exception");
+            }
+        }
+    };
+
     if (structureOpacity >= 0.999f) {
         auto opaqueMeshes = collectBucket(opaqueBucket);
         auto alphaMeshes = collectBucket(alphaBucket);
@@ -964,6 +1091,7 @@ void submitProjectionMeshPass(
                     : (materialExists(alphaMaterial) ? alphaMaterial : blendMaterial)
             );
         } else {
+            prepareSortedBlendMeshes();
             renderMeshes(transparentMeshes, blendMaterial);
         }
     } else if (renderAlphaLayer) {
@@ -979,6 +1107,7 @@ void submitProjectionMeshPass(
             );
         }
         sortBackToFront(transparentMeshes);
+        prepareSortedBlendMeshes();
         renderMeshes(transparentMeshes, blendMaterial);
     }
 

@@ -612,6 +612,10 @@ void buildProjectionSection(
         );
         bool bucketTessellated{};
         auto const bucket = static_cast<RenderBucket>(bucketIndex);
+        if (bucket == RenderBucket::Blend) {
+            state.sections[section].blendSortKeyValid = false;
+            state.sections[section].blendSortUnsupported = false;
+        }
         for (auto const& layered : layeredBlocks) {
             if (layered.bucket != bucket) continue;
             blockTessellator.mRenderingLayer = static_cast<int>(layered.layer);

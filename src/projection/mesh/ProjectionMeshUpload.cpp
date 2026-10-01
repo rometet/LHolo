@@ -232,6 +232,8 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
                     state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
                 }
+                state.sections[section].blendSortKeyValid = false;
+                state.sections[section].blendSortUnsupported = false;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);

@@ -41,6 +41,7 @@
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/mesh/TransparentQuadSort.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
 #include "settings/SettingsStore.h"
@@ -75,6 +76,29 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+void testTransparentQuadSort() {
+    auto const keyA = transparentSortKey(glm::vec3{1.24f, -0.01f, 2.0f});
+    auto const keyB = transparentSortKey(glm::vec3{1.25f, -0.01f, 2.0f});
+    LHOLO_CHECK(keyA && (*keyA)[0] == 4 && (*keyA)[1] == -1 && (*keyA)[2] == 8);
+    LHOLO_CHECK(keyB && (*keyB)[0] == 5);
+
+    std::vector<glm::vec3> positions;
+    for (float z : {1.0f, 5.0f, 3.0f}) {
+        positions.push_back({0, 0, z}); positions.push_back({1, 0, z});
+        positions.push_back({1, 1, z}); positions.push_back({0, 1, z});
+    }
+    auto const order = transparentQuadOrder(positions, glm::vec3{0, 0, 0});
+    LHOLO_CHECK(order && order->size() == 3);
+    LHOLO_CHECK(order && (*order)[0] == 1 && (*order)[1] == 2 && (*order)[2] == 0);
+    LHOLO_CHECK(order && transparentQuadOrderChanged(*order));
+
+    std::vector<int> values{0,1,2,3, 10,11,12,13, 20,21,22,23};
+    LHOLO_CHECK(order && reorderQuadVertexField(values, *order));
+    LHOLO_CHECK(values == std::vector<int>({10,11,12,13, 20,21,22,23, 0,1,2,3}));
+    std::vector<glm::vec3> invalid(5);
+    LHOLO_CHECK(!transparentQuadOrder(invalid, glm::vec3{0, 0, 0}));
 }
 
 void testLiquidReplayRules() {
@@ -2264,6 +2288,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    testTransparentQuadSort();
     testLiquidReplayRules();
     testProjectionCoordinateBounds();
     testLoadIntent();

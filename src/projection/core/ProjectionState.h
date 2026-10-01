@@ -49,10 +49,16 @@ struct SectionState {
     bool    buildInFlight{};
     std::uint64_t requestedRevision{};
     std::uint64_t uploadedRevision{};
+    // The blend mesh is re-sorted only after the camera moves by a quarter
+    // block. The mesh itself keeps projection-local coordinates.
+    std::array<std::int64_t, 3> blendSortKey{};
+    bool                        blendSortKeyValid{};
+    bool                        blendSortUnsupported{};
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)> meshes;
 };
 
 struct ProjectionState {
+    std::size_t                     blendSortCursor{};
     bool                            enabled{};
     bool                            placementCoordinatesInvalid{};
     BlockPos                        anchor{};
