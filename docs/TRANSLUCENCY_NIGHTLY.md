@@ -60,3 +60,13 @@ LHoloには `NativeProbe` / CMake / CTest targetがないため、本repository�
 6. LHolo+Praxis v3併用、F10/LHolo menu/Escape/inventory/Alt+Tab/world leave/shutdownの所有権回帰。
 
 本候補は実機Minecraftを実行していません。`RUNTIME_REQUIRED`であり、visual PASSと扱いません。live mods配置は統合担当だけが行います。
+
+## 追加監査で検出したcursor P1
+
+継承したcursor修正では、menu closeがpostした `kMsgRestoreGameMouse` に取消identityがなく、`WM_KILLFOCUS` / `WM_ACTIVATEAPP(FALSE)` 後に処理されるとbackground gameを再clip/grabできました。さらにPresent threadのforeground判定後、window threadがfocus lossを処理し、その後Presentが直接clipする競合もありました。
+
+`GameMouseHandoffRequest` はwindow/client/playerのowned scalar identity、request ticket、overlay session、取消epochを保持します。focus loss/menu/shutdown/destroyは取消を行い、取消を跨いだrender producerの `begin`、古いposted message、player/client replacementを拒否します。transition messageは未処理1個までです。Presentはprivate messageをpostするだけになり、clip/center/grabはwindow threadで実行します。`confineMouseToClientCenter` 自体にもowner-thread guardを置き、center失敗/foreground loss時には成立済みclipを解除します。window/session再導入を伴うbridge/API変更はありません。
+
+追加Graphics testsはproduction headerを使用し、real worker threadからprivate messageをpostし、sent focus loss/regainを先に処理してからqueued messageをdispatchします。foreground判定とrequest admissionの間でworkerを止め、loss/regain後に再開するepoch検証も含めます。native desktop cursorを操作するfixtureではなく、許可されたeffect数とowner-threadを検証します。実機のcursor位置/感度/他modとの所有権は `RUNTIME_REQUIRED` です。
+
+旧candidate `4d3f694e551e96a2a8b68c8e2af5d99c518fb9aa` のpackage evidenceは `E:/Nightly-20261002/LHolo/history/4d3f694e551e96a2a8b68c8e2af5d99c518fb9aa` に保存しました。元mainの未commit cursor修正とDLLは変更していません。

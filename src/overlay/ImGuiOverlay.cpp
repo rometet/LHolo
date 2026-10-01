@@ -21,6 +21,7 @@
 #include "overlay/ImGuiFrameRecovery.h"
 #include "overlay/OverlayResourceGate.h"
 #include "overlay/WindowCursorRestore.h"
+#include "overlay/GameMouseHandoffRequest.h"
 #include "overlay/OverlayInstallRetry.h"
 #include "overlay/NativeHookBinding.h"
 #include "overlay/CompanionBridge.h"
@@ -124,6 +125,7 @@ std::atomic_bool gImGuiInitialized{};
 bool             gGraphicsInitialized{};
 bool             gGuiVisibleLastFrame{};
 std::atomic_bool gMouseHandoffActive{};
+detail::GameMouseHandoffRequest gGameMouseHandoffRequest;
 // Cursor ownership while the menu is open.
 //
 // The mods in this ecosystem decide "a UI owns the mouse" from GetCursorInfo():
@@ -141,6 +143,7 @@ std::atomic_bool gMouseHandoffActive{};
 constexpr UINT kMsgRestoreNativeCursor = WM_APP + 0x101;
 constexpr UINT kMsgAcquireMenuCursor   = WM_APP + 0x102;
 constexpr UINT kMsgRestoreGameMouse    = WM_APP + 0x103;
+constexpr UINT kMsgMaintainGameMouse   = WM_APP + 0x104;
 std::atomic_int gMenuCursorShowCount{};
 std::array<bool, 256> gGameKeysDown{};
 std::array<bool, 5>   gGameMouseButtonsDown{};
@@ -390,7 +393,31 @@ void releaseGameInput(HWND window) {
 
 }
 
+bool isForegroundGameWindow(HWND window) {
+    return detail::foregroundMouseHandoffWindow(
+        reinterpret_cast<std::uintptr_t>(window),
+        reinterpret_cast<std::uintptr_t>(GetForegroundWindow()),
+        IsWindow(window) != FALSE, IsWindowVisible(window) != FALSE, IsIconic(window) != FALSE
+    ) && gGameMouseHandoffRequest.matchesWindow(reinterpret_cast<std::uintptr_t>(window));
+}
+
+detail::MouseHandoffIdentity currentMouseHandoffIdentity(HWND window) {
+    auto client = ll::service::getClientInstance();
+    return {reinterpret_cast<std::uintptr_t>(window),
+        client ? reinterpret_cast<std::uintptr_t>(&*client) : 0,
+        client ? reinterpret_cast<std::uintptr_t>(client->getLocalPlayer()) : 0};
+}
+
+void cancelMouseHandoff() {
+    gMouseHandoffActive.store(false, std::memory_order_release);
+    gGameMouseHandoffRequest.cancel();
+}
+
 bool confineMouseToClientCenter(HWND window) {
+    // Effects are serialized with focus cancellation on the owning WndProc
+    // thread. Present callbacks may only post ticketed requests, never clip.
+    if (!detail::windowThreadMouseHandoffAllowed(GetCurrentThreadId(), GetWindowThreadProcessId(window, nullptr))
+        || gShuttingDown.load(std::memory_order_acquire) || !isForegroundGameWindow(window)) return false;
     RECT clientRect{};
     if (!window || !GetClientRect(window, &clientRect)) return false;
     POINT topLeft{clientRect.left, clientRect.top};
@@ -411,30 +438,63 @@ bool confineMouseToClientCenter(HWND window) {
         screenRect.bottom -= kHotEdgeInset;
     }
 
+    if (!isForegroundGameWindow(window) || gShuttingDown.load(std::memory_order_acquire)) return false;
     if (!ClipCursor(&screenRect)) return false;
-    return SetCursorPos(
+    auto const centered = SetCursorPos(
         (screenRect.left + screenRect.right) / 2,
         (screenRect.top + screenRect.bottom) / 2
     ) != FALSE;
+    if (!centered || !isForegroundGameWindow(window) || gShuttingDown.load(std::memory_order_acquire)) {
+        ClipCursor(nullptr);
+        return false;
+    }
+    return true;
 }
 
-void restoreGameMouseOwnership(HWND window) {
-    if (!window || gShuttingDown.load(std::memory_order_acquire) || anyMenuVisible()) return;
+void postTransitionMouseHandoff(HWND window, detail::MouseHandoffIdentity identity) {
+    auto const message = gGameMouseHandoffRequest.queueTransition(identity);
+    if (message && !PostMessageW(window, kMsgMaintainGameMouse, message->ticket, static_cast<LPARAM>(message->session)))
+        gGameMouseHandoffRequest.transitionDeliveryFailed(*message);
+}
 
+void maintainGameMouseOwnership(HWND window, detail::MouseHandoffMessage message) {
     auto client = ll::service::getClientInstance();
-    if (!client) return;
-    auto const screen = client->getTopScreenName();
-    if (screen != "hud_screen" && screen != "in_game_play_screen") return;
+    auto const screen = client ? client->getTopScreenName() : std::string{};
+    detail::MouseHandoffIdentity const identity{reinterpret_cast<std::uintptr_t>(window),
+        client ? reinterpret_cast<std::uintptr_t>(&*client) : 0,
+        client ? reinterpret_cast<std::uintptr_t>(client->getLocalPlayer()) : 0};
+    auto const allowed = detail::gameMouseHandoffAllowed(
+        isForegroundGameWindow(window), anyMenuVisible(), gShuttingDown.load(std::memory_order_acquire),
+        screen == "hud_screen" || screen == "in_game_play_screen"
+    );
+    if (gGameMouseHandoffRequest.consumeTransition(message, identity, allowed)
+        && !confineMouseToClientCenter(window)) cancelMouseHandoff();
+}
 
-    // Center/clip first so grabMouse() cannot inherit the absolute menu cursor
-    // position. Explicitly returning ownership fixes the case where Bedrock
-    // keeps receiving raw look input while the Windows cursor itself remains
-    // free and drifts into the taskbar hot edge.
-    confineMouseToClientCenter(window);
+void restoreGameMouseOwnership(HWND window, detail::MouseHandoffMessage message) {
+    auto client = ll::service::getClientInstance();
+    auto const screen = client ? client->getTopScreenName() : std::string{};
+    auto const allowed = detail::gameMouseHandoffAllowed(
+        isForegroundGameWindow(window), anyMenuVisible(),
+        gShuttingDown.load(std::memory_order_acquire),
+        screen == "hud_screen" || screen == "in_game_play_screen"
+    );
+    detail::MouseHandoffIdentity const identity{reinterpret_cast<std::uintptr_t>(window),
+        client ? reinterpret_cast<std::uintptr_t>(&*client) : 0,
+        client ? reinterpret_cast<std::uintptr_t>(client->getLocalPlayer()) : 0};
+    if (!gGameMouseHandoffRequest.consume(message, identity, allowed)) return;
+    if (!client || !confineMouseToClientCenter(window)) return;
+    // Native calls are outside the request lock. Recheck foreground immediately
+    // before the game grab as focus can change independently of message delivery.
+    if (!isForegroundGameWindow(window) || gShuttingDown.load(std::memory_order_acquire)) {
+        ClipCursor(nullptr);
+        return;
+    }
     client->grabMouse();
 }
 
 void prepareMouseHandoff(HWND window) {
+    auto const cancellationEpoch = gGameMouseHandoffRequest.cancellationEpoch();
     if (!window) return;
 
     // ImGui keeps button/position state independently from Win32. Clear it
@@ -456,22 +516,34 @@ void prepareMouseHandoff(HWND window) {
     // converts that absolute position back to relative-look input when it
     // captures the mouse again; centering first prevents a one-frame camera
     // jump proportional to the distance from the menu button to the center.
-    if (confineMouseToClientCenter(window)) {
+    auto const identity = currentMouseHandoffIdentity(window);
+    if (isForegroundGameWindow(window) && !gShuttingDown.load(std::memory_order_acquire)
+        && gGameMouseHandoffRequest.begin(identity, cancellationEpoch)) {
         gMouseHandoffActive.store(true, std::memory_order_release);
+        postTransitionMouseHandoff(window, identity);
+    } else {
+        cancelMouseHandoff();
     }
 }
 
 void maintainMouseHandoff(HWND window) {
     if (!gMouseHandoffActive.load(std::memory_order_acquire) || !window) return;
-    if (!structure::isInputTransitionBlocked()) {
-        // The menu transition is complete. Do not rely on a later Bedrock
-        // frame to recapture the mouse. Hand the final grab back to the
-        // window thread, matching the rest of the cursor ownership path.
-        PostMessageW(window, kMsgRestoreGameMouse, 0, 0);
-        gMouseHandoffActive.store(false, std::memory_order_release);
+    auto const identity = currentMouseHandoffIdentity(window);
+    if (!isForegroundGameWindow(window) || !gGameMouseHandoffRequest.transitionCurrent(identity)) {
+        cancelMouseHandoff();
         return;
     }
-    confineMouseToClientCenter(window);
+    if (!structure::isInputTransitionBlocked()) {
+        auto const message = gGameMouseHandoffRequest.queue(identity);
+        if (!message) { cancelMouseHandoff(); return; }
+        if (PostMessageW(window, kMsgRestoreGameMouse, message->ticket, static_cast<LPARAM>(message->session))) {
+            gMouseHandoffActive.store(false, std::memory_order_release);
+        } else {
+            gGameMouseHandoffRequest.deliveryFailed(*message);
+        }
+        return;
+    }
+    postTransitionMouseHandoff(window, identity);
 }
 
 // -- window thread only ------------------------------------------------------
@@ -552,13 +624,21 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         acquireMenuCursor();
         return 0;
     }
-    if (message == kMsgRestoreGameMouse) {
-        restoreGameMouseOwnership(window);
+    if (message == kMsgMaintainGameMouse) {
+        maintainGameMouseOwnership(window, {static_cast<std::uintptr_t>(wParam), static_cast<std::uintptr_t>(lParam)});
         return 0;
+    }
+    if (message == kMsgRestoreGameMouse) {
+        restoreGameMouseOwnership(window, {static_cast<std::uintptr_t>(wParam), static_cast<std::uintptr_t>(lParam)});
+        return 0;
+    }
+    if (message == WM_DESTROY || message == WM_NCDESTROY) {
+        cancelMouseHandoff();
+        gGameMouseHandoffRequest.resetWindow(0, 0);
     }
     if (message == WM_KILLFOCUS || (message == WM_ACTIVATEAPP && wParam == FALSE)) {
         structure::resetHotkeyState();
-        gMouseHandoffActive.store(false, std::memory_order_release);
+        cancelMouseHandoff();
         releaseMenuCursor();
         ClipCursor(nullptr);
     }
@@ -651,7 +731,7 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
 
     if (!gShuttingDown.load(std::memory_order_acquire)
         && gImGuiInitialized && anyMenuVisible()) {
-        gMouseHandoffActive.store(false, std::memory_order_release);
+        cancelMouseHandoff();
         ClipCursor(nullptr);
         if (companion::isVisible() && companion::usesIndependentRenderer()) {
             companion::forwardWindowMessage(
@@ -781,6 +861,12 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
             return false;
         }
         gWindow = window;
+        LARGE_INTEGER handoffSession{};
+        QueryPerformanceCounter(&handoffSession);
+        gGameMouseHandoffRequest.resetWindow(
+            reinterpret_cast<std::uintptr_t>(window),
+            static_cast<std::uintptr_t>(handoffSession.QuadPart ? handoffSession.QuadPart : GetTickCount64() + 1)
+        );
         // Publish a forwarding target before installing our procedure: an
         // unrelated window message may enter it immediately on the UI thread.
         auto const forwardingWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(gWindow, GWLP_WNDPROC));
@@ -790,6 +876,7 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
             ui::resetFluentTheme();
             ImGui::DestroyContext();
             gWindow = nullptr;
+            gGameMouseHandoffRequest.resetWindow(0, 0);
             releaseGraphicsBackend();
             return false;
         }
@@ -804,6 +891,7 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
             ui::resetFluentTheme();
             ImGui::DestroyContext();
             gWindow = nullptr;
+            gGameMouseHandoffRequest.resetWindow(0, 0);
             gOriginalWndProc.store(nullptr, std::memory_order_release);
             releaseGraphicsBackend();
             return false;
@@ -1324,7 +1412,8 @@ bool shutdownLocked() {
     }
 
     gShuttingDown.store(true, std::memory_order_release);
-    gMouseHandoffActive.store(false, std::memory_order_release);
+    cancelMouseHandoff();
+    gGameMouseHandoffRequest.resetWindow(0, 0);
 
     // First stop new detour entries. Do not remove the trampolines or destroy
     // shared D3D/ImGui state until every callback that entered earlier leaves.

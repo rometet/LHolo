@@ -5,6 +5,7 @@
 
 #include "overlay/D3D12QueueBinding.h"
 #include "CursorThreadChecks.h"
+#include "GameMouseHandoffChecks.h"
 #include "HookRetryChecks.h"
 #include "HookChainChecks.h"
 #include "DeferredHookChecks.h"
@@ -131,6 +132,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     lholo::tests::cursor::runWindowCursorChecks(check);
+    lholo::tests::mouse_handoff::runGameMouseHandoffChecks(check);
     lholo::tests::hook_retry::runHookRetryChecks(check);
     if (!lholo::tests::hook_chain::runHookChainChecks(check)) return 1;
     if (!lholo::tests::deferred_hook::runDeferredHookChecks(check)) return 1;
