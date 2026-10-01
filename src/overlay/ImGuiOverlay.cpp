@@ -58,6 +58,8 @@
 #include "structure/StructureLoader.h"
 #include "ui/FluentTheme.h"
 #include "ll/api/mod/NativeMod.h"
+#include "ll/api/service/TargetedBedrock.h"
+#include "mc/client/game/ClientInstance.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
@@ -138,6 +140,7 @@ std::atomic_bool gMouseHandoffActive{};
 // the counter Minecraft owns ends up exactly where it was.
 constexpr UINT kMsgRestoreNativeCursor = WM_APP + 0x101;
 constexpr UINT kMsgAcquireMenuCursor   = WM_APP + 0x102;
+constexpr UINT kMsgRestoreGameMouse    = WM_APP + 0x103;
 std::atomic_int gMenuCursorShowCount{};
 std::array<bool, 256> gGameKeysDown{};
 std::array<bool, 5>   gGameMouseButtonsDown{};
@@ -394,11 +397,41 @@ bool confineMouseToClientCenter(HWND window) {
     POINT bottomRight{clientRect.right, clientRect.bottom};
     if (!ClientToScreen(window, &topLeft) || !ClientToScreen(window, &bottomRight)) return false;
     RECT screenRect{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+
+    // Never let the hidden native cursor touch a Windows hot edge while
+    // gameplay is reclaiming relative mouse input. In borderless/maximized
+    // mode the client rect can end exactly on the auto-hide taskbar trigger.
+    constexpr LONG kHotEdgeInset = 2;
+    if (screenRect.right - screenRect.left > kHotEdgeInset * 2) {
+        screenRect.left += kHotEdgeInset;
+        screenRect.right -= kHotEdgeInset;
+    }
+    if (screenRect.bottom - screenRect.top > kHotEdgeInset * 2) {
+        screenRect.top += kHotEdgeInset;
+        screenRect.bottom -= kHotEdgeInset;
+    }
+
     if (!ClipCursor(&screenRect)) return false;
     return SetCursorPos(
         (screenRect.left + screenRect.right) / 2,
         (screenRect.top + screenRect.bottom) / 2
     ) != FALSE;
+}
+
+void restoreGameMouseOwnership(HWND window) {
+    if (!window || gShuttingDown.load(std::memory_order_acquire) || anyMenuVisible()) return;
+
+    auto client = ll::service::getClientInstance();
+    if (!client) return;
+    auto const screen = client->getTopScreenName();
+    if (screen != "hud_screen" && screen != "in_game_play_screen") return;
+
+    // Center/clip first so grabMouse() cannot inherit the absolute menu cursor
+    // position. Explicitly returning ownership fixes the case where Bedrock
+    // keeps receiving raw look input while the Windows cursor itself remains
+    // free and drifts into the taskbar hot edge.
+    confineMouseToClientCenter(window);
+    client->grabMouse();
 }
 
 void prepareMouseHandoff(HWND window) {
@@ -431,10 +464,10 @@ void prepareMouseHandoff(HWND window) {
 void maintainMouseHandoff(HWND window) {
     if (!gMouseHandoffActive.load(std::memory_order_acquire) || !window) return;
     if (!structure::isInputTransitionBlocked()) {
-        // Keep the client-area clip installed after the transition. Minecraft
-        // replaces it itself when opening one of its own UI screens, while
-        // releasing it here left the cursor free to reach the title-bar close
-        // button before gameplay input had recaptured it.
+        // The menu transition is complete. Do not rely on a later Bedrock
+        // frame to recapture the mouse. Hand the final grab back to the
+        // window thread, matching the rest of the cursor ownership path.
+        PostMessageW(window, kMsgRestoreGameMouse, 0, 0);
         gMouseHandoffActive.store(false, std::memory_order_release);
         return;
     }
@@ -517,6 +550,10 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
     }
     if (message == kMsgAcquireMenuCursor) {
         acquireMenuCursor();
+        return 0;
+    }
+    if (message == kMsgRestoreGameMouse) {
+        restoreGameMouseOwnership(window);
         return 0;
     }
     if (message == WM_KILLFOCUS || (message == WM_ACTIVATEAPP && wParam == FALSE)) {
