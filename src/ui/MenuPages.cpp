@@ -3,6 +3,7 @@
 #include "ui/MenuPages.h"
 
 #include "structure/LayerDisplayTypes.h"
+#include "structure/capture/CaptureBounds.h"
 #include "ui/MenuWidgets.h"
 
 #include <algorithm>
@@ -295,9 +296,15 @@ void renderCreateStructurePage(MenuModel& model, MenuActions const& actions, UiM
             auto const sizeZ = static_cast<std::uint64_t>(std::abs(
                 static_cast<std::int64_t>(model.capture.second.z) - model.capture.first.z
             )) + 1;
-            auto const volume = sizeX * sizeY * sizeZ;
+            using namespace structure::capture;
+            Point const first{model.capture.first.x, model.capture.first.y, model.capture.first.z};
+            Point const second{model.capture.second.x, model.capture.second.y, model.capture.second.z};
+            auto const volume = detail::captureVolume(first, second);
             ImGui::Text(i18n::tr(i18n::TextKey::LabelCaptureSize), sizeX, sizeY, sizeZ);
-            ImGui::Text(i18n::tr(i18n::TextKey::LabelCaptureVolume), volume);
+            if (volume) ImGui::Text(i18n::tr(i18n::TextKey::LabelCaptureVolume), *volume);
+            if (!detail::captureBoundsSupported(first, second)) {
+                ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::CaptureStatusBoundsInvalid));
+            }
         }
 
         ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.55f));
@@ -838,6 +845,8 @@ void renderInterfacePage(MenuModel& model, UiMetrics const& metrics) {
 }
 
 void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
+    auto const popupName = materialPopupName();
+    if (!ImGui::IsPopupOpen(popupName.c_str())) return;
     // The material list has a little more breathing room than the regular
     // menu: its table is intentionally 1.5x the original logical footprint.
     constexpr float popupDensity = 1.20f;
@@ -895,7 +904,6 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
         popupHeight
     );
     ImGui::SetNextWindowSize(popupSize, ImGuiCond_Always);
-    auto const popupName = materialPopupName();
     if (!ImGui::BeginPopupModal(
             popupName.c_str(),
             nullptr,

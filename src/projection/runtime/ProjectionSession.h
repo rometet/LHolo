@@ -9,6 +9,7 @@
 
 #include "overlay/BoundsWireframe.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/runtime/ProjectionActivationRequests.h"
 
 #include <atomic>
 #include <cstdint>
@@ -19,18 +20,6 @@
 #include <utility>
 
 namespace lholo::projection::detail {
-
-struct ProjectionAnchor {
-    int x{};
-    int y{};
-    int z{};
-};
-
-enum class DimensionActivationStatus : unsigned char {
-    Ready,
-    Deferred,
-    Resuming,
-};
 
 class ProjectionSession {
 public:
@@ -96,16 +85,7 @@ private:
     std::atomic_bool   mStructureBoundsEnabled{true};
     std::atomic_bool   mCorrectionSeeThrough{false};
     std::atomic_bool   mMissingSeeThrough{false};
-    std::atomic_bool   mPendingAnchor{false};
-    std::atomic_int    mPendingAnchorX{0};
-    std::atomic_int    mPendingAnchorY{0};
-    std::atomic_int    mPendingAnchorZ{0};
-    std::atomic_bool   mDimensionSuspended{false};
-    std::atomic_uint64_t mSuspendedStructureGeneration{0};
-    std::atomic_int    mSuspendedDimensionId{0};
-    std::atomic_int    mSuspendedAnchorX{0};
-    std::atomic_int    mSuspendedAnchorY{0};
-    std::atomic_int    mSuspendedAnchorZ{0};
+    ProjectionActivationRequests mActivationRequests;
 
     std::mutex               mStateMutex;
     ProjectionState          mState;

@@ -1,5 +1,9 @@
 # Manual placement compatibility and per-client exceptions
 
+This document records the earlier manual-placement change at the baseline
+below. The current repository-wide hardening, Windows build/test results and
+remaining Minecraft validation are recorded in `../AUDIT_REPORT.md`.
+
 ## Scope and baseline
 
 Baseline: `rometet/LHolo` main `84a88b0a8c6cc20b5ce95546fefca3cecb99f811`

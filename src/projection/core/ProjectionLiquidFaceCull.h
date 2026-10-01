@@ -44,6 +44,7 @@ namespace liquid_face_cull_detail {
 
 struct FaceKey {
     int               axis{};
+    std::uint32_t     liquidKind{};
     long long         plane{};
     long long         first{};
     long long         second{};
@@ -61,6 +62,7 @@ struct FaceKeyHash {
         mix(key.plane);
         mix(key.first);
         mix(key.second);
+        mix(key.liquidKind);
         return hash;
     }
 };
@@ -86,14 +88,16 @@ template <class Point>
 // Build a quad-level removal mask. Only a unique + / - winding pair sharing
 // the same integer, axis-aligned unit face is eligible. Ambiguous same-facing
 // duplicates deliberately keep every face.
-template <class Point>
+template <class Point, class LiquidKind = std::uint8_t>
 [[nodiscard]] NativeLiquidFaceCullMask buildNativeLiquidInternalFaceCullMask(
     std::span<Point const> positions,
-    float                  tolerance = NativeLiquidFullFaceTolerance
+    float                  tolerance = NativeLiquidFullFaceTolerance,
+    std::span<LiquidKind const> liquidKinds = {}
 ) {
     NativeLiquidFaceCullMask result{};
     if (positions.size() < 8U || positions.size() % 4U != 0U
-        || !std::isfinite(tolerance) || tolerance <= 0.0F) {
+        || !std::isfinite(tolerance) || tolerance <= 0.0F
+        || (!liquidKinds.empty() && liquidKinds.size() != positions.size())) {
         return result;
     }
 
@@ -106,13 +110,15 @@ template <class Point>
         faces;
     faces.reserve(quadCount);
 
-    auto const near = [tolerance](float lhs, float rhs) noexcept {
+    auto const withinTolerance = [tolerance](float lhs, float rhs) noexcept {
         return std::fabs(lhs - rhs) <= tolerance;
     };
-    auto const nearInteger = [near](float value, long long& rounded) noexcept {
+    auto const nearInteger = [withinTolerance](float value, long long& rounded) noexcept {
         if (!std::isfinite(value)) return false;
+        constexpr double limit = 9223372036854775808.0; // 2^63, upper exclusive
+        if (static_cast<double>(value) < -limit || static_cast<double>(value) >= limit) return false;
         rounded = std::llround(value);
-        return near(value, static_cast<float>(rounded));
+        return withinTolerance(value, static_cast<float>(rounded));
     };
     constexpr auto NoQuad = std::numeric_limits<std::size_t>::max();
 
@@ -146,9 +152,9 @@ template <class Point>
         for (int axis = 0; axis < 3; ++axis) {
             auto const firstAxis  = (axis + 1) % 3;
             auto const secondAxis = (axis + 2) % 3;
-            if (near(minimum[axis], maximum[axis])
-                && near(maximum[firstAxis] - minimum[firstAxis], 1.0F)
-                && near(maximum[secondAxis] - minimum[secondAxis], 1.0F)) {
+            if (withinTolerance(minimum[axis], maximum[axis])
+                && withinTolerance(maximum[firstAxis] - minimum[firstAxis], 1.0F)
+                && withinTolerance(maximum[secondAxis] - minimum[secondAxis], 1.0F)) {
                 flatAxis = axis;
                 break;
             }
@@ -157,8 +163,39 @@ template <class Point>
 
         auto const firstAxis  = (flatAxis + 1) % 3;
         auto const secondAxis = (flatAxis + 2) % 3;
+        // Bounds alone also admit triangles with repeated corners and crossed
+        // quads. Require all four corners in perimeter order before removing
+        // native geometry as a complete internal face.
+        std::array<unsigned int, 4> cornerCodes{};
+        unsigned int corners{};
+        bool fullFace = true;
+        for (std::size_t corner = 0; corner < 4; ++corner) {
+            auto const& point = points[corner];
+            unsigned int code{};
+            for (auto const axis : {firstAxis, secondAxis}) {
+                code <<= 1U;
+                if (withinTolerance(point[axis], maximum[axis])) code |= 1U;
+                else if (!withinTolerance(point[axis], minimum[axis])) fullFace = false;
+            }
+            cornerCodes[corner] = code;
+            corners |= 1U << code;
+        }
+        for (std::size_t corner = 0; corner < 4; ++corner) {
+            auto const edge = cornerCodes[corner] ^ cornerCodes[(corner + 1) % 4];
+            if (edge != 1U && edge != 2U) fullFace = false;
+        }
+        if (!fullFace || corners != 15U) continue;
         liquid_face_cull_detail::FaceKey key{};
         key.axis = flatAxis;
+        if (!liquidKinds.empty()) {
+            auto const kind = liquidKinds[quad * 4];
+            bool uniform = true;
+            for (std::size_t corner = 1; corner < 4; ++corner) {
+                if (liquidKinds[quad * 4 + corner] != kind) uniform = false;
+            }
+            if (!uniform) continue;
+            key.liquidKind = static_cast<std::uint32_t>(kind);
+        }
         if (!nearInteger(minimum[flatAxis], key.plane)
             || !nearInteger(minimum[firstAxis], key.first)
             || !nearInteger(minimum[secondAxis], key.second)) {

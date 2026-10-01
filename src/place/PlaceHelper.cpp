@@ -17,12 +17,14 @@
 #include "place/PlaceHelper.h"
 
 #include "app/HookLifecycle.h"
+#include "app/NativeCallbackBoundary.h"
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
+#include "structure/capture/StructureCapture.h"
 #include "structure/StructureLoader.h"
 
 #include "ll/api/memory/Hook.h"
@@ -46,6 +48,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
 
 namespace lholo::place {
 namespace {
@@ -67,6 +70,7 @@ struct PlaceHookStatus {
 };
 
 PlaceHookStatus gHookStatus;
+std::atomic_bool gPlacementHooksReady{};
 
 LL_TYPE_INSTANCE_HOOK(
     LocalPlayerEasyPlaceHook,
@@ -77,18 +81,25 @@ LL_TYPE_INSTANCE_HOOK(
     ::Tick const& currentTick
 ) {
     app::hook_lifecycle::DetourGuard guard;
-    if (!guard) {
+    if (!guard || !gPlacementHooksReady.load(std::memory_order_acquire)) {
         origin(currentTick);
         return;
     }
-    structure::detail::tickMaterialTracker(*this);
-    // Physical mouse state belongs to the game-input Hook boundary. The
-    // executor consumes only the resulting logical press state.
-    if (placementState().manualMode()
-        && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0) {
-        placementState().releaseManualPress();
-    }
-    detail::tickEasyPlace();
+    app::invokeNativeCallback([&] { structure::capture::tick(*this); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("capture game tick", reason); });
+    app::invokeNativeCallback([&] {
+        structure::detail::tickMaterialTracker(*this);
+        // Physical mouse state belongs to the game-input Hook boundary. The
+        // executor consumes only the resulting logical press state.
+        if (placementState().manualMode()
+            && (GetAsyncKeyState(VK_RBUTTON) & 0x8000) == 0) {
+            placementState().releaseManualPress();
+        }
+        detail::tickEasyPlace(*this);
+    }, [](char const* reason) noexcept {
+        placementState().cancelManualPress();
+        app::reportNativeCallbackFailure("game tick", reason);
+    });
     origin(currentTick);
 }
 
@@ -97,6 +108,7 @@ LL_TYPE_INSTANCE_HOOK(
 // check is essential: the server processes LHolo's own placement through these
 // same functions on the ServerPlayer, and that must not be suppressed.
 bool isLocalManualBuild(GameMode& gm) {
+    if (!gPlacementHooksReady.load(std::memory_order_acquire)) return false;
     if (!placementState().manualMode()) return false;
     auto client = ll::service::getClientInstance();
     auto* localPlayer = client ? client->getLocalPlayer() : nullptr;
@@ -133,23 +145,24 @@ LL_TYPE_INSTANCE_HOOK(
         origin(pos, face, handSlot);
         return;
     }
-    if (isLocalManualBuild(*this)) {
+    auto const inputEpoch = placementState().manualInputEpoch();
+    bool handled{};
+    auto const succeeded = app::invokeNativeCallback([&] {
+      if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
-            origin(pos, face, handSlot);
             return;
         }
-        auto const targetStatus = detail::manualTargetStatusUnderCrosshair();
+        auto const targetStatus = detail::manualTargetStatusUnderCrosshair(mPlayer);
         // A ready projection target takes precedence over the interaction of the
         // real support block behind it. This is essential for hoppers/torches
         // placed against containers, droppers, dispensers and other interactive
         // supports: vanilla must not open/use the support instead of placing.
         if (targetStatus == detail::ManualTargetStatus::Ready) {
-            (void)placementState().beginManualPress(GetTickCount64());
+            (void)placementState().beginManualPress(GetTickCount64(), inputEpoch);
         } else if (aimedBlockAcceptsRightClick(*this, pos)) {
             cancelPendingManualPress();
-            origin(pos, face, handSlot);  // no ready ghost: preserve vanilla interaction
-            return;
+            return; // no ready ghost: preserve vanilla interaction
         } else if (targetStatus == detail::ManualTargetStatus::MissingMaterial) {
             cancelPendingManualPress();
             structure::showActionHint(i18n::Message{i18n::TextKey::ActionHintNoMatchingItem});
@@ -159,8 +172,15 @@ LL_TYPE_INSTANCE_HOOK(
                 i18n::Message{i18n::TextKey::ActionHintManualModeBlocked}
             );
         }
-        return;  // LHolo owns this press; vanilla places nothing.
-    }
+        handled = true; // LHolo owns this press; vanilla places nothing.
+      }
+    }, [](char const* reason) noexcept {
+        cancelPendingManualPress();
+        app::reportNativeCallbackFailure("manual build press", reason);
+    });
+    if (succeeded && handled) return;
+    // Keep the native origin outside the LHolo exception boundary: an engine
+    // exception must never cause the same native action to be replayed.
     origin(pos, face, handSlot);
 }
 
@@ -178,29 +198,37 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     app::hook_lifecycle::DetourGuard guard;
     if (!guard) return origin(item, handSlot);
-    if (isLocalManualBuild(*this)) {
+    auto const inputEpoch = placementState().manualInputEpoch();
+    bool handled{};
+    auto const succeeded = app::invokeNativeCallback([&] {
+      if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementItemAllowed(item)) {
             cancelPendingManualPress();
-            return origin(item, handSlot);
+            return;
         }
-        auto const targetStatus = detail::manualTargetStatusUnderCrosshair();
+        auto const targetStatus = detail::manualTargetStatusUnderCrosshair(mPlayer);
         if (targetStatus == detail::ManualTargetStatus::None) {
             cancelPendingManualPress();
-            return origin(item, handSlot);
+            return;
         }
         if (targetStatus == detail::ManualTargetStatus::Ready) {
             // Mark the button held so holding right-click over a floating
             // projection keeps placing (the tick's typematic repeat). The tick
             // clears the hold when the right button is actually released.
-            (void)placementState().beginManualPress(GetTickCount64());
+            (void)placementState().beginManualPress(GetTickCount64(), inputEpoch);
         } else {
             placementState().cancelManualPress();
             structure::showActionHint(
                 i18n::Message{i18n::TextKey::ActionHintNoMatchingItem}
             );
         }
-        return false;
-    }
+        handled = true;
+      }
+    }, [](char const* reason) noexcept {
+        cancelPendingManualPress();
+        app::reportNativeCallbackFailure("manual item use", reason);
+    });
+    if (succeeded && handled) return false;
     return origin(item, handSlot);
 }
 
@@ -217,9 +245,11 @@ LL_TYPE_INSTANCE_HOOK(
         origin();
         return;
     }
-    if (isLocalManualBuild(*this)) {
-        placementState().releaseManualPress();
-    }
+    app::invokeNativeCallback([&] {
+        if (isLocalManualBuild(*this)) placementState().releaseManualPress();
+    }, [](char const* reason) noexcept {
+        app::reportNativeCallbackFailure("manual build release", reason);
+    });
     origin();
 }
 
@@ -241,13 +271,20 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     app::hook_lifecycle::DetourGuard guard;
     if (!guard) return origin(pos, face, handSlot, isSimTick);
-    if (isLocalManualBuild(*this)) {
+    bool handled{};
+    auto const succeeded = app::invokeNativeCallback([&] {
+      if (isLocalManualBuild(*this)) {
         if (handSlot == HandSlot::Mainhand && isManualPlacementHeldItemAllowed(mPlayer)) {
             cancelPendingManualPress();
-            return origin(pos, face, handSlot, isSimTick);
+            return;
         }
-        return false;
-    }
+        handled = true;
+      }
+    }, [](char const* reason) noexcept {
+        cancelPendingManualPress();
+        app::reportNativeCallbackFailure("manual continuous build", reason);
+    });
+    if (succeeded && handled) return false;
     return origin(pos, face, handSlot, isSimTick);
 }
 
@@ -296,16 +333,28 @@ int getAutoPlacementBreakCooldownSeconds() {
 }
 
 void setManualMode(bool manual) {
-    if (!manual) {
-        // A release hook can be missed while menus or mode switches are active.
-        // Never carry a stale press/hold request into the next manual session.
-        placementState().resetManualInput();
-    }
     placementState().setManualMode(manual);
 }
 
 bool isManualMode() {
     return placementState().manualMode();
+}
+
+PlacementModes getPlacementModes() {
+    return placementState().modes();
+}
+
+bool applyPlacementModes(PlacementModes const& modes) {
+    auto const previous = placementState().modes();
+    if (!placementState().applyModes(modes)) return false;
+    if (previous.enabled != modes.enabled) {
+        logger().info("Easy-place {}", modes.enabled ? "enabled" : "disabled");
+    }
+    if (previous.range != modes.range) {
+        if (modes.range) logger().info("Range placement enabled (radius {})", placementState().radius());
+        else logger().info("Range placement disabled");
+    }
+    return true;
 }
 
 std::vector<std::string> getManualPlacementAllowedItems() {
@@ -337,6 +386,7 @@ void resetWorldSession() {
 }
 
 bool installHook() {
+    gPlacementHooksReady.store(false, std::memory_order_release);
     gHookStatus.tick = LocalPlayerEasyPlaceHook::hook() == 0;
     if (!gHookStatus.tick) {
         logger().error("Failed to install easy-place tick hook");
@@ -344,24 +394,30 @@ bool installHook() {
     }
     gHookStatus.manualStart = GameModeStartBuildHook::hook() == 0;
     if (!gHookStatus.manualStart) {
-        logger().warn("Failed to install manual-place start hook; manual mode will be unavailable");
+        logger().error("Failed to install required manual-place start hook");
+        return false;
     }
     gHookStatus.manualUseItem = GameModeUseItemHook::hook() == 0;
     if (!gHookStatus.manualUseItem) {
-        logger().warn("Failed to install manual-place air-use hook; floating manual placement will be unavailable");
+        logger().error("Failed to install required manual-place air-use hook");
+        return false;
     }
     gHookStatus.manualStop = GameModeStopBuildHook::hook() == 0;
     if (!gHookStatus.manualStop) {
-        logger().warn("Failed to install manual-place stop hook; manual mode may keep repeating");
+        logger().error("Failed to install required manual-place stop hook");
+        return false;
     }
     gHookStatus.manualBuild = GameModeBuildBlockHook::hook() == 0;
     if (!gHookStatus.manualBuild) {
-        logger().warn("Failed to install manual-place build hook; manual mode may double-place");
+        logger().error("Failed to install required manual-place build hook");
+        return false;
     }
+    gPlacementHooksReady.store(true, std::memory_order_release);
     return true;
 }
 
 bool uninstallHook() {
+    gPlacementHooksReady.store(false, std::memory_order_release);
     bool ok = true;
     auto remove = [&](bool& installed, auto unhook) {
         if (!installed) return;

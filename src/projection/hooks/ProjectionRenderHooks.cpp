@@ -4,6 +4,7 @@
 #include "projection/hooks/ProjectionRenderHooks.h"
 
 #include "app/HookLifecycle.h"
+#include "app/NativeCallbackBoundary.h"
 #include "overlay/ImGuiOverlay.h"
 #include "projection/runtime/ProjectionRenderFrame.h"
 
@@ -35,8 +36,10 @@ LL_TYPE_INSTANCE_HOOK(
     }
     try {
         if (shouldSuppressProjectionHitSelect(pos)) return;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection hit selection", exception.what());
     } catch (...) {
-        // A projection query must never unwind through Minecraft's render hook.
+        app::reportNativeCallbackFailure("projection hit selection", "unknown C++ exception");
     }
     origin(renderContext, region, pos, fancyGraphics);
 }
@@ -53,17 +56,16 @@ LL_TYPE_INSTANCE_HOOK(
     app::hook_lifecycle::DetourGuard guard;
     origin(renderContext, renderAlphaLayer);
     if (!guard) return;
-    try {
+    app::invokeNativeCallback([&] {
         // The first install attempt can happen before Minecraft exposes a usable
         // swap chain. Keep retrying from the render path, which is active even
         // while the menu is hidden and does not depend on Present already being
         // hooked.
         (void)overlay::ensureInstalled();
         renderProjectionFrame(renderContext, renderAlphaLayer);
-    } catch (...) {
-        // Rendering LHolo is optional; an exception here must not cross into
-        // Minecraft's renderer or take the game down.
-    }
+    }, [](char const* reason) noexcept {
+        app::reportNativeCallbackFailure("projection rendering", reason);
+    });
 }
 
 } // namespace

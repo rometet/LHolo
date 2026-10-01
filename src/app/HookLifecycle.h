@@ -28,6 +28,9 @@ private:
 
 [[nodiscard]] bool beginEnable() noexcept;
 void beginQuiesce() noexcept;
+// After closing admission, finish bodies that still depend on nested physical
+// hooks before removing those hooks. Origin-only entries drain separately below.
+void waitForRunningCallbacks();
 void waitForQuiescence();
 void markDisabled() noexcept;
 

@@ -3,19 +3,28 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cctype>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <span>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "app/HookLifecycle.h"
+#include "app/NativeCallbackBoundary.h"
+#include "app/ScopeExit.h"
+#include "app/InitializationTransaction.h"
+#include "app/FutureResult.h"
+#include "overlay/ImGuiFrameRecovery.h"
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
+#include "CompanionCallbackChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
@@ -23,15 +32,28 @@
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
+#include "projection/core/LiquidReplayRules.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
+#include "render/RenderCameraPosition.h"
 #include "projection/runtime/ProjectionProgress.h"
+#include "projection/runtime/ProjectionActivationRequests.h"
+#include "projection/mesh/WorkerTaskBoundary.h"
+#include "projection/mesh/SingleTaskWorker.h"
+#include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/runtime/MeshDiagnosticGate.h"
+#include "projection/runtime/EpochFailure.h"
 #include "settings/SettingsStore.h"
 #include "structure/StructureSession.h"
+#include "structure/LoadIntent.h"
+#include "structure/capture/CaptureBounds.h"
+#include "structure/capture/CaptureRequests.h"
 #include "structure/StructureUiState.h"
 #include "structure/java_to_bedrock/JavaBlockEntityToBedrock.h"
 #include "ui/HotkeyFormat.h"
 
 #include <Windows.h>
+#include "io/AtomicOutput.h"
 
 namespace {
 
@@ -53,6 +75,616 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+void testLiquidReplayRules() {
+    using Candidate = PraxisLiquidMaterialCandidate;
+    // Exact Replay candidate B only needs its own native material. A missing
+    // diagnostic/fallback material must not hide a successfully built liquid.
+    LHOLO_CHECK(liquidReplayMaterialReady(Candidate::BlendBlock, false, true));
+    LHOLO_CHECK(liquidReplayMaterialReady(Candidate::BlendBlock, true, true));
+    LHOLO_CHECK(!liquidReplayMaterialReady(Candidate::BlendBlock, true, false));
+    LHOLO_CHECK(!liquidReplayMaterialReady(Candidate::BlendBlock, false, false));
+    LHOLO_CHECK(liquidReplayMaterialReady(Candidate::SignText, true, false));
+    LHOLO_CHECK(!liquidReplayMaterialReady(Candidate::SignText, false, true));
+    LHOLO_CHECK(retainedLiquidMaterial(true, true) == Candidate::SignText);
+    LHOLO_CHECK(retainedLiquidMaterial(true, false) == Candidate::SignText);
+    LHOLO_CHECK(retainedLiquidMaterial(false, true) == Candidate::BlendBlock);
+    LHOLO_CHECK(!retainedLiquidMaterial(false, false));
+    auto const intMaximum = static_cast<std::size_t>((std::numeric_limits<int>::max)());
+    LHOLO_CHECK(replayVertexCountFits(intMaximum));
+    LHOLO_CHECK(!replayVertexCountFits(intMaximum + 1));
+    auto const combined = combineReplayCounts(8, 12, 16, 32);
+    LHOLO_CHECK(combined && combined->vertices == 20 && combined->capacity == 48);
+    auto const minimumCapacity = combineReplayCounts(8, 12, 0, 0);
+    LHOLO_CHECK(minimumCapacity && minimumCapacity->capacity == 20);
+    LHOLO_CHECK(combineReplayCounts(intMaximum - 4, 4, 0, 0).has_value());
+    LHOLO_CHECK(!combineReplayCounts(intMaximum - 4, 8, 0, 0));
+    LHOLO_CHECK(!combineReplayCounts((std::numeric_limits<std::size_t>::max)(), 4, 0, 0));
+    LHOLO_CHECK(!combineReplayCounts(4, 4, (std::numeric_limits<std::uint32_t>::max)(), 1));
+}
+
+void testProjectionCoordinateBounds() {
+    auto const maximum = (std::numeric_limits<int>::max)();
+    auto const minimum = (std::numeric_limits<int>::min)();
+    LHOLO_CHECK((checkedRelativeBlockCell({10, -10, 30}, {1, 2, 3}, {4, 5, 6})
+        == std::array<int, 3>{5, -17, 21}));
+    LHOLO_CHECK(!checkedRelativeBlockCell({maximum, 0, 0}, {minimum + 16, 0, 0}, {0, 0, 0}));
+    LHOLO_CHECK(!checkedRelativeBlockCell({minimum, 0, 0}, {maximum - 16, 0, 0}, {0, 0, 0}));
+    LHOLO_CHECK((checkedRelativeBlockCell({maximum, 0, 0}, {maximum - 16, 0, 0}, {1, 0, 0})
+        == std::array<int, 3>{15, 0, 0}));
+    auto const upperChunk = checkedSubChunkBlockBounds({maximum / 16, 0, 0});
+    LHOLO_CHECK(upperChunk && upperChunk->min[0] == maximum - 15
+        && upperChunk->max[0] == static_cast<std::int64_t>(maximum) + 1);
+    auto const lowerChunk = checkedSubChunkBlockBounds({minimum / 16, 0, 0});
+    LHOLO_CHECK(lowerChunk && lowerChunk->min[0] == minimum);
+    LHOLO_CHECK(!checkedSubChunkBlockBounds({maximum / 16 + 1, 0, 0}));
+    LHOLO_CHECK(!checkedSubChunkBlockBounds({minimum / 16 - 1, 0, 0}));
+    auto const grid = makeSectionGrid((std::numeric_limits<int>::max)(), 17, 16);
+    LHOLO_CHECK(grid.has_value());
+    if (grid) {
+        LHOLO_CHECK(grid->x == 134217728);
+        LHOLO_CHECK(grid->y == 2 && grid->z == 1);
+        LHOLO_CHECK(!grid->denseCount(1U << 20));
+    }
+    auto const small = makeSectionGrid(17, 32, 1);
+    LHOLO_CHECK(small && small->denseCount(4) == 4);
+    LHOLO_CHECK(small && !small->denseCount(3));
+    LHOLO_CHECK(!makeSectionGrid(0, 1, 1));
+    LHOLO_CHECK(!makeSectionGrid(-1, 1, 1));
+    auto const huge = makeSectionGrid((std::numeric_limits<int>::max)(),
+        (std::numeric_limits<int>::max)(), (std::numeric_limits<int>::max)());
+    LHOLO_CHECK(huge && !huge->denseCount((std::numeric_limits<std::uint64_t>::max)()));
+    auto const ordinary = projectionRangeBox({-1.25f, 15.5f, 0}, 2.5f);
+    LHOLO_CHECK(ordinary && ordinary->min == (std::array<std::int64_t, 3>{-5, 12, -3}));
+    LHOLO_CHECK(ordinary && ordinary->max == (std::array<std::int64_t, 3>{1, 18, 3}));
+    LHOLO_CHECK(!projectionRangeBox({(std::numeric_limits<float>::max)(), 0, 0}, 1));
+    LHOLO_CHECK(!projectionRangeBox({2147483648.0f, 0, 0}, 1));
+    auto const edge = projectionRangeBox({-2147483648.0f, 0, 0}, 64);
+    LHOLO_CHECK(edge && edge->min[0] == (std::numeric_limits<int>::min)());
+    LHOLO_CHECK(edge && edge->max[0] == -2147483584LL);
+    LHOLO_CHECK(!projectionRangeBox({0, 0, 0}, 65));
+    LHOLO_CHECK(!projectionRangeBox({0, 0, 0}, -1));
+    LHOLO_CHECK(!projectionRangeBox({0, std::numeric_limits<float>::quiet_NaN(), 0}, 1));
+    LHOLO_CHECK(checkedProjectionOrigin({-20, 0, 30}, {10, -10, -20}, {16, 16, 16}, 0)
+        == (std::array<int, 3>{-10, -10, 10}));
+    LHOLO_CHECK(!checkedProjectionOrigin({(std::numeric_limits<int>::max)(), 0, 0}, {1, 0, 0}, {1, 1, 1}, 0));
+    LHOLO_CHECK(!checkedProjectionOrigin({(std::numeric_limits<int>::min)(), 0, 0}, {-1, 0, 0}, {1, 1, 1}, 0));
+    LHOLO_CHECK(!checkedProjectionOrigin({0, 0, 0}, {0, 0, 0}, {1, 0, 1}, 0));
+    auto const nearEdge = (std::numeric_limits<int>::max)() - 100;
+    LHOLO_CHECK(checkedProjectionOrigin({nearEdge, 0, 0}, {}, {1, 1, 100}, 0));
+    LHOLO_CHECK(!checkedProjectionOrigin({nearEdge, 0, 0}, {}, {1, 1, 100}, 1));
+    LHOLO_CHECK(checkedBlockCell({-0.5f, 1.9f, -2.1f}) == (std::array<int, 3>{-1, 1, -3}));
+    LHOLO_CHECK(!checkedBlockCell({2147483648.0f, 0, 0}));
+    LHOLO_CHECK(!checkedBlockCell({-2147483648.0f, 0, 0}, 1));
+    LHOLO_CHECK(!checkedBlockCell({0, std::numeric_limits<float>::quiet_NaN(), 0}));
+    LHOLO_CHECK(checkedVoxelRayOrigin({0, 0, 0}, {0, 0, -1}, 6).has_value());
+    LHOLO_CHECK(!checkedVoxelRayOrigin({0, 0, 0}, {}, 6));
+    LHOLO_CHECK(!checkedVoxelRayOrigin({0, 0, 0}, {0, 0, 1}, -1));
+    LHOLO_CHECK(!checkedVoxelRayOrigin({0, 0, 0}, {0, 0, 1}, std::numeric_limits<float>::infinity()));
+    LHOLO_CHECK(!checkedVoxelRayOrigin({0, 0, 0}, {0, std::numeric_limits<float>::quiet_NaN(), 1}, 6));
+    LoadedStructure hugeStructure;
+    hugeStructure.sizeX = (std::numeric_limits<int>::max)();
+    hugeStructure.sizeY = 1; hugeStructure.sizeZ = (std::numeric_limits<int>::max)();
+    LHOLO_CHECK(expectBlockPos(inverseTransformStructurePosition(BlockPos{-2, 0, 0}, hugeStructure, 0, 1),
+        0, 0, (std::numeric_limits<int>::max)()));
+    LHOLO_CHECK(expectBlockPos(transformStructurePosition(BlockPos{0, 0, -2}, hugeStructure, 0, 1),
+        (std::numeric_limits<int>::max)(), 0, 0));
+}
+
+void testLoadIntent() {
+    lholo::structure::detail::LoadIntent intent;
+    auto const oldAsync = intent.begin();
+    auto const newSync = intent.begin();
+    int published{};
+    LHOLO_CHECK(intent.applyIfCurrent(newSync, [&] { published = 2; }));
+    LHOLO_CHECK(!intent.applyIfCurrent(oldAsync, [&] { published = 1; }));
+    LHOLO_CHECK(published == 2);
+    intent.invalidateAndApply([&] { published = 0; });
+    LHOLO_CHECK(!intent.applyIfCurrent(newSync, [&] { published = 2; }));
+    LHOLO_CHECK(published == 0);
+
+    // Hold a commit while another thread withdraws the structure. The final
+    // state must be cleared even when invalidation races an admitted commit.
+    auto const ticket = intent.begin();
+    std::atomic_bool entered{}, release{};
+    std::thread publisher([&] {
+        intent.applyIfCurrent(ticket, [&] {
+            entered.store(true, std::memory_order_release);
+            entered.notify_all();
+            release.wait(false, std::memory_order_acquire);
+            published = 3;
+        });
+    });
+    entered.wait(false, std::memory_order_acquire);
+    std::thread withdrawer([&] { intent.invalidateAndApply([&] { published = 0; }); });
+    release.store(true, std::memory_order_release);
+    release.notify_all();
+    publisher.join();
+    withdrawer.join();
+    LHOLO_CHECK(published == 0);
+    LHOLO_CHECK(!intent.current(ticket));
+}
+
+void testStructureTransformConcurrency() {
+    auto& session = lholo::structure::detail::StructureSession::getInstance();
+    session.resetTransform();
+    session.setRotation(-1);
+    session.setMirror(100);
+    LHOLO_CHECK(session.transform().rotation == 3 && session.transform().mirror == 2);
+    session.resetTransform();
+    std::atomic_int producers{2};
+    std::atomic_bool coherent{true};
+    auto writer = [&] {
+        for (int count = 0; count < 10000; ++count) session.adjustOffsets(1, 1, 1);
+        producers.fetch_sub(1, std::memory_order_release);
+    };
+    std::thread first(writer), second(writer);
+    std::thread reader([&] {
+        while (producers.load(std::memory_order_acquire)) {
+            auto const transform = session.transform();
+            if (transform.offsetX != transform.offsetY || transform.offsetY != transform.offsetZ) coherent = false;
+        }
+    });
+    first.join(); second.join(); reader.join();
+    LHOLO_CHECK(coherent.load());
+    auto const final = session.transform();
+    LHOLO_CHECK(final.offsetX == 20000 && final.offsetY == 20000 && final.offsetZ == 20000);
+    session.resetTransform();
+}
+
+void testRenderCameraRead() {
+    using lholo::render::readRenderCameraPosition;
+    LHOLO_CHECK(!readRenderCameraPosition(nullptr));
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(nullptr, system.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    LHOLO_CHECK(allocation != nullptr);
+    if (!allocation) return;
+    struct ReleasePage {
+        void* page;
+        ~ReleasePage() { VirtualFree(page, 0, MEM_RELEASE); }
+    } release{allocation};
+    std::array<float, 3> expected{-1.5f, 20.25f, 1000.5f};
+    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
+    auto const camera = readRenderCameraPosition(allocation);
+    LHOLO_CHECK(camera && camera->x == expected[0] && camera->y == expected[1] && camera->z == expected[2]);
+    LHOLO_CHECK(!readRenderCameraPosition(allocation + system.dwPageSize - 12));
+    DWORD previous{};
+    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READONLY, &previous));
+    LHOLO_CHECK(readRenderCameraPosition(allocation).has_value());
+    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_EXECUTE, &previous));
+    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_NOACCESS, &previous));
+    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READWRITE, &previous));
+    expected[1] = std::numeric_limits<float>::quiet_NaN();
+    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
+    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+}
+
+void testProjectionActivationRequests() {
+    ProjectionActivationRequests requests;
+    LHOLO_CHECK(!requests.consumeAnchor());
+    requests.requestAnchor(1, 2, 3);
+    requests.requestAnchor(-1, -2, -3);
+    auto anchor = requests.consumeAnchor();
+    LHOLO_CHECK(anchor && anchor->x == -1 && anchor->y == -2 && anchor->z == -3);
+    LHOLO_CHECK(!requests.consumeAnchor());
+    requests.requestAnchor(1, 2, 3);
+    requests.cancelAnchorRequest();
+    LHOLO_CHECK(!requests.consumeAnchor());
+    requests.suspendForDimension(10, 1, {11, 12, 13});
+    LHOLO_CHECK(requests.dimensionSuspended());
+    LHOLO_CHECK(requests.prepareDimensionActivation(10, 2) == DimensionActivationStatus::Deferred);
+    LHOLO_CHECK(!requests.consumeAnchor());
+    LHOLO_CHECK(requests.prepareDimensionActivation(10, 1) == DimensionActivationStatus::Resuming);
+    anchor = requests.consumeAnchor();
+    LHOLO_CHECK(anchor && anchor->x == 11 && anchor->y == 12 && anchor->z == 13);
+    LHOLO_CHECK(requests.dimensionSuspended());
+    requests.requestAnchor(21, 22, 23);
+    LHOLO_CHECK(requests.prepareDimensionActivation(20, 1) == DimensionActivationStatus::Ready);
+    LHOLO_CHECK(!requests.dimensionSuspended());
+    anchor = requests.consumeAnchor();
+    LHOLO_CHECK(anchor && anchor->x == 21 && anchor->y == 22 && anchor->z == 23);
+
+    std::atomic_int writers{2};
+    std::atomic_bool coherent{true};
+    auto writer = [&](int base) {
+        for (int index = 1; index <= 10000; ++index) {
+            auto const x = base + index;
+            requests.requestAnchor(x, x * 2, -x);
+        }
+        writers.fetch_sub(1, std::memory_order_release);
+    };
+    std::thread first(writer, 0), second(writer, 10000);
+    std::thread reader([&] {
+        while (writers.load(std::memory_order_acquire)) {
+            if (auto const value = requests.consumeAnchor(); value && (value->y != value->x * 2 || value->z != -value->x)) coherent = false;
+        }
+    });
+    first.join(); second.join(); reader.join();
+    LHOLO_CHECK(coherent.load());
+    requests.cancelDimensionSuspension();
+    requests.cancelAnchorRequest();
+}
+
+void testMeshDiagnosticGate() {
+    MeshDiagnosticGate gate;
+    LHOLO_CHECK(!gate.inspect(false, 0));
+    int snapshots{};
+    for (std::uint64_t frame = 0; frame < 600; ++frame) snapshots += gate.inspect(true, frame * 16);
+    LHOLO_CHECK(snapshots == 10); // Previously 600 O(S) scans / 2400 log lines.
+    LHOLO_CHECK(!gate.inspect(true, 9599));
+    LHOLO_CHECK(gate.inspect(true, 10600));
+    LHOLO_CHECK(!gate.inspect(false, 20000));
+}
+
+void testSectionBlockSnapshot() {
+    std::vector<std::uint8_t> corrections(8193), actors(8193);
+    for (std::size_t i = 0; i < corrections.size(); ++i) { corrections[i] = i % 5; actors[i] = i % 2; }
+    SectionBlockSnapshot snapshot;
+    snapshot.capture({8192, 4096, 0, 4095, 4096, 4097}, corrections, actors);
+    LHOLO_CHECK(snapshot.size() == 5);
+    // Includes both sides of a section boundary and a sparse distant cell.
+    for (auto const i : {0U, 4095U, 4096U, 4097U, 8192U}) {
+        auto const* value = snapshot.find(i);
+        LHOLO_CHECK(value && value->correction == corrections[i] && value->actorRenderer == actors[i]);
+    }
+    LHOLO_CHECK(!snapshot.find(1) && !snapshot.find(8193));
+    corrections[4096] = 4; actors[4096] = 1;
+    LHOLO_CHECK(snapshot.find(4096)->correction == 1 && snapshot.find(4096)->actorRenderer == 0);
+    snapshot.capture({1}, corrections, actors);
+    LHOLO_CHECK(snapshot.size() == 1 && !snapshot.find(4096) && snapshot.find(1));
+    bool rejected{};
+    try { snapshot.capture({8193}, corrections, actors); } catch (std::out_of_range const&) { rejected = true; }
+    LHOLO_CHECK(rejected);
+}
+
+void testSingleTaskWorker() {
+    SingleTaskWorker worker;
+    std::atomic_bool started{}, release{}, stopped{};
+    std::atomic_int calls{};
+    LHOLO_CHECK(worker.submit([&]() noexcept {
+        started.store(true, std::memory_order_release);
+        started.notify_all();
+        release.wait(false, std::memory_order_acquire);
+        ++calls;
+    }));
+    started.wait(false, std::memory_order_acquire);
+    LHOLO_CHECK(!worker.submit([&]() noexcept { calls += 100; }));
+    std::thread stopper([&] { worker.stop(); stopped = true; });
+    LHOLO_CHECK(!stopped.load()); // Accepted work still holds native references.
+    release.store(true, std::memory_order_release);
+    release.notify_all();
+    stopper.join();
+    LHOLO_CHECK(stopped.load() && calls.load() == 1);
+    LHOLO_CHECK(!worker.submit([&]() noexcept { ++calls; }));
+    worker.stop();
+    LHOLO_CHECK(calls.load() == 1);
+    // Stop immediately after admission: pending work must also drain exactly once.
+    SingleTaskWorker pending;
+    LHOLO_CHECK(pending.submit([&]() noexcept { ++calls; }));
+    pending.stop();
+    LHOLO_CHECK(calls.load() == 2);
+}
+
+void testWorkerTaskBoundary() {
+    std::atomic_bool busy{true};
+    int published{}, failures{};
+    auto failure = [&]() noexcept { ++failures; };
+    runWorkerTaskBoundary(busy, [] { return 42; }, [&](int value) { published = value; }, failure);
+    LHOLO_CHECK(!busy && published == 42 && failures == 0);
+    busy = true;
+    runWorkerTaskBoundary(busy, []() -> int { throw std::runtime_error("task failure"); },
+        [&](int value) { published = value; }, failure);
+    LHOLO_CHECK(!busy && published == 42 && failures == 1);
+    busy = true;
+    runWorkerTaskBoundary(busy, [] { return 43; },
+        [](int) { throw std::bad_alloc{}; }, failure);
+    LHOLO_CHECK(!busy && published == 42 && failures == 2);
+}
+
+void testNativeCallbackBoundary() {
+    int calls{}, failures{};
+    char const* reported{};
+    auto failure = [&](char const* reason) noexcept { ++failures; reported = reason; };
+    LHOLO_CHECK(lholo::app::invokeNativeCallback([&] { ++calls; }, failure));
+    LHOLO_CHECK(calls == 1 && failures == 0);
+    std::string reason;
+    auto stringFailure = [&](char const* message) noexcept {
+        ++failures;
+        // Test storage is reserved before entering the noexcept reporter.
+        reason.assign(message);
+    };
+    reason.reserve(128);
+    LHOLO_CHECK(!lholo::app::invokeNativeCallback([] { throw std::runtime_error("UI failure"); }, stringFailure));
+    LHOLO_CHECK(reason == "UI failure" && failures == 1);
+    LHOLO_CHECK(!lholo::app::invokeNativeCallback([] { throw 7; }, failure));
+    LHOLO_CHECK(std::string_view{reported} == "unknown C++ exception" && failures == 2);
+    std::array<int, 3> order{};
+    int count{};
+    LHOLO_CHECK(!lholo::app::invokeNativeCallback([&] {
+        lholo::app::ScopeExit outer([&]() noexcept { order[count++] = 2; });
+        lholo::app::ScopeExit inner([&]() noexcept { order[count++] = 1; });
+        throw std::bad_alloc{};
+    }, [&](char const*) noexcept { order[count++] = 3; }));
+    LHOLO_CHECK((order == std::array<int, 3>{1, 2, 3}));
+}
+
+void testWorldEventInterest() {
+    using namespace lholo::projection::detail;
+    lholo::structure::LoadedStructure loaded;
+    loaded.sizeX = 7; loaded.sizeY = 2; loaded.sizeZ = 5;
+    loaded.regions = {{0, 0, 0, 3, 2, 5}, {5, 0, 1, 2, 1, 2}};
+    std::array<int, 3> const origin{-33, -17, 47};
+    for (int mirror = 0; mirror < 3; ++mirror) for (int rotation = 0; rotation < 4; ++rotation) {
+        auto const interest = makeProjectionWorldEventInterest(loaded, origin, mirror, rotation);
+        for (int x = -1; x <= 7; ++x) for (int y = -1; y <= 2; ++y) for (int z = -1; z <= 5; ++z) {
+            bool const covered = y >= 0 && y < 2 && ((x >= 0 && x < 3 && z >= 0 && z < 5)
+                || (x >= 5 && x < 7 && y == 0 && z >= 1 && z < 3));
+            auto const transformed = transformStructurePosition(BlockPos{x, y, z}, loaded, mirror, rotation);
+            std::array<int, 3> const world{origin[0] + transformed.x, origin[1] + transformed.y, origin[2] + transformed.z};
+            LHOLO_CHECK(interest.contains(world) == covered);
+            if (covered) {
+                auto floorChunk = [](int cell) { return cell >= 0 ? cell / 16 : -((-cell + 15) / 16); };
+                LHOLO_CHECK(interest.intersectsSubChunk({floorChunk(world[0]), floorChunk(world[1]), floorChunk(world[2])}));
+            }
+        }
+        LHOLO_CHECK(!interest.contains({1000, 1000, 1000}));
+        LHOLO_CHECK(!interest.intersectsSubChunk({INT_MAX, INT_MIN, INT_MAX}));
+    }
+}
+
+void testInitializationTransaction() {
+    int rollbacks{}, reports{};
+    auto rollback = [&]() noexcept { ++rollbacks; };
+    auto failure = [&](char const*) noexcept { ++reports; };
+    LHOLO_CHECK(lholo::app::initializeWithRollback([] { return true; }, rollback, failure));
+    LHOLO_CHECK(rollbacks == 0 && reports == 0);
+    LHOLO_CHECK(!lholo::app::initializeWithRollback([] { return false; }, rollback, failure));
+    LHOLO_CHECK(rollbacks == 1 && reports == 0);
+    LHOLO_CHECK(!lholo::app::initializeWithRollback([]() -> bool {
+        throw std::runtime_error("hook install failed");
+    }, rollback, failure));
+    LHOLO_CHECK(rollbacks == 2 && reports == 1);
+    LHOLO_CHECK(!lholo::app::initializeWithRollback([]() -> bool { throw 42; }, rollback, failure));
+    LHOLO_CHECK(rollbacks == 3 && reports == 2);
+    LHOLO_CHECK(lholo::app::initializeWithRollback([] { return true; }, rollback, failure));
+    LHOLO_CHECK(rollbacks == 3 && reports == 2);
+}
+
+void testFutureResult() {
+    std::promise<int> failed;
+    std::optional<std::future<int>> inFlight{failed.get_future()};
+    failed.set_exception(std::make_exception_ptr(std::runtime_error("worker allocation failed")));
+    bool reported{};
+    try { (void)lholo::app::takeFutureResult(inFlight); }
+    catch (std::runtime_error const& error) { reported = std::string_view{error.what()} == "worker allocation failed"; }
+    LHOLO_CHECK(reported);
+    LHOLO_CHECK(!inFlight); // A consumed failing future must not poison later ticks.
+    std::promise<int> next;
+    inFlight.emplace(next.get_future());
+    next.set_value(42);
+    LHOLO_CHECK(lholo::app::takeFutureResult(inFlight) == 42 && !inFlight);
+}
+
+void testMaterialHudAvailabilityRevision() {
+    using namespace lholo::structure::detail;
+    auto& state = StructureUiState::getInstance();
+    state.replaceMaterialHudSnapshot(std::vector<MaterialRequirement>(1), {10});
+    auto old = state.materialHudSnapshot();
+    LHOLO_CHECK(state.setMaterialHudAvailability(old.revision, {20}));
+    LHOLO_CHECK(state.materialHudSnapshot().available == std::vector<int>{20});
+    state.clearMaterialHud();
+    LHOLO_CHECK(!state.setMaterialHudAvailability(old.revision, {99}));
+    LHOLO_CHECK(state.materialHudSnapshot().available.empty());
+    state.replaceMaterialHudSnapshot(std::vector<MaterialRequirement>(1), {30});
+    old = state.materialHudSnapshot();
+    state.replaceMaterialHudSnapshot(std::vector<MaterialRequirement>(1), {40});
+    LHOLO_CHECK(!state.setMaterialHudAvailability(old.revision, {99}));
+    LHOLO_CHECK(state.materialHudSnapshot().available == std::vector<int>{40});
+    auto current = state.materialHudSnapshot();
+    LHOLO_CHECK(!state.setMaterialHudAvailability(current.revision, {1, 2}));
+    LHOLO_CHECK(state.materialHudSnapshot().available == std::vector<int>{40});
+    state.clearMaterialHud();
+}
+
+void testMaterialHudPublicationRetirement() {
+    using namespace lholo::structure::detail;
+    auto& state = StructureUiState::getInstance();
+    MaterialRequirement oldMaterial{};
+    oldMaterial.displayName = "Old stone";
+    oldMaterial.typeName = "minecraft:stone";
+    oldMaterial.count = 5;
+    MaterialRequirement newMaterial{};
+    newMaterial.displayName = "New glass";
+    newMaterial.typeName = "minecraft:glass";
+    newMaterial.count = 7;
+    for (int mode = 0; mode < 4; ++mode) {
+        state.clearMaterials();
+        auto const revision = state.materialHudRevision();
+        std::promise<void> resume;
+        auto go = resume.get_future();
+        bool committed{};
+        std::thread oldResult([&] {
+            go.wait();
+            committed = state.replaceMaterialHudSnapshot({oldMaterial}, {1}, revision);
+        });
+        switch (mode) {
+        case 0: state.clearMaterialHud(); break;
+        case 1: state.clearMaterials(); break;
+        case 2: state.resetWorldSession(); break;
+        case 3: state.replaceMaterialHudSnapshot({newMaterial}, {2}); break;
+        }
+        auto const current = state.materialHudView();
+        resume.set_value();
+        oldResult.join();
+        LHOLO_CHECK(!committed);
+        LHOLO_CHECK(state.materialHudView() == current);
+        LHOLO_CHECK(state.replaceMaterialHudSnapshot({newMaterial}, {2}, state.materialHudRevision()));
+        auto const fresh = state.materialHudView();
+        LHOLO_CHECK(fresh && fresh->requirements[0].typeName == "minecraft:glass"
+            && fresh->available == std::vector<int>{2});
+    }
+    state.clearMaterials();
+}
+
+void testMaterialHudImmutableView() {
+    using namespace lholo::structure::detail;
+    auto& state = StructureUiState::getInstance();
+    state.clearMaterials();
+    LHOLO_CHECK(!state.materialHudView());
+    MaterialRequirement material{"Owned material name", {}, "minecraft:stone", "minecraft:stone", 100, 64};
+    state.replaceMaterialHudSnapshot({material}, {10});
+    auto original = state.materialHudView();
+    LHOLO_CHECK(original && original == state.materialHudView() && original->ready);
+    auto const* borrowedName = original->requirements[0].displayName.c_str();
+    LHOLO_CHECK(state.setMaterialHudAvailability(original->revision, {20}));
+    auto updated = state.materialHudView();
+    LHOLO_CHECK(updated != original && updated->revision == original->revision);
+    LHOLO_CHECK(original->available == std::vector<int>{10} && updated->available == std::vector<int>{20});
+    auto copied = state.materialHudSnapshot();
+    copied.requirements[0].displayName = "Independent value copy";
+    LHOLO_CHECK(updated->requirements[0].displayName == "Owned material name");
+    state.clearMaterials();
+    LHOLO_CHECK(!state.materialHudView() && !state.setMaterialHudAvailability(original->revision, {30}));
+    LHOLO_CHECK(std::string_view{borrowedName} == "Owned material name"
+        && original->available == std::vector<int>{10});
+
+    std::atomic_bool done{};
+    std::atomic_bool consistent{true};
+    std::atomic_size_t observations{};
+    std::thread reader([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            auto const view = state.materialHudView();
+            if (!view) continue;
+            if (!view->ready || view->requirements.size() != 1 || view->available.size() != 1
+                || view->requirements[0].count != static_cast<std::uint64_t>(view->available[0])
+                || view->requirements[0].displayName != std::to_string(view->available[0])) {
+                consistent.store(false, std::memory_order_release);
+            }
+            observations.fetch_add(1, std::memory_order_release);
+        }
+    });
+    for (int index = 1; index <= 1000; ++index) {
+        material.displayName = std::to_string(index);
+        material.count = static_cast<std::uint64_t>(index);
+        state.replaceMaterialHudSnapshot({material}, {index});
+        if (index == 1) {
+            while (observations.load(std::memory_order_acquire) == 0) std::this_thread::yield();
+        }
+        if (index % 7 == 0) state.clearMaterialHud();
+    }
+    done.store(true, std::memory_order_release);
+    reader.join();
+    LHOLO_CHECK(observations.load() > 0 && consistent.load());
+    LHOLO_CHECK(std::string_view{borrowedName} == "Owned material name");
+    state.clearMaterials();
+}
+
+void testCaptureRequestsAndBounds() {
+    using namespace lholo::structure::capture;
+    using namespace lholo::structure::capture::detail;
+    auto minInt = (std::numeric_limits<int>::min)();
+    auto maxInt = (std::numeric_limits<int>::max)();
+    LHOLO_CHECK((captureSize({3, 6, 9}, {-3, -6, -9}) == std::array<std::uint64_t, 3>{7, 13, 19}));
+    LHOLO_CHECK(captureVolume({0, 0, 0}, {15, 15, 15}) == 4096);
+    LHOLO_CHECK(captureBoundsSupported({-16, -64, -16}, {16, 100, 16}));
+    LHOLO_CHECK(!captureBoundsSupported({minInt, 0, 0}, {minInt, 0, 0}));
+    LHOLO_CHECK(!captureBoundsSupported({maxInt, 0, 0}, {maxInt, 0, 0}));
+    LHOLO_CHECK(!captureVolume({minInt, minInt, minInt}, {maxInt, maxInt, maxInt}));
+    LHOLO_CHECK(!captureBoundsSupported({minInt + 1, 0, 0}, {maxInt - 1, 0, 0}));
+    LHOLO_CHECK(captureBoundsSupported({0, 0, 0}, {4095, 255, 62}));
+    LHOLO_CHECK(!captureBoundsSupported({0, 0, 0}, {4095, 255, 63}));
+    CaptureRequests requests;
+    requests.requestPoint(PointSlot::First);
+    requests.requestPoint(PointSlot::First);
+    requests.requestPoint(PointSlot::Second);
+    LHOLO_CHECK(requests.takePoints() == 3 && requests.takePoints() == 0);
+    Draft first; first.first = Point{1, 2, 3}; first.second = Point{4, 5, 6};
+    auto second = first; second.includeEntities = true;
+    requests.requestExport(first, "first.mcstructure");
+    requests.requestExport(second, "second.mcstructure");
+    auto request = requests.takeExport();
+    LHOLO_CHECK(request && request->draft == second && request->output == "second.mcstructure");
+    LHOLO_CHECK(!requests.takeExport());
+    requests.requestExport(first, "old-world.mcstructure");
+    requests.requestPoint(PointSlot::First);
+    auto const previous = requests.session();
+    requests.resetSession();
+    LHOLO_CHECK(requests.session() != previous && !requests.takeExport() && requests.takePoints() == 0);
+    requests.requestExport(second, "new-world.mcstructure");
+    request = requests.takeExport();
+    LHOLO_CHECK(request && request->session == requests.session());
+}
+
+void testEpochFailure() {
+    EpochFailure failure;
+    auto const old = failure.token();
+    LHOLO_CHECK(!failure.failed());
+    failure.mark(old);
+    LHOLO_CHECK(failure.failed());
+    failure.advance();
+    LHOLO_CHECK(!failure.failed());
+    failure.mark(old);
+    LHOLO_CHECK(!failure.failed());
+    auto const current = failure.token();
+    failure.mark(current);
+    failure.mark(old);
+    LHOLO_CHECK(failure.failed());
+    failure.advance();
+    auto const concurrent = failure.token();
+    std::thread stale([&] { for (int i = 0; i < 10000; ++i) failure.mark(old); });
+    std::thread latest([&] { for (int i = 0; i < 10000; ++i) failure.mark(concurrent); });
+    stale.join(); latest.join();
+    LHOLO_CHECK(failure.failed());
+    failure.advance();
+    LHOLO_CHECK(!failure.failed());
+}
+
+void testImGuiFrameRecovery() {
+    auto* context = ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = {800.0f, 600.0f};
+    io.DeltaTime = 1.0f / 60.0f;
+    unsigned char* pixels{};
+    int width{}, height{};
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    int failures{};
+    for (int cycle = 0; cycle < 10; ++cycle) {
+        ImGui::NewFrame();
+        LHOLO_CHECK(!lholo::app::invokeNativeCallback([&] {
+            lholo::overlay::detail::ImGuiFrameRecovery recovery;
+            ImGui::Begin("Aborted UI");
+            ImGui::PushID(cycle);
+            ImGui::PushStyleColor(ImGuiCol_Text, {1, 0, 0, 1});
+            ImGui::BeginGroup();
+            ImGui::BeginChild("child", {200, 200});
+            if (ImGui::BeginTable("table", 2)) {
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted("before failure");
+            }
+            throw std::runtime_error("draw failed");
+        }, [&](char const*) noexcept { ++failures; }));
+        LHOLO_CHECK(!context->WithinFrameScope && context->CurrentWindowStack.Size == 0);
+        LHOLO_CHECK(context->ColorStack.Size == 0 && context->GroupStack.Size == 0);
+        LHOLO_CHECK(io.ConfigErrorRecoveryEnableAssert && io.ConfigErrorRecoveryEnableDebugLog
+            && io.ConfigErrorRecoveryEnableTooltip);
+        // The next real frame must be usable after each aborted draw.
+        ImGui::NewFrame();
+        {
+            lholo::overlay::detail::ImGuiFrameRecovery recovery;
+            ImGui::Begin("Next UI");
+            ImGui::TextUnformatted("recovered");
+            ImGui::End();
+            ImGui::Render();
+        }
+        LHOLO_CHECK(ImGui::GetDrawData() && ImGui::GetDrawData()->Valid);
+    }
+    LHOLO_CHECK(failures == 10);
+    ImGui::DestroyContext(context);
 }
 
 struct TestUv {
@@ -109,6 +741,22 @@ void testNativeLiquidUvRemap() {
     checkUv(degenerate[1], 0.5f, 0.5f);
     checkUv(degenerate[2], 0.5f, 0.75f);
     checkUv(degenerate[3], 0.25f, 0.75f);
+
+    auto const extreme = (std::numeric_limits<float>::max)();
+    std::array<TestUv, 4> wideSource{{{-extreme, -extreme}, {extreme, -extreme},
+        {extreme, extreme}, {-extreme, extreme}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{wideSource}, atlas));
+    checkUv(wideSource[0], 0.25f, 0.5f);
+    checkUv(wideSource[1], 0.5f, 0.5f);
+    checkUv(wideSource[2], 0.5f, 0.75f);
+    checkUv(wideSource[3], 0.25f, 0.75f);
+    std::array<TestUv, 4> wideDestination{{{0, 0}, {1, 0}, {1, 1}, {0, 1}}};
+    LHOLO_CHECK(remapNativeLiquidUvToAtlas(std::span{wideDestination},
+        NativeLiquidAtlasRect{-extreme, -extreme, extreme, extreme}));
+    checkUv(wideDestination[0], -extreme, -extreme);
+    checkUv(wideDestination[1], extreme, -extreme);
+    checkUv(wideDestination[2], extreme, extreme);
+    checkUv(wideDestination[3], -extreme, extreme);
 
     auto invalidAtlasUvs = normal;
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(
@@ -197,6 +845,45 @@ void testNativeLiquidInternalFaceCull() {
     LHOLO_CHECK(result.facePairs == 1U);
     LHOLO_CHECK(result.removedVertices() == 8U);
     LHOLO_CHECK(result.removeQuads[0] == 1U && result.removeQuads[1] == 1U);
+
+    std::array<std::uint8_t, 8> sameLiquid{};
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{opposite},
+        NativeLiquidFullFaceTolerance, std::span<std::uint8_t const>{sameLiquid});
+    LHOLO_CHECK(result.valid && result.facePairs == 1);
+    std::array<std::uint8_t, 8> waterLava{0, 0, 0, 0, 1, 1, 1, 1};
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{opposite},
+        NativeLiquidFullFaceTolerance, std::span<std::uint8_t const>{waterLava});
+    LHOLO_CHECK(result.valid && result.removedVertices() == 0);
+    sameLiquid[3] = 1; // Ambiguous mixed-kind quad retains its native geometry.
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{opposite},
+        NativeLiquidFullFaceTolerance, std::span<std::uint8_t const>{sameLiquid});
+    LHOLO_CHECK(result.valid && result.removedVertices() == 0);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{opposite},
+        NativeLiquidFullFaceTolerance, std::span<std::uint8_t const>{waterLava}.first(7));
+    LHOLO_CHECK(!result.valid);
+    auto incomplete = positiveX;
+    incomplete[3] = incomplete[2]; // Bounds still cover a unit face, but one corner is absent.
+    std::vector<TestPosition> incompletePair;
+    append(incompletePair, incomplete);
+    std::swap(incomplete[1], incomplete[2]);
+    append(incompletePair, incomplete);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{incompletePair});
+    LHOLO_CHECK(result.valid && result.removedVertices() == 0);
+    auto crossed = positiveX;
+    std::swap(crossed[2], crossed[3]);
+    std::vector<TestPosition> crossedPair;
+    append(crossedPair, crossed);
+    std::swap(crossed[1], crossed[2]);
+    append(crossedPair, crossed);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{crossedPair});
+    LHOLO_CHECK(result.valid && result.removedVertices() == 0);
+    auto farPositive = positiveX, farNegative = negativeX;
+    for (auto& point : farPositive) point.x = 1.0e20f;
+    for (auto& point : farNegative) point.x = 2.0e20f;
+    std::vector<TestPosition> farPair;
+    append(farPair, farPositive); append(farPair, farNegative);
+    result = buildNativeLiquidInternalFaceCullMask(std::span<TestPosition const>{farPair});
+    LHOLO_CHECK(result.valid && result.removedVertices() == 0);
 
     // 2. Same-facing duplicates may be intentional overlays and remain.
     std::vector<TestPosition> sameFacing;
@@ -458,8 +1145,64 @@ void testProgress() {
     LHOLO_CHECK(progress.extra == 0);
 }
 
+void testAtomicOutput() {
+    wchar_t uniquePath[MAX_PATH]{};
+    auto const directory = std::filesystem::temp_directory_path();
+    auto const created = GetTempFileNameW(directory.c_str(), L"LHO", 0, uniquePath);
+    LHOLO_CHECK(created != 0);
+    if (!created) return;
+    std::filesystem::path const destination{uniquePath};
+    lholo::app::ScopeExit cleanup([&]() noexcept { DeleteFileW(destination.c_str()); });
+    { std::ofstream file(destination, std::ios::binary); file << "original"; }
+    auto read = [&] {
+        std::ifstream file(destination, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>{file}, {});
+    };
+    std::filesystem::path staging;
+    LHOLO_CHECK(!lholo::io::writeOutputAtomically(destination, [&](auto const& temporary) {
+        staging = temporary;
+        std::ofstream file(temporary, std::ios::binary); file << "partial";
+        return false;
+    }));
+    LHOLO_CHECK(read() == "original" && !std::filesystem::exists(staging.parent_path()));
+    bool rejected{};
+    try {
+        (void)lholo::io::writeOutputAtomically(destination, [&](auto const& temporary) -> bool {
+            staging = temporary;
+            std::ofstream file(temporary, std::ios::binary); file << "partial";
+            throw std::runtime_error("native writer failed");
+        });
+    } catch (std::runtime_error const&) { rejected = true; }
+    LHOLO_CHECK(rejected && read() == "original" && !std::filesystem::exists(staging.parent_path()));
+    auto const lock = CreateFileW(destination.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    LHOLO_CHECK(lock != INVALID_HANDLE_VALUE);
+    if (lock != INVALID_HANDLE_VALUE) {
+        rejected = false;
+        try {
+            (void)lholo::io::writeOutputAtomically(destination, [&](auto const& temporary) {
+                staging = temporary;
+                std::ofstream file(temporary, std::ios::binary); file << "replacement"; file.close();
+                return static_cast<bool>(file);
+            });
+        } catch (std::system_error const&) { rejected = true; }
+        CloseHandle(lock);
+        LHOLO_CHECK(rejected && read() == "original" && !std::filesystem::exists(staging.parent_path()));
+    }
+    LHOLO_CHECK(lholo::io::writeOutputAtomically(destination, [&](auto const& temporary) {
+        staging = temporary;
+        std::ofstream file(temporary, std::ios::binary); file << "complete"; file.close();
+        return static_cast<bool>(file);
+    }));
+    LHOLO_CHECK(read() == "complete" && !std::filesystem::exists(staging.parent_path()));
+}
+
 void testSettingsStore() {
-    auto const path = std::filesystem::temp_directory_path() / "lholo_settings_test.json";
+    wchar_t uniquePath[MAX_PATH]{};
+    auto const tempDirectory = std::filesystem::temp_directory_path();
+    auto const created = GetTempFileNameW(tempDirectory.c_str(), L"LHT", 0, uniquePath);
+    LHOLO_CHECK(created != 0);
+    if (!created) return;
+    std::filesystem::path const path{uniquePath}; // Only this test owns this file.
     std::error_code error;
     std::filesystem::remove(path, error);
 
@@ -529,6 +1272,58 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.savedAnchorX == 12);
     LHOLO_CHECK(loaded.savedAnchorZ == -34);
 
+    auto readBytes = [](std::filesystem::path const& source) {
+        std::ifstream input(source, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    auto const original = readBytes(path);
+    auto badEncoding = settings;
+    badEncoding.lastStructurePath = std::string(1, static_cast<char>(0xFF));
+    bool rejectedEncoding{};
+    try { lholo::settings::saveSettingsFile(path, badEncoding); }
+    catch (...) { rejectedEncoding = true; }
+    LHOLO_CHECK(rejectedEncoding);
+    LHOLO_CHECK(readBytes(path) == original);
+
+    // A late type error must not publish the early fields of a parsed file.
+    {
+        std::ofstream malformed(path, std::ios::trunc);
+        malformed << R"({"version":13,"lastStructurePath":"changed","savedStructurePath":false})";
+    }
+    auto preserved = settings;
+    bool rejectedParse{};
+    try { (void)lholo::settings::loadSettingsFile(path, preserved); }
+    catch (...) { rejectedParse = true; }
+    LHOLO_CHECK(rejectedParse);
+    LHOLO_CHECK(preserved.lastStructurePath == settings.lastStructurePath);
+    LHOLO_CHECK(preserved.language == settings.language && preserved.uiScale == settings.uiScale);
+
+    lholo::settings::saveSettingsFile(path, settings);
+    auto const locked = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    LHOLO_CHECK(locked != INVALID_HANDLE_VALUE);
+    if (locked != INVALID_HANDLE_VALUE) {
+        bool rejectedWrite{};
+        try { lholo::settings::saveSettingsFile(path, loaded); }
+        catch (...) { rejectedWrite = true; }
+        LHOLO_CHECK(rejectedWrite);
+        CloseHandle(locked);
+        LHOLO_CHECK(readBytes(path) == original);
+    }
+
+    wchar_t relativePath[MAX_PATH]{};
+    auto const currentDirectory = std::filesystem::current_path();
+    auto const relativeCreated = GetTempFileNameW(currentDirectory.c_str(), L"LHT", 0, relativePath);
+    LHOLO_CHECK(relativeCreated != 0);
+    if (relativeCreated) {
+        std::filesystem::path const ownedRelative{relativePath};
+        bool savedRelative{};
+        try { lholo::settings::saveSettingsFile(ownedRelative.filename(), settings); savedRelative = true; }
+        catch (...) {}
+        LHOLO_CHECK(savedRelative && readBytes(ownedRelative) == original);
+        std::filesystem::remove(ownedRelative, error);
+    }
+
     // Existing configs keep their preference when the old, narrower
     // block-entity label migrates to the projected-block label.
     {
@@ -589,6 +1384,60 @@ void testSettingsStore() {
     std::filesystem::remove(path, error);
 }
 
+void testSettingsCurrentKeyPriority() {
+    wchar_t uniquePath[MAX_PATH]{};
+    auto const tempDirectory = std::filesystem::temp_directory_path();
+    auto const created = GetTempFileNameW(tempDirectory.c_str(), L"LHP", 0, uniquePath);
+    LHOLO_CHECK(created != 0);
+    if (!created) return;
+    std::filesystem::path const path{uniquePath};
+    lholo::app::ScopeExit cleanup([&]() noexcept {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+    });
+    auto load = [&](std::string const& json, lholo::settings::Settings& settings) {
+        {
+            std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            file << json;
+            if (!file) throw std::runtime_error("Could not write owned settings fixture");
+        }
+        try { return lholo::settings::loadSettingsFile(path, settings); }
+        catch (std::exception const&) { return false; }
+    };
+    lholo::settings::Settings hud;
+    LHOLO_CHECK(load(R"({"version":13,"hudShowProjectedBlockName":false,"hudShowBlockEntity":"unused"})", hud));
+    LHOLO_CHECK(!hud.hudShowProjectedBlockName);
+    constexpr std::array currentKeys{
+        "moveLeftHotkey", "moveRightHotkey", "moveForwardHotkey", "moveBackwardHotkey", "moveUpHotkey", "moveDownHotkey"
+    };
+    constexpr std::array legacyKeys{
+        "moveXMinusHotkey", "moveXPlusHotkey", "moveZMinusHotkey", "moveZPlusHotkey", "moveYPlusHotkey", "moveYMinusHotkey"
+    };
+    for (std::size_t index = 0; index < currentKeys.size(); ++index) {
+        for (bool modifiers : {false, true}) {
+            auto const suffix = modifiers ? "Modifiers" : "";
+            auto const value = modifiers ? 5 : 76;
+            auto const fixture = std::string{"{\"version\":13,\""} + currentKeys[index] + suffix
+                + "\":" + std::to_string(value) + ",\"" + legacyKeys[index] + suffix + "\":{}}";
+            lholo::settings::Settings settings;
+            LHOLO_CHECK(load(fixture, settings));
+            LHOLO_CHECK((modifiers ? settings.moveHotkeyModifiers[index] : settings.moveHotkeys[index]) == value);
+        }
+    }
+    // The selected current field still fails closed on a type error. A valid
+    // legacy value cannot hide malformed current data or publish early fields.
+    for (auto const* fixture : {
+        R"({"version":13,"lastStructurePath":"changed","hudShowProjectedBlockName":{},"hudShowBlockEntity":false})",
+        R"({"version":13,"lastStructurePath":"changed","moveLeftHotkey":{},"moveXMinusHotkey":76})",
+        R"({"version":13,"lastStructurePath":"changed","moveLeftHotkeyModifiers":{},"moveXMinusHotkeyModifiers":5})"
+    }) {
+        lholo::settings::Settings settings;
+        settings.lastStructurePath = "preserved";
+        LHOLO_CHECK(!load(fixture, settings));
+        LHOLO_CHECK(settings.lastStructurePath == "preserved");
+    }
+}
+
 void testStructureSession() {
     using lholo::structure::LayerAxis;
     using lholo::structure::LayerDisplayMode;
@@ -633,6 +1482,19 @@ void testStructureSession() {
     LHOLO_CHECK(snapshot.maxLayerX == 6);
     LHOLO_CHECK(snapshot.transform.offsetX == 12);
     LHOLO_CHECK(snapshot.transform.offsetY == -4);
+
+    // A coordinate layer is already a maximum index, not a count.
+    session.setDisplayLayer(5);
+    LHOLO_CHECK(session.adjustDisplayLayer(1));
+    LHOLO_CHECK(session.transform().displayLayer == 6);
+    session.setLayerAxis(LayerAxis::Y);
+    session.setDisplayLayer(3);
+    LHOLO_CHECK(session.adjustDisplayLayer(1));
+    LHOLO_CHECK(session.transform().displayLayer == 4);
+    LHOLO_CHECK(session.adjustDisplayLayer((std::numeric_limits<int>::max)()));
+    LHOLO_CHECK(session.transform().displayLayer == 4);
+    session.setLayerAxis(LayerAxis::X);
+    session.setDisplayLayer(4);
 
     session.recordProjectionAnchor(10, 20, 30);
     auto const saved = session.savedProjection();
@@ -690,8 +1552,8 @@ void testPlacementState() {
     state.setManualMode(true);
     state.setRadius(3);
     state.setAutoPlacementBreakCooldownSeconds(12);
-    LHOLO_CHECK(state.beginManualPress(100));
-    LHOLO_CHECK(!state.beginManualPress(120));
+    LHOLO_CHECK(state.beginManualPress(100, state.manualInputEpoch()));
+    LHOLO_CHECK(!state.beginManualPress(120, state.manualInputEpoch()));
     state.setLastManualPlaceAt(80);
     state.setNextPlaceAt(140);
     state.setNextSwapAt(150);
@@ -763,7 +1625,7 @@ void testPlacementState() {
     LHOLO_CHECK(state.radius() == 3);
     LHOLO_CHECK(state.autoPlacementBreakCooldownSeconds() == 12);
 
-    LHOLO_CHECK(state.beginManualPress(450));
+    LHOLO_CHECK(state.beginManualPress(450, state.manualInputEpoch()));
     state.setAimedProjectedBlockName("World projected block");
     state.suppressAutoPlacement(suppressedCell, 500);
     state.resetWorldSession();
@@ -792,6 +1654,24 @@ void testPlacementState() {
 void testStructureUiState() {
     using lholo::structure::detail::HudStateSnapshot;
     using lholo::structure::detail::StructureUiState;
+
+    {
+        std::array const fields{&HudStateSnapshot::showFileName, &HudStateSnapshot::showLayer,
+            &HudStateSnapshot::showOverallProgress, &HudStateSnapshot::showProgress,
+            &HudStateSnapshot::showWrongState, &HudStateSnapshot::showWrongType,
+            &HudStateSnapshot::showExtraBlocks, &HudStateSnapshot::showProjectedBlockName};
+        HudStateSnapshot hud;
+        for (auto field : fields) hud.*field = false;
+        LHOLO_CHECK(!hud.hasVisibleFields());
+        for (auto field : fields) {
+            hud.*field = true;
+            LHOLO_CHECK(hud.hasVisibleFields());
+            hud.enabled = false;
+            LHOLO_CHECK(!hud.hasVisibleFields());
+            hud.enabled = true;
+            hud.*field = false;
+        }
+    }
 
     auto& state = StructureUiState::getInstance();
     state.resetHotkeys();
@@ -1011,6 +1891,22 @@ void testHotkeyFormat() {
     auto const chord = lholo::ui::hotkeyChordName(lholo::ui::kHotkeyModifierControl, 'M');
     LHOLO_CHECK(chord.rfind("Ctrl + ", 0) == 0);
     LHOLO_CHECK(chord.size() > 7);
+    // Match the native keyboard-layout name for extended navigation/numpad
+    // keys. Literals would incorrectly tie this check to one system language.
+    for (auto const key : {VK_PRIOR, VK_NEXT, VK_END, VK_HOME, VK_INSERT, VK_DIVIDE, VK_NUMLOCK}) {
+        auto const scan = MapVirtualKeyW(static_cast<unsigned int>(key), MAPVK_VK_TO_VSC);
+        wchar_t expectedWide[128]{};
+        auto const length = GetKeyNameTextW(static_cast<LONG>((scan << 16) | (1U << 24)),
+            expectedWide, static_cast<int>(std::size(expectedWide)));
+        LHOLO_CHECK(length > 0);
+        auto const bytes = WideCharToMultiByte(CP_UTF8, 0, expectedWide, length, nullptr, 0, nullptr, nullptr);
+        std::string expected(static_cast<std::size_t>((std::max)(0, bytes)), '\0');
+        if (bytes > 0) WideCharToMultiByte(CP_UTF8, 0, expectedWide, length, expected.data(), bytes, nullptr, nullptr);
+        auto const actual = lholo::ui::hotkeyName(static_cast<unsigned int>(key));
+        if (actual != expected) std::fprintf(stderr, "extended key 0x%02X actual='%s' expected='%s'\n",
+            key, actual.c_str(), expected.c_str());
+        LHOLO_CHECK(bytes > 0 && actual == expected);
+    }
 }
 
 void testViewMoveBasis() {
@@ -1095,6 +1991,24 @@ void testViewMoveBasis() {
     LHOLO_CHECK(twoNotches.valid && twoNotches.dy == 2);
     LHOLO_CHECK(!viewForwardStep(0.0f, 0.0f, 0.0f, 1).valid);
     LHOLO_CHECK(!viewForwardStep(0.0f, 0.0f, -1.0f, 0).valid);
+    for (auto const invalid : {std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(),
+            (std::numeric_limits<float>::max)()}) {
+        LHOLO_CHECK(!viewForwardStep(invalid, 0.f, 0.f, 1).valid);
+        LHOLO_CHECK(!viewForwardStep(0.f, invalid, 0.f, 1).valid);
+        LHOLO_CHECK(!viewForwardStep(0.f, 0.f, invalid, 1).valid);
+    }
+    for (auto const yaw : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        LHOLO_CHECK(!viewRelativeMoveStep(HotkeyId::MoveForward, yaw).valid);
+        LHOLO_CHECK(!viewRelativeMoveStep(HotkeyId::MoveLeft, yaw).valid);
+        LHOLO_CHECK(viewRelativeMoveStep(HotkeyId::MoveUp, yaw).dy == 1);
+    }
+    auto const minimum = (std::numeric_limits<int>::min)();
+    auto const maximum = (std::numeric_limits<int>::max)();
+    LHOLO_CHECK(viewForwardStep(1.f, 0.f, 0.f, minimum).dx == minimum);
+    LHOLO_CHECK(viewForwardStep(-1.f, 0.f, 0.f, maximum).dx == -maximum);
+    LHOLO_CHECK(!viewForwardStep(-1.f, 0.f, 0.f, minimum).valid);
+    LHOLO_CHECK(!viewForwardStep(2.f, 0.f, 0.f, maximum).valid);
 }
 
 void testHookLifecycle() {
@@ -1145,6 +2059,51 @@ void testHookLifecycle() {
     waitForQuiescence();
     markDisabled();
     LHOLO_CHECK(state() == State::Disabled);
+
+    // Race fresh admissions against closure, then observe the actual bodies
+    // after Running drain. Nested queries must inherit the outer decision in
+    // both phases, and the next session must start only after every entry ends.
+    for (unsigned round = 0; round < 32; ++round) {
+        LHOLO_CHECK(beginEnable());
+        std::atomic_uint ready{}, liveBodies{}, mismatches{};
+        std::atomic_bool release{}, closed{};
+        std::array<std::thread, 4> callbacks;
+        for (auto& callback : callbacks) {
+            callback = std::thread([&] {
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                ready.notify_all();
+                release.wait(false, std::memory_order_acquire);
+                for (unsigned visit = 0; visit < 512; ++visit) {
+                    bool const alreadyClosed = closed.load(std::memory_order_acquire);
+                    DetourGuard outer;
+                    bool const running = static_cast<bool>(outer);
+                    if (running) liveBodies.fetch_add(1, std::memory_order_acq_rel);
+                    DetourGuard nested;
+                    if (static_cast<bool>(nested) != running || !insideDetour()
+                        || (alreadyClosed && running)) {
+                        mismatches.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    if (running) liveBodies.fetch_sub(1, std::memory_order_acq_rel);
+                }
+            });
+        }
+        for (;;) {
+            auto const entered = ready.load(std::memory_order_acquire);
+            if (entered == callbacks.size()) break;
+            ready.wait(entered, std::memory_order_acquire);
+        }
+        release.store(true, std::memory_order_release);
+        release.notify_all();
+        beginQuiesce();
+        closed.store(true, std::memory_order_release);
+        waitForRunningCallbacks();
+        LHOLO_CHECK(liveBodies.load(std::memory_order_acquire) == 0);
+        for (auto& callback : callbacks) callback.join();
+        waitForQuiescence();
+        markDisabled();
+        LHOLO_CHECK(mismatches.load(std::memory_order_acquire) == 0);
+        LHOLO_CHECK(state() == State::Disabled);
+    }
 }
 
 void testBlockPlacementRules() {
@@ -1166,6 +2125,17 @@ void testJavaTextComponents() {
     LHOLO_CHECK(javaTextComponentToPlainText(R"({"translate":"block.minecraft.oak_sign"})")
                 == "block.minecraft.oak_sign");
     LHOLO_CHECK(javaTextComponentToPlainText("not json") == "not json");
+    std::string deepArray(30000, '[');
+    deepArray += R"("deep")";
+    deepArray.append(30000, ']');
+    LHOLO_CHECK(deepArray.size() <= 65535);
+    LHOLO_CHECK(javaTextComponentToPlainText(deepArray) == "deep");
+    std::string deepExtra;
+    for (int depth = 0; depth < 2500; ++depth) deepExtra += R"({"text":"a","extra":[)";
+    deepExtra += R"("tail")";
+    for (int depth = 0; depth < 2500; ++depth) deepExtra += "]}";
+    LHOLO_CHECK(deepExtra.size() <= 65535);
+    LHOLO_CHECK(javaTextComponentToPlainText(deepExtra) == std::string(2500, 'a') + "tail");
 }
 
 void testI18n() {
@@ -1294,6 +2264,27 @@ void testI18n() {
 } // namespace
 
 int main() {
+    testLiquidReplayRules();
+    testProjectionCoordinateBounds();
+    testLoadIntent();
+    testStructureTransformConcurrency();
+    testRenderCameraRead();
+    testProjectionActivationRequests();
+    testWorkerTaskBoundary();
+    testNativeCallbackBoundary();
+    testInitializationTransaction();
+    testWorldEventInterest();
+    testFutureResult();
+    testMaterialHudAvailabilityRevision();
+    testMaterialHudPublicationRetirement();
+    testMaterialHudImmutableView();
+    testCaptureRequestsAndBounds();
+    testEpochFailure();
+    testImGuiFrameRecovery();
+    testSingleTaskWorker();
+    testSectionBlockSnapshot();
+    testMeshDiagnosticGate();
+    lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
@@ -1301,6 +2292,8 @@ int main() {
     testLayoutRules();
     testProgress();
     testSettingsStore();
+    testSettingsCurrentKeyPriority();
+    testAtomicOutput();
     testStructureSession();
     testPlacementState();
     testStructureUiState();

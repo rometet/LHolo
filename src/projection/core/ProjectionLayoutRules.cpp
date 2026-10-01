@@ -9,8 +9,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace lholo::projection::detail {
+namespace {
+int representableCoordinate(std::int64_t value) {
+    return static_cast<int>(std::clamp(value, static_cast<std::int64_t>((std::numeric_limits<int>::min)()),
+        static_cast<std::int64_t>((std::numeric_limits<int>::max)())));
+}
+} // namespace
 
 RenderBucket renderBucketFor(BlockRenderLayer layer) {
     switch (layer) {
@@ -90,15 +97,15 @@ BlockPos transformStructurePosition(
     int                               mirrorMode,
     int                               rotation
 ) {
-    int x = position.x;
-    int z = position.z;
+    std::int64_t x = position.x;
+    std::int64_t z = position.z;
     if (mirrorMode == 1) x = loaded.sizeX - 1 - x;
     if (mirrorMode == 2) z = loaded.sizeZ - 1 - z;
-    switch (rotation) {
-    case 1: return BlockPos{loaded.sizeZ - 1 - z, position.y, x};
-    case 2: return BlockPos{loaded.sizeX - 1 - x, position.y, loaded.sizeZ - 1 - z};
-    case 3: return BlockPos{z, position.y, loaded.sizeX - 1 - x};
-    default: return BlockPos{x, position.y, z};
+    switch (rotation & 3) {
+    case 1: return BlockPos{representableCoordinate(loaded.sizeZ - 1LL - z), position.y, representableCoordinate(x)};
+    case 2: return BlockPos{representableCoordinate(loaded.sizeX - 1LL - x), position.y, representableCoordinate(loaded.sizeZ - 1LL - z)};
+    case 3: return BlockPos{representableCoordinate(z), position.y, representableCoordinate(loaded.sizeX - 1LL - x)};
+    default: return BlockPos{representableCoordinate(x), position.y, representableCoordinate(z)};
     }
 }
 
@@ -108,19 +115,21 @@ BlockPos inverseTransformStructurePosition(
     int                               mirrorMode,
     int                               rotation
 ) {
-    int x{};
-    int z{};
+    // Neighbor queries may be outside [0,size). Use wide arithmetic and retain
+    // an out-of-volume sentinel at int limits when the exact result cannot fit.
+    std::int64_t x{};
+    std::int64_t z{};
     switch (rotation & 3) {
     case 1:
         x = position.z;
-        z = loaded.sizeZ - 1 - position.x;
+        z = loaded.sizeZ - 1LL - position.x;
         break;
     case 2:
-        x = loaded.sizeX - 1 - position.x;
-        z = loaded.sizeZ - 1 - position.z;
+        x = loaded.sizeX - 1LL - position.x;
+        z = loaded.sizeZ - 1LL - position.z;
         break;
     case 3:
-        x = loaded.sizeX - 1 - position.z;
+        x = loaded.sizeX - 1LL - position.z;
         z = position.x;
         break;
     default:
@@ -130,7 +139,7 @@ BlockPos inverseTransformStructurePosition(
     }
     if (mirrorMode == 1) x = loaded.sizeX - 1 - x;
     if (mirrorMode == 2) z = loaded.sizeZ - 1 - z;
-    return BlockPos{x, position.y, z};
+    return BlockPos{representableCoordinate(x), position.y, representableCoordinate(z)};
 }
 
 bool isStructureCellCovered(
@@ -138,13 +147,38 @@ bool isStructureCellCovered(
     BlockPos const&                    position
 ) {
     for (auto const& region : loaded.regions) {
-        if (position.x >= region.x && position.x < region.x + region.sizeX
-            && position.y >= region.y && position.y < region.y + region.sizeY
-            && position.z >= region.z && position.z < region.z + region.sizeZ) {
+        if (position.x >= region.x && static_cast<std::int64_t>(position.x) < static_cast<std::int64_t>(region.x) + region.sizeX
+            && position.y >= region.y && static_cast<std::int64_t>(position.y) < static_cast<std::int64_t>(region.y) + region.sizeY
+            && position.z >= region.z && static_cast<std::int64_t>(position.z) < static_cast<std::int64_t>(region.z) + region.sizeZ) {
             return true;
         }
     }
     return false;
+}
+
+WorldEventInterest makeProjectionWorldEventInterest(
+    structure::LoadedStructure const& loaded, std::array<int, 3> const& origin,
+    int mirrorMode, int rotation
+) {
+    std::vector<WorldEventInterest::Box> boxes;
+    boxes.reserve(loaded.regions.size());
+    for (auto const& region : loaded.regions) {
+        if (region.sizeX <= 0 || region.sizeY <= 0 || region.sizeZ <= 0) continue;
+        auto const first = transformStructurePosition(BlockPos{region.x, region.y, region.z}, loaded, mirrorMode, rotation);
+        auto const last = transformStructurePosition(BlockPos{
+            representableCoordinate(static_cast<std::int64_t>(region.x) + region.sizeX - 1),
+            representableCoordinate(static_cast<std::int64_t>(region.y) + region.sizeY - 1),
+            representableCoordinate(static_cast<std::int64_t>(region.z) + region.sizeZ - 1)
+        }, loaded, mirrorMode, rotation);
+        std::array<int, 3> const a{first.x, first.y, first.z}, b{last.x, last.y, last.z};
+        WorldEventInterest::Box box;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            box.min[axis] = static_cast<std::int64_t>(origin[axis]) + (std::min)(a[axis], b[axis]);
+            box.max[axis] = static_cast<std::int64_t>(origin[axis]) + (std::max)(a[axis], b[axis]) + 1;
+        }
+        boxes.push_back(box);
+    }
+    return WorldEventInterest{std::move(boxes)};
 }
 
 bool isLayerVisible(

@@ -59,6 +59,7 @@ bool submitMeshWorkerTask(
 std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limit);
 
 bool meshWorkerIsBusy();
+bool consumeMeshWorkerFatalFailure();
 bool meshWorkerIsDisabledForSession();
 void disableMeshWorkerForSession();
 void resetMeshWorkerForSession();

@@ -163,6 +163,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& data : state.praxisCompatLiquidSections) data.reset();
         state.praxisCompatLiquidAggregate.reset();
         state.praxisCompatLiquidAggregateOrder.clear();
+        state.praxisCompatLiquidBoundaryMaskCache.clear();
         state.praxisCompatLiquidAggregateDirty = true;
         for (auto& mesh : state.liquidProxySectionMeshes) mesh.reset();
         std::fill(

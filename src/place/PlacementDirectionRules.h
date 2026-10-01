@@ -2,6 +2,8 @@
 #pragma once
 
 #include <string_view>
+#include <optional>
+#include <cstdint>
 
 namespace lholo::place::detail {
 
@@ -58,6 +60,48 @@ inline constexpr bool isEnvironmentOnlyPlacementBlock(std::string_view name) {
         || name == "minecraft:sculk_sensor"
         || name.ends_with("copper_bulb")
         || name.ends_with("_pressure_plate");
+}
+
+// Pure serialized-state selection used by the native prediction path. Both
+// accessors return an empty string for an absent/unsupported state.
+template <class Predicted, class Expected>
+bool placementDirectionStatesMatch(PlacementDirectionRule rule, Predicted predicted, Expected expected) {
+    auto same = [&](char const* key) {
+        auto const value = expected(key);
+        return !value.empty() && predicted(key) == value;
+    };
+    auto first = [&](char const* primary, char const* fallback) {
+        return !expected(primary).empty() ? same(primary) : same(fallback);
+    };
+    switch (rule) {
+    case PlacementDirectionRule::Facing: return first("minecraft:facing_direction", "facing_direction");
+    case PlacementDirectionRule::Horizontal: return first("minecraft:cardinal_direction", "direction");
+    case PlacementDirectionRule::Orientation: return same("orientation");
+    case PlacementDirectionRule::Lever: return same("lever_direction");
+    case PlacementDirectionRule::Bell: return same("direction") && same("attachment");
+    case PlacementDirectionRule::Trapdoor: return same("direction") && same("upside_down_bit");
+    case PlacementDirectionRule::None: return false;
+    }
+    return false;
+}
+
+inline constexpr std::optional<std::uint8_t> deterministicSupportFace(
+    std::string_view name, std::string_view facing, std::string_view torchFacing
+) {
+    if (name == "minecraft:hopper") {
+        if (facing == "0" || facing == "down") return 0;
+        if (facing == "2" || facing == "north") return 2;
+        if (facing == "3" || facing == "south") return 3;
+        if (facing == "4" || facing == "west") return 4;
+        if (facing == "5" || facing == "east") return 5;
+        return std::nullopt;
+    }
+    if (torchFacing == "top") return 0;
+    if (torchFacing == "north") return 2;
+    if (torchFacing == "south") return 3;
+    if (torchFacing == "west") return 4;
+    if (torchFacing == "east") return 5;
+    return std::nullopt;
 }
 inline constexpr bool isPlacementControlledStateKey(std::string_view key) {
     return key == "direction"

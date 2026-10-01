@@ -2,6 +2,8 @@
 
 本文档描述 LHolo Windows 客户端模组的正式版架构、关键实现、性能约束、故障历史和新 Minecraft/LeviLamina 版本适配流程。维护者在修改渲染、输入、结构解析或配置前，应先阅读对应章节，并在发布前执行完整回归矩阵。
 
+本文按当前日语 fork 的代码维护。历史图形故障和实机结果保留其版本/阶段上下文；本次加固的静态检查、独立测试与构建结果见 `AUDIT_REPORT.md`，不能据此把下列 Minecraft 回归项目标为通过。
+
 当前基线：
 
 - Minecraft Bedrock Windows：`1.26.51.01`
@@ -29,11 +31,14 @@ LHolo 的投影、纠错、HUD 和菜单都只存在于客户端，不产生碰�
 - 纠错提示透明度默认 15%，描边透明度默认 100%；均为 0～100 整数输入、即时生效、持久化保存，可一键恢复默认值。
 - 可选整体结构边框。
 - 支持准心轻松放置、按住右键的手动放置，以及半径 1～4 的范围放置；三种模式在 GUI 中互斥。手动放置按住右键不放，可沿准心扫过的投影连续放置。
+- 手动 press 在 native target lookup 前捕获 input epoch；mode 切换、取消、allowed-item 编辑和会话 reset 会使旧 epoch 失效。取消和 press publication 只在输入状态的小 transaction 内互斥，不能在持锁时调用 Minecraft lookup 或发送 packet。关闭后重新启用模式不得重新接受旧 callback 的 pending click；quick tap 的正常 release 仍保留未消费的请求。
+- 材料 HUD 在验证 result key 前捕获 UI publication revision，并在 native 名称/背包解析后仅按相同 revision 发布；clear、世界 reset 和新 snapshot 不得被迟到的旧结果覆盖。还需验证当前 loaded generation，避免新结构已提交而旧 projection state 尚未交接时发布旧要求。Native 查询不得持有 UI material mutex。
+- 菜单用同一个带 revision 的值 snapshot 获取三种辅助放置模式，并在短输入 transaction 内条件应用；世界 reset 和更新的模式选择会使旧菜单失效。世界 reset 即使原模式全为关闭也推进 revision，避免旧 frame 的新勾选被写到下一世界。维度暂停继续保留模式，未改变模式的菜单应用继续保留 live press。
 - `.mcstructure` 中带 NBT 的方块实体优先使用原版方块实体渲染器；没有可用渲染器或 Tessellation 结果的方块使用贴图占位外壳。
 - HUD 可显示文件名、显示层、建造进度、放置错误数、朝向错误数、多余方块数、准心指向的投影方块名称和当前辅助放置模式（手动/轻松/范围）；支持四角定位和单项关闭，各类错误可分别配置。
 - GUI 使用外部注入 Dear ImGui，不使用游戏表单。
-- 界面语言由 `src/i18n/lang/*.json` 自动发现，可在“界面设置”页切换，默认简体中文；语言代码随配置文件持久化。
-- 默认 `Alt + M` 打开菜单；聊天栏输入 `LHolo`（ASCII 大小写不敏感）也可打开，消息在客户端拦截，不发往服务器。
+- 界面语言由 `src/i18n/lang/*.json` 自动发现，可在“界面设置”页切换，默认日语；语言代码随配置文件持久化。
+- 默认 `Insert` 打开菜单；聊天栏输入 `LHolo`（ASCII 大小写不敏感）也可打开，消息在客户端拦截，不发往服务器。
 - LHolo 菜单打开及关闭过渡期间，客户端阻止本地控制玩家开始或继续破坏方块；本地存档和远程服务器均有效，服务器无需安装 LHolo。
 - 默认结构移动：`Ctrl + 方向键` 按玩家朝向水平移动（左右垂直于朝向、前后沿朝向），`Shift + ↑/↓` 调整 Y。
 - 默认显示层：`Alt + ↑/↓`；“完整结构”模式下按键无效。
@@ -213,9 +218,9 @@ LHolo/
   `build/generated/i18n/LanguageRegistry.generated.h`，再将每个 JSON 作为 Windows `RCDATA` 资源编入 DLL；运行时不读写
   语言文件，也不需要手动运行脚本。资源 ID 会由文件名规范化得到，例如 `zh_CN.json` 对应
   `LHOLO_LANG_ZH_CN`；资源 ID 冲突或不符合 locale 文件名规则会使构建失败。新增语言只需要添加一个
-  JSON 文件并重新构建，不需要修改 C++ 注册表、菜单或测试枚举；`zh_CN.json` 是必需的默认/最终回退语言。
+  JSON 文件并重新构建，不需要修改 C++ 注册表、菜单或测试枚举；`ja_JP.json` 是必需的默认/最终回退语言。
   `LanguageStore` 在 `AppKernel::load()` 时把注册表中的每个内置 JSON 解析为按 `TextKey` 索引的查找表，
-  之后 `tr()` 无锁只读；缺键或空串按“当前语言 → 简体中文（`zh_CN`）→ 空串”回退，绝不显示裸键名。
+  之后 `tr()` 无锁只读；缺键或空串按“当前语言 → 日语（`ja_JP`）→ 空串”回退，绝不显示裸键名。
   完备性由 `LHoloLogicTests` 接管（原编译期 `static_assert` 校验已随 constexpr 表移除）：测试遍历当前
   注册的每种语言，断言解析成功、元数据有效、无缺键/空值/未知键/非字符串项，并检查占位符一致。新增界面
   文案必须登记键，不得在展示边界之外写用户可见字符串字面量。
@@ -243,6 +248,7 @@ LHolo/
   `LegacyStructureTemplate::_mapToData`，否则 `rail_direction` 等现代状态不会随结构变换。
 - `projection/correction/ProjectionCorrectionTracker.*` 在固定每帧预算内比较真实世界与投影单元，维护纠错状态和进度计数；
   它可以标记受影响 section，但不创建 Mesh、不访问 Tessellator，也不发布 HUD 原子状态。
+  动态 section 扩展失败时先回滚所有并行 vector 的逻辑大小，再把原异常交给 correction epoch 边界；不得返回 invalid section 后继续推进已消耗的 extra-cell 扫描，否则稳定世界中的该格不会再生成几何。
 - `projection/runtime/ProjectionFramePipeline.*` 只在 opaque pass 按固定顺序执行纠错扫描与进度发布、完成队列上传、
   轻量结构边框准备和下一 section 调度；它不采集 GUI 设置、不判断 placement 失效，也不提交最终渲染 pass。
 - `projection/hooks/ProjectionGameHooks.*` 隔离不依赖活动投影状态的 Minecraft 接口：Tessellation thread-local
@@ -280,13 +286,13 @@ LHolo/
   section 中心与 Tessellator 查询缓存；它不生成 Mesh、不上传 GPU，也不调度 Worker。
 - `projection/world/ProjectionQueries.*` 只在调用方已持有投影状态锁且完成世界身份校验后读取虚拟世界索引和
   纠错状态，为手动/轻松/范围放置返回单格或按距离排序的缺失方块；它不持锁、不清理状态，也不修改世界。
-- `projection/mesh/ProjectionRenderer.*` 只提交已经上传完成的 Mesh 和投影方块实体：保持 opaque/transparent pass
+- `projection/mesh/ProjectionRenderer.*` 提交已经上传完成的 Mesh、液体 Exact Replay 和投影方块实体：保持 opaque/transparent pass
   分类、透明 section 后向前排序、液体/方块实体占位、结构边框和纠错覆盖的现有材质语义；方块实体仍在
-  局部虚拟世界作用域内复用原 dispatcher 参数。它不生成 CPU 几何、不消费 Worker 结果，也不改变
+  局部虚拟世界作用域内复用原 dispatcher 参数。它不重新 Tessellate 方块，但会聚合/复制液体 replay 的 typed CPU stream；不消费 Worker 结果，也不改变
   projection 生命周期；资源预检和提交异常后的清理由 `runtime/ProjectionRenderFrame` 负责。
 - `projection/world/ProjectionVirtualWorld.*` 隐藏 Tessellation 使用的 thread-local 虚拟方块表；只有显式 RAII
   作用域内的 `BlockSource` Hook 查询可以命中投影邻居，作用域结束后必须恢复上一个视图。
-- `projection/runtime/ProjectionWorldEvents.*` 只监听真实世界的方块变化和子区块加载并按原顺序排队；它不读取
+- `projection/runtime/ProjectionWorldEvents.*` 监听真实世界的方块变化和子区块加载；同一 epoch 的重复坐标可合并，同时保留最新发生时间。它不读取
   `gState`，也不决定 section 如何失效；事件消费、纠错更新和 dirty 传播由
   `ProjectionFramePipeline`/`ProjectionCorrectionTracker` 负责。
 - `overlay` 负责“外部 GUI 如何安全进入游戏图形链”，不解析结构或扫描世界方块。
@@ -308,11 +314,13 @@ LHolo/
 `LHolo::enable()` 的顺序：
 
 1. 安装投影相关 LeviLamina Hook。
-2. 安装辅助放置 Hook：`LocalPlayer::$tickWorld` 负责每 tick 驱动，三个 `GameMode` build Hook 负责命中真实方块时的右键状态和原版放置抑制，`GameMode::$useItem` 负责捕获指向空气的右键操作（tick Hook 失败仅告警，不阻断；单个手动 Hook 失败会分别告警并降级对应行为）。
-3. 安装菜单输入保护：`MouseDevice::feed` 与 `HIDControllerGameCoreDesktop::$onKeyDown/$onKeyUp` 在游戏和原生 UI 处理前取得输入所有权。三项 Hook 状态独立告警，不阻断菜单启用。
+2. 安装辅助放置 Hook：`LocalPlayer::$tickWorld` 负责每 tick 驱动，三个 `GameMode` build Hook 负责真实方块右键状态和原版放置抑制，`GameMode::$useItem` 捕获指向空气的右键操作。五项均为必需项；任一失败时回滚已安装 Hook 并返回启用失败。
+3. 安装菜单输入保护：`MouseDevice::feed` 与 `HIDControllerGameCoreDesktop::$onKeyDown/$onKeyUp` 在游戏和原生 UI 处理前取得输入所有权。三项均为必需项；任一失败时沿正常关闭路径回滚启用。
 4. 尝试安装 ImGui/DXGI Hook；图形环境尚未可用时允许后续 `Present` 重试。
 
-配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。世界退出由 `LevelListener::onLevelDestruction()` 发布轻量信号；投影渲染入口和 Overlay Present 都能观察该信号，真正的结构、辅助放置、捕获和投影清理在引擎回调之外执行。投影渲染入口仍通过 `client/level/dimension` 身份变化检测世界/维度切换，并在上下文失效时清理投影。
+启用失败会执行一次完整 rollback。若 rollback 无法移除所有回调，LHolo 在返回失败前保留实际 `NativeMod` shared owner，使临时动态加载失败不会同时释放 DLL 和 logger；不能只打印“保持驻留”后丢掉 loader 所有权。该失败会话不在 DLL 内释放最后的 retained owner。
+
+配置由 `LHolo::load()` 在 enable 之前从 `mods/LHolo/config/config.json` 读取。世界退出时，`LevelListener::onLevelDestruction()` 先发布退出信号，并在 Level 仍存活的回调边界内停止/join 网格 Worker，随后撤销世界借用；捕获模块的独立监听器同时失效选区和排队请求。其余结构、辅助放置和投影清理在正常渲染/Present 入口执行。投影入口还通过 `client/level/dimension` 身份变化检测世界/维度切换。不得把 Worker join 延后到下一帧。
 
 投影启用入口只有 `enableStructureProjection()`。它要求：
 
@@ -325,16 +333,16 @@ LHolo/
 
 当前关闭顺序：
 
-1. 保存配置。
-2. 清理辅助放置、结构、菜单、捕获和投影状态；投影停止接收网格任务，提升 Worker generation，清空待处理结果并等待 in-flight Worker 退出。
-3. 卸载菜单鼠标/HID 输入源 Hook。
-4. 卸载辅助放置的 tick/build Hook。
-5. 卸载投影 Hook，防止渲染路径再次触发 Overlay 安装重试。
-6. 关闭 ImGui 图形后端、恢复原 WndProc、移除 MinHook，并清空 Overlay 输入缓存。
+1. 将 typed Hook 生命周期改为 Quiescing，新进入回调只调用原函数；保留状态供已经进入的回调使用。禁止从 detour 内请求关闭。
+2. 先等待已获准的 Running 回调结束，再停止/join 网格 Worker 并释放任务捕获的 Native 引用；这期间必须保留虚拟 BlockSource 查询和 setBlock 写入抑制 Hook。Worker 的整个任务、结果发布和捕获引用销毁持有同一个生命周期 lease，嵌套 Hook 在 Quiescing 后仍继承已获准任务的 Running 状态；尚未开始的任务直接取消。
+3. 依次卸载菜单输入、辅助放置和投影 Hook，再等待所有 origin-only typed 回调退出；卸载失败时返回失败并保持 DLL 驻留。
+4. 停止捕获监听器；关闭 Overlay。发布 shutdown 后，Present 必须在资源锁内再次检查准入；已进入初始化的 callback 完成后，才在同一资源锁下取得 window/WndProc 值快照，锁外恢复 WndProc，再等待 Present/WndProc/D3D detour 和 PraxisCompanion provider 借用退出。无法安全恢复外部 WndProc/Hook 链时不允许卸载 DLL。
+5. 取消并 join 结构加载任务，保存配置，回收材料统计任务，清理辅助放置、结构、投影和捕获状态。网格 Worker 已在物理 Hook 卸载前提升 generation、清空待处理结果并退出。
+6. 标记 Disabled。只有完整关闭成功才返回成功。
 
 ### 3.3 世界切换
 
-`ProjectionState` 保存 `IClientInstance*`、`Level*`、`Dimension*`，仅用于验证当前上下文是否仍为创建投影时的世界。每次渲染先调用 `contextIsValid()`；不一致时立即清空投影和已加载结构。
+`ProjectionState` 保存 `IClientInstance*`、`Level*`、`Dimension*`，用于验证当前上下文。每次渲染先检查身份：世界退出/更换时清理投影与已加载结构；同一世界的维度切换只退役旧维度运行资源，保留结构与原维度恢复请求（见 1 节），不得将它当作更换世界。
 
 创建结构选区独立保存当前 `Level*` 和 `Dimension*` 身份。离开世界或身份变化时恢复客户端模式、清空两个端点和“包含实体”，红色线框随即释放；这些会话状态不写入配置。
 
@@ -378,7 +386,7 @@ LHolo/
    - 差异仅在预校验与层读取（`inspectBlockLayer` 有 List/IntArray 两个重载）；真正的解析仍交给原版 `StructureTemplate::load()`，它把两种形状规范化为 `mBlockIndices` + `optional<mExtraBlockIndices>`。
 8. 依照格式文档的 ZYX 顺序还原线性索引：`index = x * (sizeY * sizeZ) + y * sizeZ + z`。主副层分别解析后，同一坐标的非液体写入实体层、液体写入液体层。
 9. 门的上下半块本来就是两个坐标、两个完整 palette state，不做合并；格式升级后的上下半块、铰链、朝向和开关状态由原版加载器保留。
-9. 原版加载失败、原版尺寸与文件尺寸不一致时直接拒绝加载，不再带着未知方块继续渲染。
+10. 原版加载失败、原版尺寸与文件尺寸不一致时直接拒绝加载，不再带着未知方块继续渲染。
 
 适配新版本时重点检查：`StructureTemplate` 构造与 `load()`、`StructureTemplateData` 索引访问、`StructureBlockPalette::tryGetBlock` 的符号及语义、NBT 标签路径和两个 block index 的格式。固定回归门的上下相邻坐标与水坐标；不要退化回手工注册表解析，也不要未经验证改用 `tryGetBlockAtPos()` 遍历。
 
@@ -388,13 +396,16 @@ LHolo/
 - 1.26.51 起栅栏、玻璃板、铁栏杆等连接方块的连接臂由原版从方块自身的派生连接状态读取，而结构调色板从不存储这些状态，直接网格化会全是光杆。网格化与纠错前经 `ProjectionRules::withFlattenedConnections()` 调用原版 `BlockType::connectionUpdate()` 重算连接：网格化时 `BlockSource::getBlock()` 钩子让重算读到投影虚拟邻域（旋转/镜像后方向因此仍正确），纠错时读真实邻域，使期望方块与真实方块的派生状态可比。不要退化回手搓 `canConnect()`/`setState()` 推导：那只能覆盖 `FenceBlock` 一族，玻璃板等数据驱动原型的连接不存储在内建 `Connection*` 状态里，只有原版更新认识其规则。
 - `connectionUpdate()` 会把重算结果写进传入的区域，直接调用曾把可选中、有碰撞的幽灵栅栏写进真实世界（重进世界才消失）。因此调用必须包在 `ScopedRegionWriteSuppression` 内（`ProjectionVirtualWorld`），`ProjectionGameHooks` 里的两个 `BlockSource::setBlock` 钩子在抑制期间吞掉写入并返回成功，只取更新的返回值；不要在抑制作用域外做任何依赖写入生效的操作。
 - 所有投影方块实体创建完成后，使用 `BlockActor::isType()` 识别箱子，并在同一虚拟世界作用域内调用原版 `ChestBlockActor::_tryToPairWith()` 配对。必须先建立完整的虚拟方块和方块实体表，再执行配对；结构 NBT 中的 `pairx`/`pairz` 是原世界绝对坐标，不能直接作为投影配对坐标使用。
-- 水和岩浆使用贴图 proxy 单元壳，完全由 LHolo 自绘，不与原版世界或区块管线交互：仅 Missing（未放置）状态的液体格绘制半透明截顶外壳，最上层液体格顶面固定为原版源液体高度 8/9（`getHeightFromDepth()` 在 1.26 上对源液体的返回值不可靠，不再使用；逐格流动深度不参与视觉，只参与纠错比较），上方有同液体时侧壁满格；相邻同种液体剔除共享面；UV 取自 `BlockGraphics::getForBlock(liquid)->getTexture(0, 0)` 的 terrain atlas 水/岩浆贴图；水顶点色为原版蓝 #3F76E4（atlas 水贴图无色），岩浆白色顶点色保留贴图原色；alpha 跟随投影透明度；经 `liquidProxySectionMeshes` 独立网格在 alpha pass 用 `mMatBlendBlock` + terrain atlas 提交（与玻璃同路径），按 section 距离排序。静态贴图无波浪动画是已知限制。纯液体格的 Missing 不再叠加蓝色纠错面/描边（proxy 本身即提示），WrongType/WrongState 仍保留红/黄纠错面。`.litematic` 加载时液体路由到 `RenderBlock::liquid` 字段，与 `.mcstructure` 语义一致。
+- 水和岩浆默认走 Praxis Exact Replay：仅 Missing 液体参与，生成并保留原版 typed `MeshData`，执行 typed atlas UV remap、section 内与 aggregate section 边界的严格共享面剔除，在 alpha pass 按 section 远近聚合并通过 live terrain `TexturePtr` 提交。canonical stream 保持不变，derived color 使用当前 water RGB `(108,175,255)`、alpha `160` 与原有 lava 颜色契约；当前 material 为 `mMatBlendBlock`。诊断 define 可恢复 retained 或 `sign_text` 路径。阶段、flags 和未确认视觉差异见 `docs/PRAxis_VISUAL_PARITY_AUDIT.md`。
+- 原版液体构建或提交前提不足时，已有 retained mesh 与 `liquidProxySectionMeshes` 保留为 fallback。proxy 顶层固定 8/9、同液体覆盖时满格，相邻同液体剔除共享面，使用 typed terrain atlas UV、水 tint `#3F76E4` 和投影 alpha。纯液体 Missing 不叠加蓝色纠错面/描边；WrongType/WrongState 仍保留红/黄提示。液体只在 LHolo 局部虚拟作用域和自己的渲染提交中出现，不触发原版区块重建，不写入真实世界。
+- retained 的每个 liquid cell 是完整的 ownership 单位：任一后续 layer 抛异常时，恢复该 cell 前的全部 typed stream/scalar checkpoint 和 kind 数组，不能把先前 layer 的 partial geometry 标成成功。Exact Replay 的异常也必须恢复全部 checkpoint；不能仅以 positions/colors/UV0 是否改变决定是否回滚。
+- 同步与异步 frame 共用 `buildStructureBoundsMesh()`，结构框使用实际 extent 与白纹理中心 UV；worker 的 `UploadMode::Never` 不创建 GPU 框。捕获区域的选择框是另一个功能，仍保留它自己的边距。
 - `.litematic` 加载时把 `getMaterial().isLiquid()` 的方块路由到 `RenderBlock::liquid` 字段，与 `.mcstructure` 语义一致。
 - 纠错分别比较 `BlockSource::getBlock()` 与 `getLiquidBlock()`。缺少液体判为“未放置”，液体类型错误判为“类型错误”，液体深度等状态不同判为“状态错误”。
 - 材料轴的完整视图仍显示没有材料索引的 Extra 世界方块；选择具体材料或材料范围时，Extra 因无法归属某项材料而隐藏。
 - 投影进度仍以结构坐标计数，而不是把同一坐标的实体层和液体层重复计数。
 
-不要重新引入 `tessellateLiquidInWorld()` 自行提交或把虚拟液体注入 `BlockSource`/区块管线的方案。前者已出现黑块、过曝和未知方块纹理，后者会让游戏逻辑读取到虚拟液体，污染客户端世界认知。当前唯一正式方案是上述 `liquidProxySectionMeshes` 贴图 proxy：它只进入 LHolo 自己的网格和渲染提交，不触发区块重建，也不修改世界。
+不要重新引入未经验证的 `tessellateLiquidInWorld()` 裸提交或把虚拟液体暴露给作用域外的游戏读取/原版区块重建。早期实验曾出现黑块、过曝和未知纹理；当前 typed `tessellateInWorld()` Exact Replay 是后续独立路径，必须保留完整 stream、UV、颜色、材质和生命周期契约，不能以 proxy 替代成功的 Exact Replay 来规避问题。
 
 ### 4.3 `.litematic`
 
@@ -430,12 +441,12 @@ Java→Bedrock 映射不再手工散落维护。`GeneratedChunkerMappings.inc` �
 
 “创建结构”不经过 `LoadedStructure`，也不会自动载入投影。选区端点先按每轴最小值/最大值归一化，两个端点都包含在内；导出前由 `BlockSource::areChunksFullyLoaded(min, max)` 拒绝客户端尚未完整加载的范围。
 
-捕获只使用 LeviLamina 26.40.0 客户端头文件确认的原版接口：
+捕获使用 LeviLamina 26.51.0 客户端头文件的原版接口；UI 只提交值类型请求：
 
-1. `ll::service::getClientInstance()` 和 `ClientInstance::getLocalPlayer()` 获取当前客户端玩家。
-2. `Actor::getDimensionBlockSource()` 取得当前维度的 `BlockSource`。
-3. `StructureTemplate::create(name, blockSource, BoundingBox{min, max}, false, !includeEntities)` 同步捕获。
-4. `StructureManager::exportStructure(template, Core::Path)` 写出官方 `.mcstructure`。
+1. 在 `LocalPlayer::$tickWorld` 的接收者存活期间消费取点/导出请求；Present 不借用玩家或世界对象。
+2. `Actor::getFeetPos()` 提供取点坐标，`Actor::getDimensionBlockSource()` 提供当前维度的 `BlockSource`。
+3. 在归一化端点、坐标/体积界限和区块加载检查通过后，`StructureTemplate::create(name, blockSource, BoundingBox{min, max}, false, !includeEntities)` 同步捕获。
+4. `StructureManager::exportStructure(template, Core::Path)` 写入同目录暂存文件，成功后原子替换目标；失败时保留原文件并报告状态。过期 session 请求不得发布成功状态。
 
 不得改用依赖服务端 `ll::service::getLevel()` 的 NBT 重载，不调用 `StructureBlockActor::_saveStructure()`，也不增加手工 palette、索引、实体 NBT 或备用序列化路径。捕获过程中不异步读取 `BlockSource`，不每帧扫描选区。
 
@@ -451,7 +462,7 @@ Java→Bedrock 映射不再手工散落维护。`GeneratedChunkerMappings.inc` �
 world = anchor + userOffset + transform(local, mirror, rotation)
 ```
 
-- 新加载时 `anchor = floor(player.position)`。
+- 新加载时 `anchor = floor(player.position) - (0,1,0)`，即玩家脚下的支撑格；先检查有限坐标与整数范围。
 - 恢复投影时 anchor 使用配置中保存的绝对世界坐标。
 - X/Y/Z 输入与快捷键只修改 `userOffset`，不改原始结构数据。数字输入按世界轴精确对齐；移动快捷键按
   玩家朝向产生整块步进（见 9.4），两者最终都只是 `userOffset` 的整数增量。
@@ -471,6 +482,7 @@ world = anchor + userOffset + transform(local, mirror, rotation)
 
 - 轴 0：Y 轴水平层，层号取局部 `entry.y`。
 - 轴 1：X 轴纵向切片，层号取局部 `entry.x`。
+- 轴 2：按材料切片，层号取按用量从多到少排序的材料组索引。
 - 模式 0：完整结构。
 - 模式 1：仅等于当前层。
 - 模式 2：当前层及以下。
@@ -502,7 +514,7 @@ LHolo 不自制草方块、楼梯等材质模型。它使用：
 
 这样可保留草色、生物群系着色、方块模型和原版纹理。若新版本出现草方块白顶、随机材质或黑块，应先检查 atlas、BlockGraphics、Tessellator 缓存和材质，不要重新引入手写 UV。
 
-本节只描述实体方块模型。水和岩浆使用 4.2 节所述的液体 proxy 单元壳（`liquidProxySectionMeshes`），不进入这四种持久 GPU 网格桶，也不调用 `tessellateInWorld()`。
+本节的四种持久 GPU 网格桶描述实体方块。水和岩浆使用 4.2 节的 Exact Replay、retained 与 proxy fallback 独立路径；native 路径调用 `tessellateInWorld()`，不把液体混进实体方块桶。
 
 ### 6.2 渲染桶
 
@@ -598,20 +610,20 @@ Minecraft 会对准心选中的真实方块额外绘制 hit-select overlay。若
 - 分区中心，用于透明排序。
 - `requestedRevision` / `uploadedRevision`、dirty、增量优先级和 in-flight 标记。
 
-稳定帧不重新 Tessellate 方块，只提交已有 GPU 网格。
+稳定帧不重新 Tessellate 方块。实体/retained/proxy 提交已有 GPU 网格；默认液体 Exact Replay 复用 canonical CPU stream，缓存 aggregate/cull 结果并在提交时复制完整 typed stream，不逐顶点重新 emit。
 
 ### 8.2 Worker 构建与主线程上传
 
-dirty 分区的 `BlockTessellator` 和全部 CPU 几何生成不在 `$renderBlockEntities` 渲染线程执行。`ProjectionMeshWorker` 固定为单 Worker，并遵守：
+异步路径把 dirty 分区的 `BlockTessellator` 和 CPU 几何生成移到 `ProjectionMeshWorker`，同步 fallback 仍在渲染边界有界重建。Worker 固定为单线程，并遵守：
 
 - 一个分区最多一个 in-flight Task；连续变化只递增 revision，旧结果不会覆盖新状态。
 - 增量方块变化优先于初次加载，二者内部都按分区中心到相机距离由近到远选择。
-- 主线程用 `ChunkViewSource::move(..., DontGenerateOnlyGet, ...)` 固定分区加两格 halo 的局部视图。投影虚拟方块/方块实体/世界坐标索引表按 placement generation 发布为共享不可变版本：移动、旋转、镜像或切层时新建一组 Map，in-flight Task 通过 `shared_ptr` 保活旧版本，禁止原地清空或修改已发布版本。Task 只复制会增量变化的纠错字节、方块实体渲染可用性、本 section 索引，以及当前/六邻居 section 的稀疏多余方块坐标；不复制完整多余方块集合，不再扫描/拷贝 halo Map，也不再为每个 Task 构造紧凑 `LoadedStructure`。
+- 主线程用 `ChunkViewSource::move(..., DontGenerateOnlyGet, ...)` 固定分区加两格 halo 的局部视图。投影虚拟方块/方块实体/世界坐标索引表按 placement generation 发布为共享不可变版本：移动、旋转、镜像或切层时新建一组 Map，in-flight Task 通过 `shared_ptr` 保活旧版本，禁止原地清空或修改已发布版本。Task 只复制会增量变化的纠错字节、方块实体渲染可用性、本 section 索引，以及当前/六邻居 section 的稀疏多余方块坐标；不复制完整多余方块集合，不再扫描/拷贝 halo Map，也不再为每个 Task 构造紧凑 `LoadedStructure`。 达到 8 Mi 个 render cell 时，动态字节改为当前 section 与六邻居的紧凑快照；较小结构保留完整字节数组快路径。
 - Worker 独占 `BlockSource`、`BlockTessellator` 和 `Tessellator`，不读取 `gState`、`renderContext` 或渲染线程的活动 Tessellator。
 - Worker 必须用 `Tessellator::end(UploadMode::Never, ...)` 生成 CPU `mce::MeshData`；禁止在 Worker 使用 `Buffered` 或触碰 GPU。
 - `UploadMode::Never` 返回的 CPU-only `mce::Mesh` 尚未设置上传态 vertex count，因此 Worker 不能用 `Mesh::getMeshVertexCount()` 校验结果（该值在 1.26.20.04 实测为 0）。CPU 阶段以 `MeshData::mPositions.size()` 为权威顶点数，并检查所有非空顶点属性数组与它一致。
 - opaque pass 每帧最多接收两个完成结果，并以 1 ms 为提交预算。提交前同时检查 Worker generation、结构 generation 和 section revision，再用当前 `BufferResourceService` 的官方 `mce::Mesh(service, MeshData&&, false, name)` 构造 GPU Mesh。
-- transparent pass 只提交已完成 Mesh，不调度任务、不消费完成队列、不上传资源。
+- transparent pass 提交已完成 Mesh 和 Exact Replay，不调度网格任务、不消费完成队列、不上传持久 Mesh。
 - 普通 dirty 更新保留旧 Mesh 直到替换完成；旋转/镜像会立即清除旧方向的几何。
 - 每成功上传 64 个 section，以 DEBUG 日志聚合输出主线程快照准备（进一步拆分为动态字节/索引复制和 `ChunkViewSource`）、Worker 构建和主线程上传的平均/峰值微秒数；不得为性能统计逐方块写日志。
 
@@ -684,9 +696,9 @@ HUD 每帧只读取原子计数，不查询世界、不遍历结构。
 
 ### 9.1 ImGui 页面
 
-GUI 覆盖当前 `ImGuiIO::DisplaySize`，顶部导航包含：投影、结构变换、渲染设置、快捷键、HUD。界面缩放范围 1～5。
+GUI 使用按当前 `ImGuiIO::DisplaySize` 计算的居中窗口，侧边导航包含：投影、创建结构、结构变换、渲染设置、HUD、快捷键、界面设置、实验性功能。界面缩放范围 1～5。
 
-GUI 是全屏 ImGui 窗口，不是切换 Minecraft 窗口模式。
+GUI 的居中布局不切换 Minecraft 窗口模式。
 
 ### 9.2 输入所有权
 
@@ -705,6 +717,7 @@ GUI 是全屏 ImGui 窗口，不是切换 Minecraft 窗口模式。
 
 - ImGui 的自绘光标会让 Win32 后端每帧执行 `SetCursor(nullptr)`，`GetCursorInfo()` 因此报告光标隐藏。其它模组（例如 ChiyanMap）以该系统标志判断“游戏是否仍抓着鼠标”，会把光标夹回客户区中心，导致菜单里的鼠标无法移动。
 - 因此菜单期间 `MouseDrawCursor` 保持 false，光标形状交给 ImGui 后端设置；并在窗口线程通过 `kMsgAcquireMenuCursor` 用 `ShowCursor` 把显示计数顶到 ≥ 0。`ShowCursor` 返回的是调用后的计数，`> 0` 表示光标本来就可见、需要撤销这次探测增量；关闭、失焦和卸载时只归还自己加的增量，Minecraft 的负数计数不受影响。
+- shutdown 调用线程不一定是 window thread。恢复消息必须在 shutdown gate 之前处理，在恢复原始 WndProc 之前用有界 `SendMessageTimeout` 同步归还；窗口线程内直接归还。即使当前 receipt 为 0，已安装的 LHolo WndProc 仍要经过该同步消息，避免已准入的 acquire 尚未完成。不可在调用线程直接扣减另一线程的 ShowCursor 计数。窗口不可达、消息超时或 receipt 未清零时保留记录并报告 teardown 未完成；callback drain 后再次确认 receipt 为 0。
 - 菜单可见时，客户端区域的 `WM_SETCURSOR` 不再分发给游戏，避免光标被重新隐藏；窗口边框等非客户端区域仍然放行，不影响缩放光标。
 
 不要依赖“消息积压”解释输入 bug；应检查鼠标坐标、Capture/ClipCursor、按键状态和 Raw Input 所有权。
@@ -715,7 +728,7 @@ WndProc/Raw Input 只覆盖 Windows 消息边界，不能作为阻止 Minecraft 
 
 - `MouseDevice::feed` 与 `HIDControllerGameCoreDesktop::$onKeyDown/$onKeyUp` 是主路径；菜单可见或关闭过渡期间直接停止向原生 UI 分发，F11 例外并继续交给 Minecraft 的全屏切换生命周期。只有存在活动投影时才取得 Alt 按键所有权，按住 Alt 后也仅 `MouseAction::ActionWheel` 由投影移动取得所有权；没有投影时的 Alt，以及数字键、手柄和其他选槽路径均不受影响。
 - 打开菜单前向 Minecraft 补发的释放消息由 `MenuInputHandoffScope` 临时放行；禁止把所有 key-up/button-up 长期放行，否则原生按钮通常会在释放边沿触发，重新产生穿透。
-- 三个 Hook 的安装状态由 `MenuInputGuardStatus` 分别返回；单个 Hook 冲突不得伪装成整体成功，也不得导致菜单模块无法启用。
+- 三个 Hook 的安装状态由 `MenuInputGuardStatus` 分别返回；单个失败不得伪装成整体成功。输入保护不完整时 `AppKernel::enable()` 返回失败并回滚，不能以部分保护启用菜单。
 - PreLoader/LeviLamina Hook 返回值是 0 成功、非 0 失败，禁止用 `< 0` 判断安装结果。
 - 输入源 Hook 只在菜单持有输入期间暂停本机的移动、放置、使用、攻击和原生 UI 操作；关闭菜单后立即恢复，不修改其他玩家或服务端状态。
 - 鼠标按下状态在打开菜单前通过合成释放消息归还给游戏，因此无需再维护 `GameMode::$startDestroyBlock/$continueDestroyBlock` 专用保护。
@@ -726,7 +739,7 @@ WndProc/Raw Input 只覆盖 Windows 消息边界，不能作为阻止 Minecraft 
 
 恢复默认快捷键：
 
-- 菜单：Alt+M。
+- 菜单：Insert。
 - 左右/前后：Ctrl+方向键（按玩家朝向水平移动，只取主轴的整块步进）。
 - 上下：Shift+上/下。
 - 显示层：Alt+上/下。
@@ -741,7 +754,7 @@ WndProc/Raw Input 只覆盖 Windows 消息边界，不能作为阻止 Minecraft 
 
 ### 10.1 Hook 列表
 
-`ImGuiOverlay.cpp` 使用 MinHook 连接：
+`ImGuiOverlay.cpp` 使用 MinHook 连接 DXGI/D3D 接口，使用 Win32 subclass 连接游戏窗口：
 
 - `IDXGISwapChain::Present`
 - `IDXGISwapChain1::Present1`
@@ -750,7 +763,15 @@ WndProc/Raw Input 只覆盖 Windows 消息边界，不能作为阻止 Minecraft 
 - `ID3D12CommandQueue::ExecuteCommandLists`
 - 游戏窗口 WndProc
 
-`ExecuteCommandLists` 用于捕获可用的 Direct D3D12 command queue。随后建立 D3D11On12 device/context，并让 ImGui 使用 DX11 后端。
+DXGI/Execute 的每个 `NativeHookBinding` 分别记录已成功创建的 target、detour 与 enabled 状态。删除 trampoline 前必须先成功 disable 并 drain callback；`MH_RemoveHook` 的隐式 disable 不能代替这一步。固定 MinHook 1.3.4 x64 的 E9/FF25 relay（含 EB F9 patch-above）只有仍指向自己的 detour 时才可恢复原始命令。若后安装的其他 hook 仍在上方，报告 teardown 未完成并保留 DLL/relay；对方先退役后再试。独立注册表并不提供跨模组的同时 patch 原子性，第三方自身提前释放下层 relay 的行为仍需联合验证。
+
+安装期间始终保持 shutdown/origin-only，所有 hook 成功后才发布 installed 并解除 gate。失败或异常后的下一次安装必须先完成旧 retirement，不能覆盖仍拥有的 target 记录；重试期限在 fallible 操作前发布。用于取得 vtable 的临时 DX11/DX12 device、context、swap chain 和 queue 由 `ComPtr` 管理，日志或安装抛错时也释放。
+
+DXGI 安装成功不等于 D3D12 Execute hook 已安装。临时 DX12 device/queue 发现失败时保留可用的 DXGI/DX11 状态，并按既有 retry cadence 单独重试缺少的 Execute hook；不能因 DXGI installed 的 fast path 永久放弃它。成功创建但未成功 enable 的 record 继续追踪；入口命令与 CreateHook 前快照不一致时，旧 trampoline 不含新 peer，禁止盲目 enable。仅从未 enable、从未准入 callback 的 record 可以安全移除并重新捕获当前 peer chain；曾 enable 的 record 必须保留到外部 callback drain 和显式 teardown 完成。stable Execute ready flag 跳过所有发现工作，shutdown 完成时清零。
+
+`ExecuteCommandLists` 捕获尚未移除的 Direct D3D12 command queue。第一次 `Present` 得到实际交换链的 device 后，必须用 canonical `IUnknown` 身份校验 queue 的所属 device；外部模组先执行的异设备 queue 会退役，等待目标 device 的下一次 Direct queue 执行。不得把创建 D3D11On12 返回成功当作 device/queue 匹配的证明。稳定阶段用 atomic capture flag 跳过资源锁与设备查询，允许持有 `gResourceMutex` 的 On12 `Flush` 同步进入 Execute detour。
+
+`Present`、`Present1`、Resize 与绘图资源创建若报告 `DXGI_ERROR_DEVICE_REMOVED`/`DXGI_ERROR_DEVICE_RESET`，先完整释放/Flush 图形后端，再退役 queue 和 pending device，并清空弱交换链身份，保留 ImGui/Win32/菜单状态供游戏创建新设备后重建。后端退役抛错时保留 queue 与 fast flag 供重试；过早清 flag 会造成 Flush 重入死锁。已经移除的 queue 不能重新被捕获，否则会再次固定失效 device 的 per-adapter singleton，阻止 Minecraft 原生设备再创建。
 
 ### 10.2 每帧资源规则
 
@@ -840,7 +861,7 @@ PreLoader/LeviLamina 的约定处理：`0` 表示成功，任何非 `0` 值都�
 
 ### 12.1 行为
 
-菜单“投影”页提供三种互斥模式：
+菜单“实验性功能”页提供三种互斥模式；首次启用须确认该页的辅助放置说明：
 
 - 轻松放置：准心指向投影中的蓝色缺块位置（`correctionStates == Missing`）时自动放置。
 - 手动放置：准心定位规则相同，但只有按下/按住右键时才放置；命中真实方块时，首次按下立即尝试，持续按住经过 150 ms 初始延迟后每 120 ms 重复；指向空气中的浮空投影时，空气右键入口创建同一幂等按下请求，重复 `$useItem` 回调不会重置初始延迟或重复首击。
@@ -880,12 +901,12 @@ PreLoader/LeviLamina 的约定处理：`0` 表示成功，任何非 `0` 值都�
 mods/LHolo/config/config.json
 ```
 
-当前配置版本：`12`。
+当前配置版本：`13`。读取版本 ≤12 时只迁移上游的精确默认值（`zh_CN` → `ja_JP`、Alt+M → Insert），保留其他语言和自定义绑定；版本 13 的显式中文或 Alt+M 不再迁移。
 
 正式持久化字段：
 
 - `version`
-- `language`（界面语言 locale 代码，例如 `zh_CN`、`en_US`；缺失、非字符串、未知代码或旧整数值均在应用时回退 `zh_CN`）
+- `language`（界面语言 locale 代码，例如 `ja_JP`、`en_US`；缺失、非字符串、未知代码或旧整数值均在应用时回退 `ja_JP`）
 - `lastStructurePath`
 - `uiScale`
 - `opacity`
@@ -893,18 +914,20 @@ mods/LHolo/config/config.json
 - `correctionOutlineOpacity`
 - `structureBoundsEnabled`
 - `placementRadius`
+- `manualPlacementAllowedItems`（规范化的手动放置允许物品 ID；空数组表示没有例外）
 - `autoPlacementBreakCooldownSeconds`（0～60 秒，默认 10；只控制后续破坏产生的自动放置冷却）
 - `correctionSeeThrough`、`missingSeeThrough`（错误与未放置标记的穿透显示开关，默认关闭）
 - `experimentalConsent`（辅助放置风险提示是否已确认）
 - `materialHudEnabled`、`materialHudPosition`（材料 HUD 开关与四角位置，新配置默认右下角）
 - `loadProjectionHotkey`、`closeProjectionHotkey` 及其修饰键
+- `toggleManualHotkey` 及修饰键（只保存绑定，不保存模式），`altWheelOffsetEnabled`（固定 Alt+滚轮手势开关）
 - HUD 开关、各项显示开关（含 `hudShowProjectedBlockName` 投影方块名称）、位置；读取时兼容旧键
   `hudShowBlockEntity`，保存时只写新键
 - GUI、移动、显示层快捷键与修饰键
 - 上次投影是否存在、文件路径、绝对锚点
 - 上次投影旋转、镜像、偏移、显示模式、显示层和分层轴
 
-普通结构变换和显示层属于当前会话；只有“恢复上次投影”记录显式跨会话保存。手动放置、轻松放置和范围放置为安全敏感的临时功能，只能从实验性功能页面启用，不提供全局快捷键，不读取、不写入配置，每次启动均默认关闭；放置半径和投影方块破坏后的自动放置冷却时长仍持久化。纠错样式、投影透明度、GUI/HUD 和其他快捷键属于用户偏好，始终持久化。
+普通结构变换和显示层属于当前会话；只有“恢复上次投影”记录显式跨会话保存。手动、轻松和范围放置模式不读取、不写入配置，每次启动均默认关闭；实验性功能页面控制模式，并可为手动模式配置会话切换快捷键（默认未绑定）。轻松/范围模式没有全局切换绑定。允许物品、放置半径和破坏后自动放置冷却时长属于持久偏好。纠错样式、投影透明度、GUI/HUD 和其他快捷键始终持久化。
 
 配置读取必须：
 
@@ -961,7 +984,7 @@ bin/LHolo/
 
 ### 14.3 本机部署
 
-测试路径：
+历史测试实例路径示例（部署时以实际 launcher 目录为准）：
 
 ```text
 D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
@@ -984,7 +1007,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 ### 阶段 B：验证启动与基础 Hook
 
 1. 无结构加载启动游戏，确认模组日志正常。
-2. 测试 Alt+M 和 `LHolo` 指令。
+2. 测试 Insert（或用户自定义菜单绑定）和 `LHolo` 指令。
 3. 打开/关闭菜单，确认鼠标、键盘和视角交接正确。
 4. 连续切换 F11 至少三轮，并在每次切换后重新打开 GUI。
 5. 检查 Present/Present1/ResizeBuffers/ResizeBuffers1/ExecuteCommandLists 是否仍使用顶部集中定义的预期 vtable 索引和接口。
@@ -993,7 +1016,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 
 准备固定回归样本：
 
-- 小型 `.mcstructure`：草方块、石头、玻璃板、栅栏、楼梯、门、活塞、观察者、上下半砖、普通水、岩浆、不同液位、至少一个含水方块，以及带 NBT 的双箱/告示牌。放置单层半砖时，即使相邻支撑是同材质单层半砖，也不得把支撑误合并为双层；双箱必须显示为一个原版大箱子；水/岩浆样本同时验证贴图 proxy（顶层固定 8/9 高、同液体覆盖时满格、相邻同液体共享面剔除）与液位状态纠错；当前 proxy 不按流动深度改变视觉高度。
+- 小型 `.mcstructure`：草方块、石头、玻璃板、栅栏、楼梯、门、活塞、观察者、上下半砖、普通水、岩浆、不同液位、至少一个含水方块，以及带 NBT 的双箱/告示牌。放置单层半砖时，即使相邻支撑是同材质单层半砖，也不得把支撑误合并为双层；双箱必须显示为一个原版大箱子；水/岩浆样本验证当前 Exact Replay 的 UV、透明度、16格边界共享面、含水实体层与液位纠错，并独立验证 retained/proxy fallback。proxy 顶层固定 8/9，不按流动深度改变视觉高度。
 - 多区域 `.litematic`：正/负 Size、区域重叠、不同 palette 位宽；负 Size 样本必须包含楼梯、门、活塞、观察者等方向明显的方块。
 - `主播公寓.litematic`：固定验证 X/Z 同时为负的区域不会被旋转 180°，建筑布局和楼梯朝向均与 Java 源文件一致。
 - `borgital-strike-cube-by-baonam7910.litematic`：固定验证 12 个橡木墙上告示牌的正面文字与发光状态，包含单行和四行文本。
@@ -1055,7 +1078,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 
 ### GUI/输入
 
-- [ ] 首次进游戏无需先打开其他界面，Alt+M 可打开菜单。
+- [ ] 首次进游戏无需先打开其他界面，Insert 可打开菜单；自定义绑定仍生效。
 - [ ] `LHolo`、`lholo`、混合大小写均打开菜单且不发送聊天。
 - [ ] 菜单打开时鼠标不转视角、按键不移动玩家。
 - [ ] 菜单打开时，在本地存档与远程服务器分别短按/长按左键，方块均无裂纹进度且不会被破坏；其他玩家不受影响。
@@ -1066,14 +1089,14 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 
 ### 界面语言
 
-- [ ] 默认语言为简体中文；首次启动与旧配置（无 `language` 字段）均显示中文。
+- [ ] 默认语言为日语；首次启动与缺失 `language` 字段时显示日语，版本 ≤12 的上游默认配置按第 13 节迁移，自定义语言保持。
 - [ ] “界面设置”页的“语言”下拉包含所有 `src/i18n/lang/*.json` 的 `_meta.displayName`，切换后立即生效：导航、各页标签、
       按钮、复选说明与下拉选项全部切换。
 - [ ] 切换语言后，投影页状态行与底部提示同步切换，不残留上一语言。
 - [ ] 英文下逐页检查换行与溢出：导航栏、值行标签、材料清单表格列、实验性功能说明弹窗。
-- [ ] 重启游戏后语言代码保持；手工把 `config.json` 的 `language` 改成未知字符串、整数或缺失时均回退中文。
+- [ ] 重启游戏后语言代码保持；手工把 `config.json` 的 `language` 改成未知字符串、整数或缺失时均回退日语。
 - [ ] 材料清单中的水与熔岩名称随界面语言变化，其它方块名仍跟随游戏语言。
-- [ ] 聊天栏 `LHolo`、Alt+M 与快捷键绑定文案在英文下仍正确。
+- [ ] 聊天栏 `LHolo`、Insert 与快捷键绑定文案在英文下仍正确。
 - [ ] 投影 HUD 与材料 HUD 的文案随界面语言切换（文件名、层/显示范围、进度、错误计数、辅助放置模式、
       “缺失材料”标题与“正在统计…”等状态）。
 - [ ] 结构文件打开/保存对话框的筛选器名称随界面语言切换，筛选行为不变（默认仍为全部投影结构）。
@@ -1113,7 +1136,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 
 - [ ] 四种显示范围正确。
 - [ ] 完整结构模式下显示层快捷键无效。
-- [ ] X/Y 分层轴正确。
+- [ ] X/Y 分层轴和按材料分层正确；材料组排序与材料清单一致。
 - [ ] HUD 四角位置和各项开关持久化。
 - [ ] 建造进度和错误数随放置/拆除更新。
 - [ ] 恢复上次投影包含文件、锚点和保存的变换参数。
@@ -1162,7 +1185,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 - `spgui` 旧菜单命令。
 - 单方块即时 Tessellator、首次黑块预热、单方块射线选中日志。
 - 手写草方块 UV、手动替换材质或只修改顶点 alpha 的早期实验链。
-- 早期纯色液体单元壳：当前正式方案是使用 terrain atlas 水/岩浆贴图和水体 tint 的 `liquidProxySectionMeshes`，不得退回无贴图纯色版本。
+- 早期纯色液体单元壳：当前 Exact Replay 与 retained/proxy fallback 均使用 terrain atlas；不得退回无贴图纯色版本或用 proxy 取代成功的 Exact Replay。
 - `tessellateLiquidInWorld()` 几何自行提交：盲提交黑块/过曝，受控提交（顶点色覆写 + Blend 桶）未知方块纹理，顶点格式/UV 语义与普通方块材质根本不兼容。
 - 用 `BlockSource::$fireBlockChanged` 或 `RenderChunkCoordinator::$onAreaChanged` 为投影液体触发区块重建：当前液体完全由 LHolo 自绘网格管理，只失效自己的 16³ 分区，不进入原版区块重建链。
 - 世界注入（Hook `BlockSource::getBlock`/`getLiquidBlock` 对读取路径返回投影液体 + `RenderChunkCoordinator::$onAreaChanged` 失效重建）：即使加了线程门和 Level 门，全类读取 Hook 仍无法穷尽区分渲染读者与游戏逻辑读者，且会污染客户端对世界的认知，违背“纯客户端、不修改游戏内容”的产品边界。液体渲染只允许 LHolo 自绘网格方案。
@@ -1180,7 +1203,7 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\mods\LHolo
 
 ## 18. 日志和故障文件
 
-测试实例日志：
+历史测试实例日志路径示例（本机目录以实际 launcher 为准）：
 
 ```text
 D:\games\LeviLauncher\MC\versions\1.26.51.01\logs\latest.log
@@ -1208,11 +1231,19 @@ D:\games\LeviLauncher\MC\versions\1.26.51.01\logs\crash\minidump_*.dmp
 
 ## 19. 自动化测试
 
-纯逻辑单元使用独立的控制台测试目标，不加载游戏运行时：
+回归测试使用独立的控制台目标，不加载游戏运行时：
 
 ```bash
 xmake -b LHoloLogicTests
 xmake r LHoloLogicTests
+xmake -b LHoloNbtTests
+xmake r LHoloNbtTests
+xmake -b LHoloLanguageStoreTests
+xmake r LHoloLanguageStoreTests
+xmake -b LHoloUiTests
+xmake r LHoloUiTests
+xmake -b LHoloGraphicsTests
+xmake r LHoloGraphicsTests
 ```
 
 当前覆盖：
@@ -1229,3 +1260,5 @@ xmake r LHoloLogicTests
   与显式语言查询、消息占位符参数渲染。
 
 新增可独立链接的纯逻辑时必须同步补充对应断言；涉及 Minecraft 运行时对象（Block、BlockSource、Tessellator）的代码不进入该测试目标。
+
+其余四个目标分别验证格式/生命周期/故障注入 seam、语言初始化分配失败后的所有权、真实 ImGui 菜单/字体帧一致性，以及真实 D3D12/D3D11On12 queue 归属/设备退役/像素 readback、独立 Win32 window thread 的 cursor 所有权和 MinHook 重试/链退役。Graphics 目标使用 WARP，无需游戏或物理 GPU；存在不同硬件 adapter 时额外执行跨 device 的检查，`--warp-only` 可单独验证 CI 的 CPU 路径。cursor fixture 只创建本进程的 message-only 隐藏窗口，并测试跨线程返还、重复关闭、消息被消费、丢失窗口、阻塞/超时与重试，不操作游戏窗口。`LHoloHookChainPeer.dll` 是该测试的构建依赖，使用第二个独立静态 MinHook 注册表；测试从 executable 所在目录显式加载它，验证两种加载顺序、下层解除保留、上层离开后的重试、patch-above 和完整卸载，不属于模组发布包。日志明确区分跨设备和 `ID3D12Device5::RemoveDevice` 检查的可用性，不能把缺失硬件的路径称作已验证。CI 的 build/release workflow 均运行五个目标。`LHoloAuditBench`、`LHoloUiBench` 为独立测量目标；不把主机纯逻辑时间作为 Minecraft 帧时间。Debug 同样使用 MD runtime，与 LeviLamina 的依赖契约一致。若使用已安装依赖执行 `--require=n` 构建，应区分缓存重建与新机器依赖安装验证。

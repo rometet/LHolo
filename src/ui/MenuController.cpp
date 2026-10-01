@@ -4,7 +4,6 @@
 #include "ui/MenuController.h"
 
 #include "place/PlaceHelper.h"
-#include "plugin/LHolo.h"
 #include "projection/Projection.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureLoader.h"
@@ -32,20 +31,15 @@
 #include <Windows.h>
 
 #include "imgui.h"
-#include "ll/api/mod/NativeMod.h"
 
 namespace lholo::ui {
 namespace {
-
-auto& logger() {
-    return LHolo::getInstance().getSelf().getLogger();
-}
 
 auto& uiState() {
     return structure::detail::StructureUiState::getInstance();
 }
 
-std::array<char, 2048> gPathBuffer{};
+std::array<char, StructurePathUtf8Capacity> gPathBuffer{};
 bool                   gPathInitialized{};
 MenuPage               gActivePage{MenuPage::Projection};
 
@@ -108,9 +102,11 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.structureBoundsEnabled = projection::getStructureBoundsEnabled();
     model.correctionSeeThrough = projection::getCorrectionSeeThrough();
     model.missingSeeThrough = projection::getMissingSeeThrough();
-    model.easyPlaceEnabled = place::isEnabled();
-    model.manualPlace = place::isManualMode();
-    model.rangeEnabled = place::isRangeEnabled();
+    auto const placementModes = place::getPlacementModes();
+    model.easyPlaceEnabled = placementModes.enabled;
+    model.manualPlace = placementModes.manual;
+    model.rangeEnabled = placementModes.range;
+    model.placementModesRevision = placementModes.revision;
     model.experimentalConsent = structure::experimentalConsentGiven();
     model.materialHudEnabled = structure::materialHudEnabled();
     model.materialHudPosition = std::clamp(structure::materialHudPosition(), 0, 3);
@@ -199,9 +195,8 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     }
     // Assisted-placement modes are session-only safety controls. Applying a
     // mode must not dirty or rewrite the persistent settings file.
-    if (place::isEnabled() != model.easyPlaceEnabled) place::setEnabled(model.easyPlaceEnabled);
-    if (place::isManualMode() != model.manualPlace) place::setManualMode(model.manualPlace);
-    if (place::isRangeEnabled() != model.rangeEnabled) place::setRangeEnabled(model.rangeEnabled);
+    (void)place::applyPlacementModes({model.easyPlaceEnabled, model.manualPlace,
+        model.rangeEnabled, model.placementModesRevision});
     changed = place::setManualPlacementAllowedItems(model.manualPlacementAllowedItems) || changed;
     auto const radius = std::clamp(model.placementRadius, 1, 4);
     if (place::getPlacementRadius() != radius) {
@@ -285,11 +280,11 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
             model.capture.second.x, model.capture.second.y, model.capture.second.z
         };
     }
-    structure::capture::updateDraft(captureDraft);
+    structure::capture::updateDraft(captureDraft, model.captureRevision);
     if (changed) structure::saveSettings();
 }
 
-MenuActions buildStructureMenuActions(bool& refreshModel) {
+MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureRevision) {
     MenuActions actions;
     actions.browseStructure = [](std::string_view current) -> std::optional<std::string> {
         auto const selected = openStructureFile(structure::detail::pathFromUtf8(current));
@@ -346,11 +341,12 @@ MenuActions buildStructureMenuActions(bool& refreshModel) {
         structure::setExperimentalConsentGiven(true);
         structure::saveSettings();
     };
-    actions.usePlayerCapturePosition = [&refreshModel](CapturePointId point) {
+    actions.usePlayerCapturePosition = [&refreshModel, captureRevision](CapturePointId point) {
         structure::capture::setPointFromPlayer(
             point == CapturePointId::First
                 ? structure::capture::PointSlot::First
-                : structure::capture::PointSlot::Second
+                : structure::capture::PointSlot::Second,
+            captureRevision
         );
         refreshModel = true;
     };
@@ -358,7 +354,7 @@ MenuActions buildStructureMenuActions(bool& refreshModel) {
         structure::capture::clear();
         refreshModel = true;
     };
-    actions.exportCapture = [&refreshModel](CaptureDraftModel const& model) {
+    actions.exportCapture = [&refreshModel, captureRevision](CaptureDraftModel const& model) {
         auto const output = saveMcstructureFile();
         if (!output) return;
         structure::capture::Draft draft;
@@ -376,7 +372,7 @@ MenuActions buildStructureMenuActions(bool& refreshModel) {
                 model.second.x, model.second.y, model.second.z
             };
         }
-        structure::capture::exportStructure(draft, *output);
+        structure::capture::exportStructure(draft, *output, captureRevision);
         refreshModel = true;
     };
     return actions;
@@ -405,7 +401,7 @@ void renderStructureMenu() {
     applyFluentTheme(metrics);
     auto model = buildStructureMenuModel(effectiveScale);
     bool refreshModel = false;
-    auto const actions = buildStructureMenuActions(refreshModel);
+    auto const actions = buildStructureMenuActions(refreshModel, model.captureRevision);
     renderMenu(model, actions, metrics);
     gActivePage = model.page;
     if (!refreshModel) applyStructureMenuModel(model, effectiveScale);

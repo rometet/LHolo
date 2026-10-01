@@ -1,5 +1,7 @@
 # LHolo / Praxis Visual Parity 静的監査
 
+本書は2026年9月の描画契約調査と各Phaseの履歴です。前段のmatrixや「現在」は、その節のcandidateを指します。現行既定のPraxis Exact ReplayとPhase 4Eまでの経緯は後段を参照してください。ここに残す実機PASS/FAILは当時の記録であり、今回の堅牢化DLLでは再確認していません。今回の変更、テストと残る実機手順は `../AUDIT_REPORT.md` に記録します。
+
 ## 監査基準
 
 - LHolo: `rometet/LHolo` `main`、監査開始点 `2b6156c2b6e92c6f4a5467daee287d722ae77408`

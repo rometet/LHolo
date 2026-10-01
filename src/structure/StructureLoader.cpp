@@ -15,6 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "structure/StructureLoader.h"
+#include "app/FutureResult.h"
+#include "app/NativeCallbackBoundary.h"
 
 #include "i18n/Message.h"
 #include "input/ViewMoveBasis.h"
@@ -22,6 +24,7 @@
 #include "structure/MaterialTracker.h"
 #include "structure/formats/StructureFormatLoaders.h"
 #include "structure/StructureSession.h"
+#include "structure/LoadIntent.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
 #include "ui/HotkeyFormat.h"
@@ -57,12 +60,7 @@
 #include <Windows.h>
 
 #include "ll/api/mod/NativeMod.h"
-#include "ll/api/service/Bedrock.h"
 #include "imgui.h"
-#include "mc/client/game/ClientInstance.h"
-#include "mc/client/game/IClientInstance.h"
-#include "mc/client/player/LocalPlayer.h"
-#include "mc/world/level/Level.h"
 
 namespace lholo::structure {
 namespace {
@@ -85,8 +83,7 @@ auto& logger() {
 }
 
 bool hudContextAvailable() {
-    auto client = ll::service::getClientInstance();
-    return client && client->getLocalPlayer() && !projection::isDimensionSuspended();
+    return capture::getClientViewSnapshot().has_value() && !projection::isDimensionSuspended();
 }
 
 auto& uiState() {
@@ -117,17 +114,17 @@ struct PendingStructureLoad {
     detail::SavedProjectionSnapshot     saved;
     std::future<PreparedStructureLoadResult> future;
     std::chrono::steady_clock::time_point started;
-    Level*                              sourceLevel{};
-    int                                 sourceDimensionId{};
+    std::uint64_t                       sourceWorldEpoch{};
     bool                                hasSourceWorld{};
-    bool                                cancelled{};
+    std::uint64_t                       ticket{};
 };
 
+// Only the Present owner (or shutdown after callback drain) accesses futures.
+// The latest queued async request replaces earlier queued requests without
+// joining the running parse on the frame thread or creating unbounded jobs.
 std::optional<PendingStructureLoad> gPendingStructureLoad;
-
-void cancelPendingStructureLoad() {
-    if (gPendingStructureLoad) gPendingStructureLoad->cancelled = true;
-}
+std::optional<PendingStructureLoad> gQueuedStructureLoad;
+detail::LoadIntent gLoadIntent;
 
 void commitNormalStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
@@ -176,35 +173,10 @@ void commitRestoredStructureLoad(
     );
 }
 
-bool startPreparedStructureLoad(
-    PendingStructureLoadMode                 mode,
-    std::string                              pathText,
-    detail::SavedProjectionSnapshot const&   saved = {}
-) {
-    if (gPendingStructureLoad) {
-        if (gPendingStructureLoad->future.wait_for(std::chrono::milliseconds{0})
-            != std::future_status::ready) {
-            logger().warn("A structure load is already being prepared; ignoring {}", pathText);
-            return false;
-        }
-    }
-
-    auto path = detail::pathFromUtf8(pathText);
-    if (!detail::supportsAsyncStructurePreparation(path)) return false;
-
-    PendingStructureLoad pending;
-    pending.mode = mode;
-    pending.path = std::move(pathText);
-    pending.saved = saved;
-    pending.started = std::chrono::steady_clock::now();
-    if (auto client = ll::service::getClientInstance()) {
-        if (auto* player = client->getLocalPlayer()) {
-            pending.sourceLevel = &player->getLevel();
-            pending.sourceDimensionId = static_cast<int>(player->getDimensionId());
-            pending.hasSourceWorld = true;
-        }
-    }
-    pending.future = std::async(
+bool launchPreparedStructureLoad(PendingStructureLoad pending) {
+    auto path = detail::pathFromUtf8(pending.path);
+    try {
+        pending.future = std::async(
         std::launch::async,
         [path = std::move(path)]() mutable {
             PreparedStructureLoadResult result;
@@ -217,49 +189,81 @@ bool startPreparedStructureLoad(
             }
             return result;
         }
-    );
+        );
+    } catch (std::exception const& exception) {
+        auto const message = pending.mode == PendingStructureLoadMode::Restore
+            ? i18n::Message{i18n::TextKey::StatusRestoreFailed, {exception.what()}}
+            : i18n::Message{i18n::TextKey::StatusLoadFailed, {exception.what()}};
+        gLoadIntent.applyIfCurrent(pending.ticket, [&] {
+            detail::StructureSession::getInstance().setStatus(message);
+        });
+        logger().error("Could not start background structure load {}: {}", pending.path, exception.what());
+        return false;
+    }
     gPendingStructureLoad.emplace(std::move(pending));
     logger().info("Preparing structure asynchronously: {}", gPendingStructureLoad->path);
     return true;
 }
 
-void processPreparedStructureLoad() {
+bool startPreparedStructureLoad(
+    PendingStructureLoadMode mode,
+    std::string pathText,
+    std::uint64_t ticket,
+    detail::SavedProjectionSnapshot const& saved = {}
+) {
+    PendingStructureLoad pending;
+    pending.mode = mode;
+    pending.path = std::move(pathText);
+    pending.ticket = ticket;
+    pending.saved = saved;
+    pending.started = std::chrono::steady_clock::now();
+    if (auto const view = capture::getClientViewSnapshot()) {
+        pending.sourceWorldEpoch = view->worldEpoch;
+        pending.hasSourceWorld = true;
+    }
+    if (gPendingStructureLoad) {
+        logger().info("Queued latest structure load: {}", pending.path);
+        gQueuedStructureLoad.emplace(std::move(pending));
+    } else {
+        return launchPreparedStructureLoad(std::move(pending));
+    }
+    return true;
+}
+
+void processCompletedStructureLoad() {
     if (!gPendingStructureLoad) return;
     if (gPendingStructureLoad->future.wait_for(std::chrono::milliseconds{0})
         != std::future_status::ready) {
         return;
     }
 
-    auto const mode = gPendingStructureLoad->mode;
-    auto const path = gPendingStructureLoad->path;
-    auto const saved = gPendingStructureLoad->saved;
-    auto const started = gPendingStructureLoad->started;
-    auto* const sourceLevel = gPendingStructureLoad->sourceLevel;
-    auto const sourceDimensionId = gPendingStructureLoad->sourceDimensionId;
-    auto const hasSourceWorld = gPendingStructureLoad->hasSourceWorld;
-    auto const cancelled = gPendingStructureLoad->cancelled;
+    // get() consumes the future even when it throws. Retire the slot before
+    // fallible error/status formatting, preserving admission of the next job.
+    auto pending = app::takePendingValue(gPendingStructureLoad);
+    auto const mode = pending.mode;
+    auto const& path = pending.path;
+    auto const& saved = pending.saved;
+    auto const started = pending.started;
+    auto const sourceWorldEpoch = pending.sourceWorldEpoch;
+    auto const hasSourceWorld = pending.hasSourceWorld;
+    auto const ticket = pending.ticket;
 
     PreparedStructureLoadResult preparedResult;
     try {
-        preparedResult = gPendingStructureLoad->future.get();
+        preparedResult = pending.future.get();
     } catch (std::exception const& exception) {
         preparedResult.error = exception.what();
     } catch (...) {
         preparedResult.error = "结构后台预解析发生未知异常";
     }
-    gPendingStructureLoad.reset();
-
-    if (cancelled) return;
+    if (!gLoadIntent.current(ticket)) return;
 
     // A prepared NBT tree is world-independent, but palette finalization is
     // not. Never resolve an old-world request against a newly joined world or
     // a different dimension.
     if (hasSourceWorld) {
-        auto client = ll::service::getClientInstance();
-        auto* player = client ? client->getLocalPlayer() : nullptr;
-        if (!player
-            || &player->getLevel() != sourceLevel
-            || static_cast<int>(player->getDimensionId()) != sourceDimensionId) {
+        auto const view = capture::getClientViewSnapshot();
+        if (!view || view->worldEpoch != sourceWorldEpoch) {
             logger().info(
                 "Discarded prepared structure {} because the world/dimension changed",
                 path
@@ -273,7 +277,7 @@ void processPreparedStructureLoad() {
         auto const message = mode == PendingStructureLoadMode::Restore
             ? i18n::Message{i18n::TextKey::StatusRestoreFailed, {preparedResult.error}}
             : i18n::Message{i18n::TextKey::StatusLoadFailed, {preparedResult.error}};
-        session.setStatus(std::move(message));
+        gLoadIntent.applyIfCurrent(ticket, [&] { session.setStatus(std::move(message)); });
         logger().error("Could not prepare structure {}: {}", path, preparedResult.error);
         return;
     }
@@ -284,11 +288,18 @@ void processPreparedStructureLoad() {
         std::move(preparedResult.prepared), error
     );
     auto const finalized = std::chrono::steady_clock::now();
+    if (hasSourceWorld) {
+        auto const view = capture::getClientViewSnapshot();
+        if (!view || view->worldEpoch != sourceWorldEpoch) {
+            logger().info("Discarded finalized structure {} because the world/dimension changed", path);
+            return;
+        }
+    }
     if (!loaded) {
         auto const message = mode == PendingStructureLoadMode::Restore
             ? i18n::Message{i18n::TextKey::StatusRestoreFailed, {error}}
             : i18n::Message{i18n::TextKey::StatusLoadFailed, {error}};
-        session.setStatus(std::move(message));
+        gLoadIntent.applyIfCurrent(ticket, [&] { session.setStatus(std::move(message)); });
         logger().error("Could not finalize structure {}: {}", path, error);
         return;
     }
@@ -300,27 +311,38 @@ void processPreparedStructureLoad() {
         finalized - finalizeStarted
     ).count();
     logger().info(
-        "Structure staged load timings: background={}ms game-thread-finalize={}ms",
+        "Structure staged load timings: background={}ms native-finalize={}ms",
         prepareMs,
         finalizeMs
     );
 
-    if (mode == PendingStructureLoadMode::Restore) {
-        commitRestoredStructureLoad(std::move(loaded), saved);
-    } else {
-        commitNormalStructureLoad(std::move(loaded), path);
+    gLoadIntent.applyIfCurrent(ticket, [&] {
+        if (mode == PendingStructureLoadMode::Restore) {
+            commitRestoredStructureLoad(std::move(loaded), saved);
+        } else {
+            commitNormalStructureLoad(std::move(loaded), path);
+        }
+    });
+}
+
+void processPreparedStructureLoad() {
+    processCompletedStructureLoad();
+    if (!gPendingStructureLoad && gQueuedStructureLoad) {
+        auto queued = std::move(*gQueuedStructureLoad);
+        gQueuedStructureLoad.reset();
+        if (gLoadIntent.current(queued.ticket)) {
+            launchPreparedStructureLoad(std::move(queued));
+        }
     }
 }
 
 // Resolve one move hotkey into a world-space step and queue it. The direction
-// depends on where the player is facing, so it is resolved here - the only
-// layer that may touch game objects - while the rules themselves live in the
-// pure input/ViewMoveBasis module the logic tests cover.
+// uses the last game tick's copied view. Native player access from WndProc or
+// Present would outlive an unowned borrow during world/player teardown.
 bool queueViewRelativeMove(input::HotkeyId move) {
-    auto client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return false;
-    auto const step = input::viewRelativeMoveStep(move, player->getRotation().y);
+    auto const view = capture::getClientViewSnapshot();
+    if (!view) return false;
+    auto const step = input::viewRelativeMoveStep(move, view->yaw);
     if (!step.valid) return false;
     uiState().queueOffsetDelta(step.dx, step.dy, step.dz);
     return true;
@@ -499,14 +521,12 @@ bool handleProjectionOffsetWheel(short wheelDelta) {
         return false;
     }
 
-    auto client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return false;
+    auto const view = capture::getClientViewSnapshot();
+    if (!view) return false;
 
     auto const steps = static_cast<int>(wheelDelta) / WHEEL_DELTA;
     if (steps == 0) return false;
-    auto const view = player->getViewVector(1.0f);
-    auto const step = input::viewForwardStep(view.x, view.y, view.z, steps);
+    auto const step = input::viewForwardStep(view->forward[0], view->forward[1], view->forward[2], steps);
     if (!step.valid) return false;
     uiState().queueOffsetDelta(step.dx, step.dy, step.dz);
     return true;
@@ -582,15 +602,7 @@ bool hasHudInfo() {
     // overlay must draw when it is enabled even if the projection HUD is off.
     if (materialHudEnabled()) return true;
     auto const hud = uiState().hud();
-    if (!hud.enabled) return false;
-    if (!hud.showFileName
-        && !hud.showLayer
-        && !hud.showOverallProgress
-        && !hud.showProgress
-        && !hud.showWrongState
-        && !hud.showWrongType
-        && !hud.showProjectedBlockName) return false;
-    return true;
+    return hud.hasVisibleFields();
 }
 
 namespace {
@@ -708,7 +720,7 @@ void renderHud() {
     if (isGuiVisible()) return;
     if (!hudContextAvailable()) return;
     auto const hud = uiState().hud();
-    if (!hud.enabled) return;
+    if (!hud.hasVisibleFields()) return;
     auto const showFileName = hud.showFileName;
     auto const showLayer = hud.showLayer;
     auto const showOverallProgress = hud.showOverallProgress;
@@ -717,9 +729,6 @@ void renderHud() {
     auto const showWrongType = hud.showWrongType;
     auto const showExtraBlocks = hud.showExtraBlocks;
     auto const showProjectedBlockName = hud.showProjectedBlockName;
-    if (!showFileName && !showLayer && !showOverallProgress && !showProgress
-        && !showWrongState && !showWrongType && !showExtraBlocks
-        && !showProjectedBlockName) return;
 
     auto const sessionSnapshot = detail::StructureSession::getInstance().snapshot();
     if (!sessionSnapshot.loaded) return;
@@ -890,10 +899,12 @@ void renderMaterialHud() {
     if (!materialHudEnabled()) return;
     auto const hud = uiState().hud();
     if (!detail::StructureSession::getInstance().hasLoaded()) return;
-    // Both vectors come from one locked copy so they stay index-aligned. The
+    // Both vectors come from one immutable owner so they stay index-aligned. The
     // tracker publishes only the current visible layer's missing materials;
     // this present thread performs no structure or inventory scans.
-    auto const snapshot = uiState().materialHudSnapshot();
+    auto const owner = uiState().materialHudView();
+    detail::MaterialHudSnapshot const empty;
+    auto const& snapshot = owner ? *owner : empty;
     auto const& materials = snapshot.requirements;
     auto const& available = snapshot.available;
 
@@ -1237,10 +1248,13 @@ void requestStructureFileLoad(std::string pathText) {
     }
 
     auto const path = detail::pathFromUtf8(pathText);
+    auto const ticket = gLoadIntent.begin();
+    gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
         (void)startPreparedStructureLoad(
             PendingStructureLoadMode::Normal,
-            std::move(pathText)
+            std::move(pathText),
+            ticket
         );
         return;
     }
@@ -1248,11 +1262,13 @@ void requestStructureFileLoad(std::string pathText) {
     std::string error;
     auto loaded = detail::loadStructureFile(path, error);
     if (!loaded) {
-        session.setStatus(i18n::Message{i18n::TextKey::StatusLoadFailed, {error}});
+        gLoadIntent.applyIfCurrent(ticket, [&] {
+            session.setStatus(i18n::Message{i18n::TextKey::StatusLoadFailed, {error}});
+        });
         logger().error("Could not load structure {}: {}", pathText, error);
         return;
     }
-    commitNormalStructureLoad(std::move(loaded), pathText);
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText); });
 }
 
 void restoreSavedProjection() {
@@ -1261,10 +1277,13 @@ void restoreSavedProjection() {
     auto const& savedPath = saved.structurePath;
 
     auto const path = detail::pathFromUtf8(savedPath);
+    auto const ticket = gLoadIntent.begin();
+    gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
         (void)startPreparedStructureLoad(
             PendingStructureLoadMode::Restore,
             savedPath,
+            ticket,
             saved
         );
         return;
@@ -1273,25 +1292,29 @@ void restoreSavedProjection() {
     std::string error;
     auto loaded = detail::loadStructureFile(path, error);
     if (!loaded) {
-        session.setStatus(i18n::Message{i18n::TextKey::StatusRestoreFailed, {error}});
+        gLoadIntent.applyIfCurrent(ticket, [&] {
+            session.setStatus(i18n::Message{i18n::TextKey::StatusRestoreFailed, {error}});
+        });
         logger().error("Could not restore structure {}: {}", savedPath, error);
         return;
     }
-    commitRestoredStructureLoad(std::move(loaded), saved);
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitRestoredStructureLoad(std::move(loaded), saved); });
 }
 
 namespace {
 
 void clearProjectionSession(i18n::Message status) {
-    cancelPendingStructureLoad();
-
     // Withdraw the requested structure before waiting for the mesh worker.
     // Otherwise the render hook can observe the old loaded structure in the gap after
     // projection::disable() and immediately enable the projection again.
-    detail::StructureSession::getInstance().clearLoaded(std::move(status));
+    gLoadIntent.invalidateAndApply([&] {
+        projection::cancelNextStructureAnchorRequest();
+        detail::StructureSession::getInstance().clearLoaded(std::move(status));
+    });
 
-    // The active projection and in-flight worker keep non-owning Block pointers
-    // into the Java mapper registry. Stop them before releasing that registry.
+    // Drain the active projection before dropping conversion lookup caches.
+    // The cached Block pointers refer to the engine registry, not cache-owned
+    // blocks; keeping that ownership distinction explicit matters at teardown.
     projection::disable();
     resetJavaBlockMappingCache();
 }
@@ -1304,19 +1327,22 @@ void resetWorldSession() {
 }
 
 void shutdownPendingStructureLoad() {
+    gLoadIntent.begin();
+    gQueuedStructureLoad.reset();
     if (!gPendingStructureLoad) return;
 
-    gPendingStructureLoad->cancelled = true;
-    try {
-        if (gPendingStructureLoad->future.valid()) {
-            gPendingStructureLoad->future.wait();
-            (void)gPendingStructureLoad->future.get();
+    auto pending = app::takePendingValue(gPendingStructureLoad);
+    app::invokeNativeCallback([&] {
+        if (pending.future.valid()) {
+            pending.future.wait();
+            auto const result = pending.future.get();
+            if (!result.error.empty()) {
+                app::reportNativeCallbackFailure("structure load shutdown", result.error.c_str());
+            }
         }
-    } catch (...) {
-        // Teardown is interested only in joining the worker. Any parse error is
-        // irrelevant once the owning native module is leaving.
-    }
-    gPendingStructureLoad.reset();
+    }, [](char const* reason) noexcept {
+        app::reportNativeCallbackFailure("structure load shutdown", reason);
+    });
 }
 
 void clear() {

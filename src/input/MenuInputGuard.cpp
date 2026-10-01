@@ -4,6 +4,7 @@
 #include "input/MenuInputGuard.h"
 
 #include "app/HookLifecycle.h"
+#include "app/NativeCallbackBoundary.h"
 #include "overlay/CompanionBridge.h"
 #include "structure/StructureLoader.h"
 
@@ -15,11 +16,13 @@
 #include "mc/deps/input/win/HIDControllerGameCoreDesktop.h"
 
 #include <cstdint>
+#include <atomic>
 
 namespace lholo::input {
 namespace {
 
 MenuInputGuardStatus gInstallStatus{};
+std::atomic_bool gInputGuardReady{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
@@ -47,13 +50,16 @@ LL_TYPE_INSTANCE_HOOK(
     bool  forceMotionlessPointer
 ) {
     app::hook_lifecycle::DetourGuard guard;
-    if (!guard) {
+    if (!guard || !gInputGuardReady.load(std::memory_order_acquire)) {
         origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
         return;
     }
     try {
         if (menuOwnsGameInput() || projectionOwnsMouseWheel(actionButtonId)) return;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("menu input guard", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("menu input guard", "unknown C++ exception");
     }
     origin(actionButtonId, buttonData, x, y, dx, dy, forceMotionlessPointer);
 }
@@ -68,13 +74,16 @@ LL_TYPE_INSTANCE_HOOK(
     Bedrock::Input::KeyboardEventProcessor::InputOrigin originType
 ) {
     app::hook_lifecycle::DetourGuard guard;
-    if (!guard) {
+    if (!guard || !gInputGuardReady.load(std::memory_order_acquire)) {
         origin(keyCode, originType);
         return;
     }
     try {
         if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("menu input guard", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("menu input guard", "unknown C++ exception");
     }
     origin(keyCode, originType);
 }
@@ -88,13 +97,16 @@ LL_TYPE_INSTANCE_HOOK(
     int keyCode
 ) {
     app::hook_lifecycle::DetourGuard guard;
-    if (!guard) {
+    if (!guard || !gInputGuardReady.load(std::memory_order_acquire)) {
         origin(keyCode);
         return;
     }
     try {
         if (menuOwnsGameInput() && keyCode != Keyboard::F11) return;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("menu input guard", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("menu input guard", "unknown C++ exception");
     }
     origin(keyCode);
 }
@@ -117,10 +129,16 @@ MenuInputGuardStatus installMenuInputGuard() {
     if (!gInstallStatus.keyUpInputHookInstalled) {
         gInstallStatus.keyUpInputHookInstalled = MenuKeyUpInputHook::hook() == 0;
     }
+    gInputGuardReady.store(
+        gInstallStatus.mouseInputHookInstalled && gInstallStatus.keyDownInputHookInstalled
+            && gInstallStatus.keyUpInputHookInstalled,
+        std::memory_order_release
+    );
     return gInstallStatus;
 }
 
 bool uninstallMenuInputGuard() {
+    gInputGuardReady.store(false, std::memory_order_release);
     bool ok = true;
     if (gInstallStatus.keyUpInputHookInstalled) {
         if (MenuKeyUpInputHook::unhook()) gInstallStatus.keyUpInputHookInstalled = false;

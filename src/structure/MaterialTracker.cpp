@@ -2,6 +2,8 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "structure/MaterialTracker.h"
+#include "app/FutureResult.h"
+#include "app/NativeCallbackBoundary.h"
 
 #include "block/BlockPlacementRules.h"
 #include "projection/Projection.h"
@@ -20,6 +22,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -39,6 +42,7 @@ namespace {
 constexpr int kInventorySlots = 36;
 constexpr std::uint64_t kAvailabilityRefreshMs = 400;
 constexpr std::uint64_t kMaterialHudRecountIntervalMs = 400;
+std::atomic_bool gMaterialListInvalidated{};
 
 using BlockCounts = std::unordered_map<Block const*, std::uint64_t>;
 
@@ -187,7 +191,12 @@ std::vector<MaterialRequirement> collectMaterials(
 }
 
 std::optional<MaterialHudKey> currentMaterialHudKey() {
-    return projection::getMaterialProgressKey();
+    auto key = projection::getMaterialProgressKey();
+    auto const loaded = StructureSession::getInstance().loaded();
+    // Present can replace the requested structure before the next opaque frame
+    // rebuilds ProjectionState. Its previous key must not label the new HUD.
+    if (!loaded || !key || loaded->generation != key->structureGeneration) return std::nullopt;
+    return key;
 }
 
 std::optional<MaterialHudInput> captureMaterialHudInput(MaterialHudKey const& key) {
@@ -247,8 +256,11 @@ void updateMaterialHud(LocalPlayer& player) {
 
     if (worker.inFlight
         && worker.inFlight->wait_for(std::chrono::milliseconds{0}) == std::future_status::ready) {
-        auto result = worker.inFlight->get();
-        worker.inFlight.reset();
+        // Retry a failed task at the existing cadence; the native boundary
+        // reports the original error after this consumed slot has been retired.
+        worker.nextScheduleAt = GetTickCount64() + kMaterialHudRecountIntervalMs;
+        auto result = app::takeFutureResult(worker.inFlight);
+        auto const publicationRevision = ui.materialHudRevision();
         if (auto const current = currentMaterialHudKey(); current && *current == result.key) {
             auto materials = resolveMaterials(
                 std::move(result.counts), player.getLocaleCode()
@@ -256,8 +268,10 @@ void updateMaterialHud(LocalPlayer& player) {
             auto available = collectInventoryAvailability(player, materials);
             // Publish both vectors under one lock. The render thread therefore
             // sees either the complete old snapshot or the complete new one.
-            ui.replaceMaterialHudSnapshot(std::move(materials), std::move(available));
-            worker.published = result.key;
+            if (ui.replaceMaterialHudSnapshot(
+                    std::move(materials), std::move(available), publicationRevision)) {
+                worker.published = result.key;
+            }
         }
     }
 
@@ -270,6 +284,7 @@ void updateMaterialHud(LocalPlayer& player) {
     auto const now = GetTickCount64();
     if (now < worker.nextScheduleAt) return;
 
+    worker.nextScheduleAt = now + kMaterialHudRecountIntervalMs;
     auto input = captureMaterialHudInput(*key);
     if (!input) return;
 
@@ -277,7 +292,6 @@ void updateMaterialHud(LocalPlayer& player) {
         std::launch::async,
         [input = std::move(*input)]() mutable { return countMaterialHud(std::move(input)); }
     ));
-    worker.nextScheduleAt = now + kMaterialHudRecountIntervalMs;
 }
 
 void processPendingMaterialList(LocalPlayer& player) {
@@ -307,13 +321,15 @@ void refreshAvailability(LocalPlayer& player) {
     auto& ui = StructureUiState::getInstance();
     if (!ui.materialHudEnabled()) return;
 
-    auto const requirements = ui.materialHudSnapshot().requirements;
+    auto const snapshot = ui.materialHudView();
+    if (!snapshot) return;
+    auto const& requirements = snapshot->requirements;
     if (requirements.empty()) return;
     auto const now = GetTickCount64();
     if (lastRefreshMs != 0 && now - lastRefreshMs < kAvailabilityRefreshMs) return;
     lastRefreshMs = now;
 
-    ui.setMaterialHudAvailability(collectInventoryAvailability(player, requirements));
+    (void)ui.setMaterialHudAvailability(snapshot->revision, collectInventoryAvailability(player, requirements));
 }
 
 } // namespace
@@ -325,12 +341,17 @@ void requestMaterialListRefresh() {
 void invalidateMaterialList() {
     auto& ui = StructureUiState::getInstance();
     ui.clearMaterials();
-    auto& worker = materialHudWorkerState();
-    worker.published.reset();
-    worker.nextScheduleAt = 0;
+    // Invalidation can come from Present or a world/render transition. The
+    // future/published key stay game-tick-owned; only this request crosses threads.
+    gMaterialListInvalidated.store(true, std::memory_order_release);
 }
 
 void tickMaterialTracker(LocalPlayer& player) {
+    if (gMaterialListInvalidated.exchange(false, std::memory_order_acq_rel)) {
+        auto& worker = materialHudWorkerState();
+        worker.published.reset();
+        worker.nextScheduleAt = 0;
+    }
     processPendingMaterialList(player);
     updateMaterialHud(player);
     refreshAvailability(player);
@@ -339,13 +360,16 @@ void tickMaterialTracker(LocalPlayer& player) {
 void shutdownMaterialTracker() {
     auto& worker = materialHudWorkerState();
     if (worker.inFlight) {
+        auto inFlight = app::takePendingValue(worker.inFlight);
         // The task owns only immutable structure data and performs finite CPU
         // work. Join before the DLL unloads so no worker can execute old code.
-        worker.inFlight->wait();
-        worker.inFlight.reset();
+        app::invokeNativeCallback([&] { (void)inFlight.get(); }, [](char const* reason) noexcept {
+            app::reportNativeCallbackFailure("material tracker shutdown", reason);
+        });
     }
     worker.published.reset();
     worker.nextScheduleAt = 0;
+    gMaterialListInvalidated.store(false, std::memory_order_release);
     StructureUiState::getInstance().clearMaterialHud();
 }
 

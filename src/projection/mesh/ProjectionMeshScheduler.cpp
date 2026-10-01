@@ -5,6 +5,8 @@
 
 #include "plugin/LHolo.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
+#include "projection/mesh/SectionBuildCommit.h"
+#include "projection/mesh/DirtySectionSelection.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "structure/StructureLoader.h"
@@ -50,28 +52,15 @@ std::optional<std::size_t> selectNextDirtySection(
     Vec3 const&            cameraPosition,
     ProjectionSectionBuildSettings const& settings
 ) {
-    std::optional<std::size_t> selected;
-    bool                       selectedIncremental{};
-    float                      selectedDistance = std::numeric_limits<float>::max();
-    for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        auto const& sectionState = state.sections[section];
-        if (!sectionState.dirty || sectionState.buildInFlight) continue;
-        auto const incremental = sectionState.incrementalDirty;
+    return selectDirtySection(std::span<SectionState const>{state.sections}, [&](SectionState const& sectionState) {
         auto const center = sectionState.center + Vec3{
             static_cast<float>(state.anchor.x + settings.offsetX),
             static_cast<float>(state.anchor.y + settings.offsetY),
             static_cast<float>(state.anchor.z + settings.offsetZ)
         };
         auto const delta = center - cameraPosition;
-        auto const distance = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
-        if (!selected || (incremental && !selectedIncremental)
-            || (incremental == selectedIncremental && distance < selectedDistance)) {
-            selected = section;
-            selectedIncremental = incremental;
-            selectedDistance = distance;
-        }
-    }
-    return selected;
+        return delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
+    });
 }
 
 bool validateMeshData(
@@ -218,10 +207,17 @@ void scheduleProjectionMeshBuild(
     }
     if (minimum.x == INT_MAX) {
         auto const& center = state.sections[section].center;
+        auto const extentX = settings.rotationTurns & 1 ? state.structure->sizeZ : state.structure->sizeX;
+        auto const extentZ = settings.rotationTurns & 1 ? state.structure->sizeX : state.structure->sizeZ;
+        auto const centerCell = [](float position, int extent) {
+            // A large finite local center can round to INT_MAX+1 in float.
+            // Keep the double clamp before narrowing, inside the structure.
+            return static_cast<int>(std::clamp(static_cast<double>(position), 0.0, static_cast<double>(extent - 1)));
+        };
         BlockPos const world{
-            state.anchor.x + settings.offsetX + static_cast<int>(center.x),
-            state.anchor.y + settings.offsetY + static_cast<int>(center.y),
-            state.anchor.z + settings.offsetZ + static_cast<int>(center.z),
+            state.anchor.x + settings.offsetX + centerCell(center.x, extentX),
+            state.anchor.y + settings.offsetY + centerCell(center.y, state.structure->sizeY),
+            state.anchor.z + settings.offsetZ + centerCell(center.z, extentZ),
         };
         minimum = world;
         maximum = world;
@@ -237,8 +233,14 @@ void scheduleProjectionMeshBuild(
     // Structure data and the virtual projected world are immutable for one
     // placement generation. Only correction bytes need a task-local copy.
     snapshot->structure = state.structure;
-    snapshot->correctionStates = state.correctionStates;
-    snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
+    // Measured full-vector copies dominate large projections. Keep the faster
+    // contiguous copy for small structures; large tasks capture bounded neighbors.
+    bool const compactBlockState = state.structure->renderBlocks.size() >= 8U * 1024U * 1024U;
+    std::vector<std::size_t> snapshotIndices;
+    if (!compactBlockState) {
+        snapshot->correctionStates = state.correctionStates;
+        snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
+    }
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
     snapshot->sectionExtraBlockPositions = {state.sectionExtraBlockPositions[section]};
     // Correction face culling only needs extras in this section and its six
@@ -259,6 +261,15 @@ void scheduleProjectionMeshBuild(
         }
         auto const& positions = state.sectionExtraBlockPositions[found->second];
         snapshot->extraBlockPositions.insert(positions.begin(), positions.end());
+        if (compactBlockState) {
+            auto const& indices = state.sectionBlockIndices.at(found->second);
+            snapshotIndices.insert(snapshotIndices.end(), indices.begin(), indices.end());
+        }
+    }
+    if (compactBlockState) {
+        snapshot->sectionBlockSnapshot.emplace();
+        snapshot->sectionBlockSnapshot->capture(std::move(snapshotIndices),
+            state.correctionStates, state.blockActorRendererAvailable);
     }
     snapshot->expectedWorldBlocks = state.expectedWorldBlocks;
     snapshot->expectedWorldLiquids = state.expectedWorldLiquids;
@@ -467,22 +478,24 @@ void buildNextProjectionSectionSynchronously(
             );
             continue;
         }
-        state.sections[section].dirty = false;
-        buildProjectionSection(
-            state,
-            tessellator,
-            blockTessellator,
-            region,
-            section,
-            Tessellator::UploadMode::Buffered,
-            settings
-        );
-        state.sections[section].uploadedRevision = state.sections[section].requestedRevision;
-        state.sections[section].incrementalDirty = false;
+        // A failed native build can already have replaced a section stream.
+        // Retire derived aggregates before entering that fallible operation.
         state.praxisCompatLiquidAggregate.reset();
         state.praxisCompatLiquidAggregateOrder.clear();
+        state.praxisCompatLiquidBoundaryMaskCache.clear();
         state.praxisCompatLiquidAggregateDirty = true;
         state.meshPreflightDone = false;
+        completeSynchronousSectionBuild(state.sections[section], [&] {
+            buildProjectionSection(
+                state,
+                tessellator,
+                blockTessellator,
+                region,
+                section,
+                Tessellator::UploadMode::Buffered,
+                settings
+            );
+        });
         break;
     }
 }

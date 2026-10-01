@@ -7,6 +7,7 @@
 #pragma once
 
 #include "structure/LayerDisplayTypes.h"
+#include "projection/runtime/WorldEventInterest.h"
 
 #include <cstdint>
 #include <string_view>
@@ -23,6 +24,10 @@ class BlockSource;
 class LegacyStructureSettings;
 
 namespace lholo::projection::detail {
+WorldEventInterest makeProjectionWorldEventInterest(
+    structure::LoadedStructure const& loaded, std::array<int, 3> const& origin,
+    int mirrorMode, int rotation
+);
 
 RenderBucket renderBucketFor(BlockRenderLayer layer);
 

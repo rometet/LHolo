@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "place/PlacementModes.h"
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -22,9 +24,9 @@ struct FailedPlanKey {
     std::int64_t cell;
     std::uint32_t runtimeId;
     int          itemAux;
-    int          eyeX;
-    int          eyeY;
-    int          eyeZ;
+    std::int64_t eyeX;
+    std::int64_t eyeY;
+    std::int64_t eyeZ;
     int          viewX;
     int          viewY;
     int          viewZ;
@@ -66,6 +68,9 @@ public:
     void setRangeEnabled(bool enabled);
     [[nodiscard]] bool manualMode() const;
     void setManualMode(bool manual);
+    [[nodiscard]] PlacementModes modes() const;
+    // Applies a menu's complete mode choice only while its snapshot is current.
+    [[nodiscard]] bool applyModes(PlacementModes const& modes);
     [[nodiscard]] std::vector<std::string> manualPlacementAllowedItems() const;
     // Returns true only when a valid edit changed the stored list.
     bool setManualPlacementAllowedItems(std::vector<std::string> const& items);
@@ -76,9 +81,12 @@ public:
     void setAutoPlacementBreakCooldownSeconds(int seconds);
 
     [[nodiscard]] bool manualHeld() const;
+    // Capture before inspecting the native receiver/target. Cancellation or a
+    // mode transition invalidates that callback's later press publication.
+    [[nodiscard]] std::uint64_t manualInputEpoch() const;
     // Starts one logical right-button press. Repeated Bedrock callbacks while
     // the same press is held are idempotent and must not reset repeat timing.
-    [[nodiscard]] bool beginManualPress(std::uint64_t time);
+    [[nodiscard]] bool beginManualPress(std::uint64_t time, std::uint64_t inputEpoch);
     // A release keeps an unconsumed quick-tap request alive for the tick loop.
     void releaseManualPress();
     // Cancels both the held state and any unconsumed first-placement request.
@@ -111,6 +119,11 @@ public:
 
 private:
     PlacementState() = default;
+    void invalidateManualInputLocked(bool resetTiming);
+
+    mutable std::mutex mManualInputMutex;
+    std::atomic_uint64_t mManualInputEpoch{};
+    std::uint64_t mModesRevision{}; // Protected by mManualInputMutex.
 
     std::atomic_bool     mEnabled{false};
     std::atomic_bool     mRangeEnabled{false};

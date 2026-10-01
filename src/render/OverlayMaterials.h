@@ -10,7 +10,6 @@
 #pragma once
 
 #include <optional>
-#include <string>
 #include <string_view>
 #include <variant>
 
@@ -39,12 +38,10 @@ inline bool materialExists(mce::MaterialPtr const& material) {
 
 // The vanilla 2x2 pure-white texture. Sampled at its center it reads exactly
 // (1,1,1,1): the texture multiply stays neutral and alpha tests never discard.
-// Resolved once from the vanilla TextureGroup, retried per frame until it
-// shows up, and left empty when unavailable.
+// TextureGroup owns its cache. Resolve on each submission so no LHolo static
+// handle survives a resource reload, renderer replacement or DLL teardown.
 inline TextureVariant resolveWhiteTextureVariant(LevelRenderer* levelRenderer) {
-    static mce::TexturePtr cached{};
-    static bool            resolved = false;
-    if (!resolved && levelRenderer) {
+    if (levelRenderer) {
         auto const& textureGroup = levelRenderer->mTextureGroup.get();
         if (textureGroup) {
             auto texture = textureGroup->getTexture(
@@ -55,104 +52,46 @@ inline TextureVariant resolveWhiteTextureVariant(LevelRenderer* levelRenderer) {
             );
             auto const& clientTexture = texture.mClientTexture;
             if (clientTexture && clientTexture->mIsMissingTexture != IsMissingTexture::Yes) {
-                cached   = std::move(texture);
-                resolved = true;
+                return TextureVariant{std::move(texture)};
             }
         }
     }
-    if (resolved) return TextureVariant{cached};
     return TextureVariant{};
 }
 
-// The glow sign text material reads COLOR0 and renders it as-is (emissive
-// constant color, native depth bias), so overlay geometry keeps the vertex
-// color it was built with instead of an engine-driven uniform color. Resolved
-// once from the runtime material groups; returns null when the name does not
-// exist so callers keep their previous material.
-//
-// The client library exports no mce::MaterialPtr constructor, so resolved
-// handles live in zero-initialized aligned storage and only the internal
-// shared pointer is ever assigned. The retained reference keeps the material
-// alive across resource reloads.
-inline mce::MaterialPtr const* resolveGlowSignMaterial() {
-    alignas(mce::MaterialPtr) static std::byte storage[sizeof(mce::MaterialPtr)]{};
-    static auto* const                        cached   = reinterpret_cast<mce::MaterialPtr*>(storage);
-    static bool                               resolved = false;
-    if (!resolved) {
-        resolved = true;
-        bool found = false;
-        auto const scan = [&](char const*, mce::RenderMaterialGroup& group) {
-            if (found) return;
-            for (auto const& entry : group.mMaterials.get()) {
-                auto const& info = entry.second;
-                if (!info || !info->mPtr) continue;
-                if (entry.first.getString() != "glow_sign_text") continue;
-                cached->mRenderMaterialInfoPtr = info;
-                found                          = true;
-                break;
-            }
-        };
-        scan("common", mce::RenderMaterialGroup::common());
-        if (!found) scan("switchable", mce::RenderMaterialGroup::switchable());
+// MaterialPtr has no usable default constructor in the client ABI. Its copy
+// constructor does construct the owning shared_ptr, unlike a cast from zeroed
+// bytes. Copy a live engine handle, then replace only the material reference.
+// Return a submission-scoped owner rather than a static cache: reloads can
+// replace the engine's table and shutdown must not destroy stale GPU handles.
+inline std::optional<mce::MaterialPtr> resolveNamedMaterial(
+    std::string_view name,
+    mce::MaterialPtr const& exemplar
+) {
+    for (auto* group : {&mce::RenderMaterialGroup::common(),
+                        &mce::RenderMaterialGroup::switchable()}) {
+        for (auto const& [key, info] : group->mMaterials.get()) {
+            if (!info || !info->mPtr || key.getString() != name) continue;
+            mce::MaterialPtr result{exemplar};
+            result.mRenderMaterialInfoPtr = info;
+            return result;
+        }
     }
-    return materialExists(*cached) ? cached : nullptr;
+    return std::nullopt;
 }
 
-// The Phase 3A liquid candidate intentionally uses the exact material proven
-// by Praxis. sign_text and glow_sign_text have different render contracts, so
-// keep a separately owned handle and require an exact runtime-table match.
-inline mce::MaterialPtr const* resolveSignTextMaterial() {
-    alignas(mce::MaterialPtr) static std::byte storage[sizeof(mce::MaterialPtr)]{};
-    static auto* const cached = reinterpret_cast<mce::MaterialPtr*>(storage);
-    if (!materialExists(*cached)) {
-        bool found = false;
-        auto const scan = [&](mce::RenderMaterialGroup& group) {
-            if (found) return;
-            for (auto const& entry : group.mMaterials.get()) {
-                auto const& info = entry.second;
-                if (!info || !info->mPtr || entry.first.getString() != "sign_text") continue;
-                cached->mRenderMaterialInfoPtr = info;
-                found                          = true;
-                break;
-            }
-        };
-        scan(mce::RenderMaterialGroup::common());
-        if (!found) scan(mce::RenderMaterialGroup::switchable());
-        if (!found) return nullptr;
-    }
-    return materialExists(*cached) ? cached : nullptr;
+inline std::optional<mce::MaterialPtr> resolveGlowSignMaterial(mce::MaterialPtr const& exemplar) {
+    return resolveNamedMaterial("glow_sign_text", exemplar);
 }
 
-// Resolve a native terrain material by its runtime table name. This uses only
-// the public RenderMaterialGroup maps exposed by Fake Headers; no renderer
-// address, vtable slot or RenderChunk private field is involved. The retained
-// RenderMaterialInfo shared pointer keeps the selected material alive.
-inline mce::MaterialPtr const* resolveTerrainMaterial(std::string_view name) {
-    alignas(mce::MaterialPtr) static std::byte storage[sizeof(mce::MaterialPtr)]{};
-    static auto* const cached = reinterpret_cast<mce::MaterialPtr*>(storage);
-    static std::string cachedName;
-    if (cachedName != name || !materialExists(*cached)) {
-        bool found = false;
-        auto const scan = [&](mce::RenderMaterialGroup& group) {
-            if (found) return;
-            for (auto const& entry : group.mMaterials.get()) {
-                auto const& info = entry.second;
-                if (!info || !info->mPtr || entry.first.getString() != name) continue;
-                cached->mRenderMaterialInfoPtr = info;
-                cachedName.assign(name);
-                found = true;
-                break;
-            }
-        };
-        scan(mce::RenderMaterialGroup::common());
-        if (!found) scan(mce::RenderMaterialGroup::switchable());
-        if (!found) return nullptr;
-    }
-    return materialExists(*cached) ? cached : nullptr;
+// Exact Replay keeps sign_text separate from glow_sign_text: their shaders
+// have different contracts. A missing exact name keeps the existing fallback.
+inline std::optional<mce::MaterialPtr> resolveSignTextMaterial(mce::MaterialPtr const& exemplar) {
+    return resolveNamedMaterial("sign_text", exemplar);
 }
 
-inline mce::MaterialPtr const* resolveTerrainBlendMaterial() {
-    return resolveTerrainMaterial("terrain_blend");
+inline std::optional<mce::MaterialPtr> resolveTerrainBlendMaterial(mce::MaterialPtr const& exemplar) {
+    return resolveNamedMaterial("terrain_blend", exemplar);
 }
 
 } // namespace lholo::render

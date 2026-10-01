@@ -4,75 +4,23 @@
 #include "projection/runtime/ProjectionFramePipeline.h"
 
 #include "projection/correction/ProjectionCorrectionTracker.h"
+#include "projection/correction/CorrectionUpdate.h"
 #include "projection/mesh/ProjectionMeshScheduler.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
+#include "projection/mesh/ProjectionMeshWorker.h"
+#include "plugin/LHolo.h"
+#include "ll/api/mod/NativeMod.h"
 #include "projection/runtime/ProjectionProgress.h"
+#include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/core/ProjectionState.h"
 #include "structure/StructureLoader.h"
 
-#include <cstdint>
-#include <memory>
-
-#include "mc/client/renderer/SupplementaryFieldAutoGenerationMode.h"
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
 
 namespace lholo::projection::detail {
-namespace {
-
-void setColorAbgr(Tessellator& tessellator, std::uint32_t colorAbgr) {
-    tessellator.color(
-        static_cast<float>((colorAbgr >> 0) & 0xFFU) / 255.0f,
-        static_cast<float>((colorAbgr >> 8) & 0xFFU) / 255.0f,
-        static_cast<float>((colorAbgr >> 16) & 0xFFU) / 255.0f,
-        static_cast<float>((colorAbgr >> 24) & 0xFFU) / 255.0f
-    );
-}
-
-void ensureStructureBoundsMesh(
-    ProjectionState& state,
-    Tessellator&     tessellator,
-    int              rotationTurns
-) {
-    // The bounds are only 24 line vertices and are intentionally generated
-    // once on the render thread; section BlockTessellator work stays async.
-    if (!state.asyncMeshBuildingEnabled || state.structureBoundsMesh) return;
-
-    auto const rotated = rotationTurns == 1 || rotationTurns == 3;
-    auto const width = static_cast<float>(
-        rotated ? state.structure->sizeZ : state.structure->sizeX
-    );
-    auto const height = static_cast<float>(state.structure->sizeY);
-    auto const depth = static_cast<float>(
-        rotated ? state.structure->sizeX : state.structure->sizeZ
-    );
-    constexpr float expansion = 0.01f;
-    float const x0 = -expansion, y0 = -expansion, z0 = -expansion;
-    float const x1 = width + expansion, y1 = height + expansion, z1 = depth + expansion;
-    tessellator.begin(
-        Tessellator::DebugContextCallback{}, mce::PrimitiveMode::LineList, 24, false
-    );
-    setColorAbgr(tessellator, 0xFFFFD633U);
-    auto addBoundsEdge = [&](Vec3 const& first, Vec3 const& second) {
-        tessellator.vertex(first.x, first.y, first.z);
-        tessellator.vertex(second.x, second.y, second.z);
-    };
-    addBoundsEdge({x0,y0,z0},{x1,y0,z0}); addBoundsEdge({x1,y0,z0},{x1,y1,z0});
-    addBoundsEdge({x1,y1,z0},{x0,y1,z0}); addBoundsEdge({x0,y1,z0},{x0,y0,z0});
-    addBoundsEdge({x0,y0,z1},{x1,y0,z1}); addBoundsEdge({x1,y0,z1},{x1,y1,z1});
-    addBoundsEdge({x1,y1,z1},{x0,y1,z1}); addBoundsEdge({x0,y1,z1},{x0,y0,z1});
-    addBoundsEdge({x0,y0,z0},{x0,y0,z1}); addBoundsEdge({x1,y0,z0},{x1,y0,z1});
-    addBoundsEdge({x1,y1,z0},{x1,y1,z1}); addBoundsEdge({x0,y1,z0},{x0,y1,z1});
-    state.structureBoundsMesh = std::make_unique<mce::Mesh>(tessellator.end(
-        Tessellator::UploadMode::Buffered,
-        "LHoloStructureBounds",
-        SupplementaryFieldAutoGenerationMode{0}
-    ));
-}
-
-} // namespace
 
 void processProjectionOpaqueFrame(
     ProjectionState&                      state,
@@ -85,21 +33,39 @@ void processProjectionOpaqueFrame(
     int                                   displayLayer,
     structure::LayerAxis                  layerAxis
 ) {
+    if (consumeMeshWorkerFatalFailure()) {
+        state.asyncMeshBuildingEnabled = false;
+        disableMeshWorkerForSession();
+        stopMeshWorker();
+        for (auto& section : state.sections) {
+            if (!section.buildInFlight) continue;
+            section.buildInFlight = false;
+            section.dirty = true;
+        }
+        LHolo::getInstance().getSelf().getLogger().error(
+            "Projection mesh task/result publication failed; retrying affected sections through synchronous fallback"
+        );
+    }
     auto& blockTessellator = *state.blockTessellator;
     blockTessellator.setRegion(region);
 
-    auto const correctionChanges = updateCorrectionTracker(
-        state,
-        region,
-        transformSettings,
-        buildSettings.mirrorMode,
-        buildSettings.rotationTurns,
-        buildSettings.offsetX,
-        buildSettings.offsetY,
-        buildSettings.offsetZ,
-        layerDisplayMode,
-        displayLayer,
-        layerAxis
+    auto const correctionChanges = runCorrectionUpdate(
+        [&] {
+            return updateCorrectionTracker(
+                state,
+                region,
+                transformSettings,
+                buildSettings.mirrorMode,
+                buildSettings.rotationTurns,
+                buildSettings.offsetX,
+                buildSettings.offsetY,
+                buildSettings.offsetZ,
+                layerDisplayMode,
+                displayLayer,
+                layerAxis
+            );
+        },
+        []() noexcept { markProjectionWorldEventsFailed(); }
     );
     if (correctionChanges.overall) {
         publishPlacedProgress(state.progressCorrectCount);
@@ -117,7 +83,11 @@ void processProjectionOpaqueFrame(
 
     // Consume completed CPU data only in the opaque render pass.
     uploadCompletedProjectionMeshes(state, tessellator);
-    ensureStructureBoundsMesh(state, tessellator, buildSettings.rotationTurns);
+    if (state.asyncMeshBuildingEnabled) {
+        // Bounds use the same exact extent/white UVs as synchronous fallback.
+        // Generate their 24 vertices once on the GPU owner, before CPU tasks.
+        buildStructureBoundsMesh(state, tessellator, Tessellator::UploadMode::Buffered, buildSettings);
+    }
     scheduleProjectionMeshBuild(
         state, tessellator, region, cameraPosition, buildSettings
     );

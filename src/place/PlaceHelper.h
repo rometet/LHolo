@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include "place/PlacementModes.h"
+
 #include <string>
 #include <vector>
 
@@ -38,6 +40,8 @@ int  getAutoPlacementBreakCooldownSeconds();
 // placing automatically. Applies to both easy-place and range placement.
 void setManualMode(bool manual);
 bool isManualMode();
+PlacementModes getPlacementModes();
+bool applyPlacementModes(PlacementModes const& modes);
 std::vector<std::string> getManualPlacementAllowedItems();
 bool setManualPlacementAllowedItems(std::vector<std::string> const& items);
 // Exact held inventory item, never the blueprint target or a different slot.

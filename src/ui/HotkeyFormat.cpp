@@ -56,14 +56,15 @@ std::string hotkeyName(unsigned int key) {
     case VK_XBUTTON2: return i18n::tr(i18n::TextKey::KeyMouseSide2);
     default: break;
     }
-    auto scanCode = MapVirtualKeyW(key, MAPVK_VK_TO_VSC);
+    auto const scanCode = MapVirtualKeyW(key, MAPVK_VK_TO_VSC);
+    auto keyNameFlags = scanCode << 16;
     if (key == VK_LEFT || key == VK_UP || key == VK_RIGHT || key == VK_DOWN
         || key == VK_PRIOR || key == VK_NEXT || key == VK_END || key == VK_HOME
         || key == VK_INSERT || key == VK_DELETE || key == VK_DIVIDE || key == VK_NUMLOCK) {
-        scanCode |= 1u << 24;
+        keyNameFlags |= 1u << 24;
     }
     wchar_t name[128]{};
-    auto const length = GetKeyNameTextW(static_cast<LONG>(scanCode << 16), name, static_cast<int>(std::size(name)));
+    auto const length = GetKeyNameTextW(static_cast<LONG>(keyNameFlags), name, static_cast<int>(std::size(name)));
     if (length > 0) return wideToUtf8(std::wstring_view{name, static_cast<std::size_t>(length)});
     char fallback[24]{};
     std::snprintf(fallback, sizeof(fallback), "VK 0x%02X", key);

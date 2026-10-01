@@ -7,6 +7,7 @@
 #include "projection/mesh/ProjectionMeshWorker.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
 #include "projection/section/ProjectionSectionStateStore.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
@@ -104,25 +105,19 @@ bool prepareProjectionState(
     // Use a dense section lookup during initial grouping instead of doing one
     // std::map tree lookup/allocation per block. The persistent map is still
     // populated once per occupied section for later sparse correction lookups.
-    auto const sectionCountX = static_cast<std::size_t>((state.structure->sizeX + 15) / 16);
-    auto const sectionCountY = static_cast<std::size_t>((state.structure->sizeY + 15) / 16);
-    auto const sectionCountZ = static_cast<std::size_t>((state.structure->sizeZ + 15) / 16);
-    auto const denseSectionCount64 =
-        static_cast<std::uint64_t>(sectionCountX)
-        * static_cast<std::uint64_t>(sectionCountY)
-        * static_cast<std::uint64_t>(sectionCountZ);
+    auto const grid = makeSectionGrid(state.structure->sizeX, state.structure->sizeY, state.structure->sizeZ);
+    if (!grid) return false;
     constexpr std::uint64_t kDenseSectionLookupLimit = 1U << 20;
     constexpr auto NoSection = std::numeric_limits<std::size_t>::max();
 
-    if (denseSectionCount64 != 0
-        && denseSectionCount64 <= kDenseSectionLookupLimit) {
+    if (auto const denseCount = grid->denseCount(kDenseSectionLookupLimit)) {
         std::vector<std::size_t> denseLookup(
-            static_cast<std::size_t>(denseSectionCount64),
+            *denseCount,
             NoSection
         );
         std::vector<std::size_t> sectionCounts;
         centers.reserve(std::min<std::size_t>(
-            blockCount, static_cast<std::size_t>(denseSectionCount64)
+            blockCount, *denseCount
         ));
         state.localSectionKeys.reserve(centers.capacity());
 
@@ -130,7 +125,7 @@ bool prepareProjectionState(
             auto const sx = static_cast<std::size_t>(x / 16);
             auto const sy = static_cast<std::size_t>(y / 16);
             auto const sz = static_cast<std::size_t>(z / 16);
-            return (sx * sectionCountY + sy) * sectionCountZ + sz;
+            return (sx * grid->y + sy) * grid->z + sz;
         };
 
         // Pass 1: compact occupied dense sections and count their blocks.

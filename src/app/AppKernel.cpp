@@ -4,6 +4,7 @@
 #include "app/AppKernel.h"
 
 #include "app/HookLifecycle.h"
+#include "app/InitializationRetention.h"
 #include "i18n/LanguageStore.h"
 #include "input/MenuInputGuard.h"
 #include "overlay/ImGuiOverlay.h"
@@ -18,6 +19,12 @@
 #include "ll/api/mod/NativeMod.h"
 
 namespace lholo::app {
+namespace {
+// NativeModManager may destroy its temporary NativeMod after dynamic enable
+// failure. Preserve the module/library/logger if rollback cannot detach every
+// callback. Never release this last owner from inside the DLL being retained.
+std::shared_ptr<ll::mod::NativeMod> gFailedInitializationOwner;
+}
 
 AppKernel& AppKernel::getInstance() {
     static AppKernel instance;
@@ -32,51 +39,53 @@ bool AppKernel::load() {
 
 bool AppKernel::enable() {
     auto& logger = LHolo::getInstance().getSelf().getLogger();
+    auto const owner = ll::mod::NativeMod::current();
+    if (!owner) {
+        logger.error("LHolo module ownership was unavailable for safe enable rollback");
+        return false;
+    }
 
     if (!hook_lifecycle::beginEnable()) {
         logger.error("LHolo hook lifecycle was not ready for enable");
         return false;
     }
 
-    projection::detail::resetMeshWorkerForSession();
-
-    if (!projection::detail::projectionController().installHooks()) {
-        hook_lifecycle::beginQuiesce();
-        auto const removed =
-            projection::detail::projectionController().uninstallHooks();
-        if (removed) {
-            hook_lifecycle::waitForQuiescence();
-            hook_lifecycle::markDisabled();
+    return initializeWithRetainedRollback(owner, gFailedInitializationOwner, [&] {
+        projection::detail::resetMeshWorkerForSession();
+        if (!projection::detail::projectionController().installHooks()) {
+            logger.error("Failed to install required projection hooks");
+            return false;
         }
-        logger.error(
-            "Failed to install projection hooks; rollbackRemoved={}",
-            removed ? 1 : 0
-        );
-        return false;
-    }
+        if (!place::installHook()) {
+            logger.error("Failed to install required placement hooks");
+            return false;
+        }
 
-    if (!place::installHook()) {
-        logger.warn("Failed to install easy-place hooks");
-    }
-
-    auto const menuInputGuardStatus = input::installMenuInputGuard();
-    if (!menuInputGuardStatus.mouseInputHookInstalled) {
-        logger.warn("Failed to install menu mouse-input guard");
-    }
-    if (!menuInputGuardStatus.keyDownInputHookInstalled) {
-        logger.warn("Failed to install menu key-down guard");
-    }
-    if (!menuInputGuardStatus.keyUpInputHookInstalled) {
-        logger.warn("Failed to install menu key-up guard");
-    }
-
-    if (!overlay::ensureInstalled()) {
-        logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
-    }
-
-    logger.info("LHolo enabled. Type lholo to open the projection menu.");
-    logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
-    return true;
+        auto const menuInputGuardStatus = input::installMenuInputGuard();
+        if (!menuInputGuardStatus.mouseInputHookInstalled
+            || !menuInputGuardStatus.keyDownInputHookInstalled
+            || !menuInputGuardStatus.keyUpInputHookInstalled) {
+            logger.error("Failed to install all required menu input guards");
+            return false;
+        }
+        if (!overlay::ensureInstalled()) {
+            logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
+        }
+        logger.info("LHolo enabled. Type lholo to open the projection menu.");
+        logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
+        return true;
+    }, [this]() noexcept {
+        // An install or even a diagnostic allocation can throw after earlier
+        // hooks admitted callbacks. Drain the complete normal teardown once.
+        bool cleaned{};
+        auto const completed = invokeNativeCallback([&] {
+            cleaned = disable();
+            if (!cleaned) reportNativeCallbackFailure(
+                "enable rollback", "teardown incomplete; native module must remain resident"
+            );
+        }, [](char const* reason) noexcept { reportNativeCallbackFailure("enable rollback", reason); });
+        return completed && cleaned;
+    }, [](char const* reason) noexcept { reportNativeCallbackFailure("enable", reason); });
 }
 
 bool AppKernel::disable() {
@@ -87,10 +96,14 @@ bool AppKernel::disable() {
         return false;
     }
 
-    // First make every newly-entering typed detour origin-only. Keep all world,
-    // projection, ImGui, and worker state intact until the physical hooks are
-    // detached and every callback that could still return through LHolo drains.
+    // First make every newly-entering typed detour origin-only. Keep world and
+    // projection state intact through both admitted-body and origin-only drains.
     hook_lifecycle::beginQuiesce();
+    // Admitted bodies still need nested virtual-world query/setBlock hooks.
+    // Drain them while those dependencies remain installed; then join pending
+    // workers and release their captured native references before unhooking.
+    hook_lifecycle::waitForRunningCallbacks();
+    projection::detail::stopMeshWorker();
 
     bool hooksRemoved = true;
     hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
@@ -108,6 +121,7 @@ bool AppKernel::disable() {
     // Running callbacks and Quiescing origin-only callbacks, so state is not
     // released until every already-entered typed detour has returned.
     hook_lifecycle::waitForQuiescence();
+    structure::capture::shutdown();
 
     // No typed render callback can reinstall the overlay after this point.
     // The overlay has its own callback drain for Present/WndProc/D3D detours and

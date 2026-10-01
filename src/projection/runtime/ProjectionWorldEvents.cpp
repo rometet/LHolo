@@ -7,11 +7,14 @@
 // (at your option) any later version.
 
 #include "projection/runtime/ProjectionWorldEvents.h"
+#include "projection/runtime/CoalescedEventQueue.h"
+#include "projection/runtime/EpochFailure.h"
+#include "app/NativeCallbackBoundary.h"
+#include "app/ListenerRetirement.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <tuple>
 
@@ -30,17 +33,24 @@ namespace lholo::projection::detail {
 namespace {
 
 std::mutex                gPendingEventsMutex;
-std::mutex                gWorldLifecycleMutex;
-std::deque<PendingBlockChange> gIncomingBlockChanges;
-std::deque<SubChunkKey>   gIncomingLoadedSubChunks;
+std::recursive_mutex      gWorldLifecycleMutex;
+CoalescedEventQueue<SubChunkKey, PendingBlockChange, SubChunkKeyHash> gIncomingBlockChanges;
+CoalescedEventQueue<SubChunkKey, SubChunkKey, SubChunkKeyHash> gIncomingLoadedSubChunks;
 std::atomic<BlockSource*> gAttachedBlockSource{};
 std::atomic<ChunkSource*> gAttachedChunkSource{};
 std::atomic<Level*>       gAttachedLevel{};
 std::atomic_bool          gWorldExitPending{};
+std::atomic_bool          gDimensionSourceDestroyed{};
+EpochFailure             gWorldEventFailure;
+WorldEventInterest       gWorldInterest;
 
 class ProjectionBlockSourceListener final : public BlockSourceListener {
 public:
     void onSourceDestroyed(BlockSource& source) override {
+        // Worker-local BlockSources are unrelated. Do not make their teardown
+        // wait on the render owner's barrier while that owner joins the worker.
+        if (gAttachedBlockSource.load(std::memory_order_acquire) != &source) return;
+        std::lock_guard lifecycleLock(gWorldLifecycleMutex);
         auto* expected = &source;
         if (gAttachedBlockSource.compare_exchange_strong(
                 expected,
@@ -48,6 +58,10 @@ public:
                 std::memory_order_acq_rel
             )) {
             gAttachedChunkSource.store(nullptr, std::memory_order_release);
+            gDimensionSourceDestroyed.store(true, std::memory_order_release);
+            // A standalone dimension/source destruction can precede the
+            // Level event. Workers retain that Dimension and chunk view too.
+            stopMeshWorker();
         }
     }
 
@@ -62,6 +76,9 @@ public:
         BlockChangedEventTarget,
         Actor*
     ) override {
+        if (gWorldEventFailure.failed()) return;
+        auto const epoch = gWorldEventFailure.token();
+        app::invokeNativeCallback([&] {
         // Layer zero is the ordinary solid-block layer. Keep the occurrence
         // time with the fact so delayed consumers never restart the 10-second
         // auto-placement suppression window.
@@ -70,10 +87,17 @@ public:
         // Keep the source check under the same lock as the queue mutation. A
         // callback that started just before world teardown must not append an
         // old-world event after onLevelDestruction() has cleared the queue.
-        if (&source != gAttachedBlockSource.load(std::memory_order_acquire)) return;
-        gIncomingBlockChanges.push_back(PendingBlockChange{
-            pos,
-            destroyed ? GetTickCount64() : 0,
+        if (&source != gAttachedBlockSource.load(std::memory_order_acquire)
+            || epoch != gWorldEventFailure.token()) return;
+        if (!gWorldInterest.contains({pos.x, pos.y, pos.z})) return;
+        gIncomingBlockChanges.push(std::tuple{pos.x, pos.y, pos.z}, PendingBlockChange{
+            pos, destroyed ? GetTickCount64() : 0,
+        }, [](auto& previous, auto const& latest) noexcept {
+            previous.destroyedAt = (std::max)(previous.destroyedAt, latest.destroyedAt);
+        });
+        }, [epoch](char const* reason) noexcept {
+            gWorldEventFailure.mark(epoch);
+            app::reportNativeCallbackFailure("world block notification; reload projection to retry", reason);
         });
     }
 };
@@ -88,16 +112,26 @@ public:
         short        absoluteSubChunkIndex,
         bool
     ) override {
+        if (gWorldEventFailure.failed()) return;
+        auto const epoch = gWorldEventFailure.token();
+        app::invokeNativeCallback([&] {
         auto const& chunkPosition = chunk.mPosition.get();
         std::lock_guard lock(gPendingEventsMutex);
         // See onBlockChanged(): source validation and queue insertion must be
         // ordered with teardown's queue clear.
-        if (&source != gAttachedChunkSource.load(std::memory_order_acquire)) return;
-        gIncomingLoadedSubChunks.emplace_back(
+        if (&source != gAttachedChunkSource.load(std::memory_order_acquire)
+            || epoch != gWorldEventFailure.token()) return;
+        SubChunkKey const key{
             chunkPosition.x,
             static_cast<int>(absoluteSubChunkIndex),
             chunkPosition.z
-        );
+        };
+        if (!gWorldInterest.intersectsSubChunk({chunkPosition.x, static_cast<int>(absoluteSubChunkIndex), chunkPosition.z})) return;
+        gIncomingLoadedSubChunks.push(key, key, [](auto&, auto const&) noexcept {});
+        }, [epoch](char const* reason) noexcept {
+            gWorldEventFailure.mark(epoch);
+            app::reportNativeCallbackFailure("world subchunk notification; reload projection to retry", reason);
+        });
     }
 
     void onLevelDestruction(std::string const&) override {
@@ -118,6 +152,7 @@ public:
             std::lock_guard lock(gPendingEventsMutex);
             gIncomingBlockChanges.clear();
             gIncomingLoadedSubChunks.clear();
+            gWorldInterest = WorldEventInterest{};
         }
         // Projection shutdown waits for workers and belongs on the next normal
         // overlay/render frame, outside engine teardown.
@@ -128,45 +163,70 @@ ProjectionLevelListener gProjectionLevelListener;
 
 } // namespace
 
+void publishProjectionWorldEventInterest(WorldEventInterest interest) {
+    std::lock_guard lock(gPendingEventsMutex);
+    gWorldInterest = std::move(interest);
+}
+
 void attachProjectionWorldEvents(Level& level, BlockSource& blockSource) {
+    std::lock_guard lifecycleLock(gWorldLifecycleMutex);
     if (auto* attached = gAttachedBlockSource.load(std::memory_order_acquire);
         attached != &blockSource) {
+        auto retire = [] {
+            std::lock_guard lock(gPendingEventsMutex);
+            gAttachedBlockSource.store(nullptr, std::memory_order_release);
+            gAttachedChunkSource.store(nullptr, std::memory_order_release);
+            gWorldEventFailure.advance();
+            gIncomingBlockChanges.clear();
+            gIncomingLoadedSubChunks.clear();
+        };
         if (attached) {
-            attached->removeListener(gProjectionBlockSourceListener);
+            app::detachAndRetireListener(attached,
+                [](BlockSource& previous) { previous.removeListener(gProjectionBlockSourceListener); }, retire);
+        } else {
+            retire();
         }
         blockSource.addListener(gProjectionBlockSourceListener);
         gAttachedBlockSource.store(&blockSource, std::memory_order_release);
     }
     gAttachedChunkSource.store(&blockSource.getChunkSource(), std::memory_order_release);
+    gDimensionSourceDestroyed.store(false, std::memory_order_release);
     if (auto* attached = gAttachedLevel.load(std::memory_order_acquire); attached != &level) {
-        if (attached) {
-            attached->removeListener(gProjectionLevelListener);
-        }
+        app::detachAndRetireListener(attached,
+            [](Level& previous) { previous.removeListener(gProjectionLevelListener); },
+            [] { gAttachedLevel.store(nullptr, std::memory_order_release); });
         level.addListener(gProjectionLevelListener);
         gAttachedLevel.store(&level, std::memory_order_release);
     }
 }
 
 void detachProjectionDimensionEvents() {
+    std::lock_guard lifecycleLock(gWorldLifecycleMutex);
     gAttachedChunkSource.store(nullptr, std::memory_order_release);
-    if (auto* blockSource = gAttachedBlockSource.exchange(nullptr, std::memory_order_acq_rel)) {
-        blockSource->removeListener(gProjectionBlockSourceListener);
-    }
+    app::detachAndRetireListener(gAttachedBlockSource.load(std::memory_order_acquire),
+        [](BlockSource& previous) { previous.removeListener(gProjectionBlockSourceListener); },
+        [] { gAttachedBlockSource.store(nullptr, std::memory_order_release); });
     std::lock_guard lock(gPendingEventsMutex);
+    gWorldEventFailure.advance();
     gIncomingBlockChanges.clear();
     gIncomingLoadedSubChunks.clear();
+    gDimensionSourceDestroyed.store(false, std::memory_order_release);
+    gWorldInterest = WorldEventInterest{};
 }
 
 void detachProjectionWorldEvents() {
     std::lock_guard lifecycleLock(gWorldLifecycleMutex);
-    if (auto* level = gAttachedLevel.exchange(nullptr, std::memory_order_acq_rel)) {
-        level->removeListener(gProjectionLevelListener);
-    }
+    // Keep authoritative Level destruction notification until dimension
+    // listeners are removed. A failed source removal must not leave a live
+    // source borrow without its world-exit lifetime barrier.
     detachProjectionDimensionEvents();
+    app::detachAndRetireListener(gAttachedLevel.load(std::memory_order_acquire),
+        [](Level& previous) { previous.removeListener(gProjectionLevelListener); },
+        [] { gAttachedLevel.store(nullptr, std::memory_order_release); });
     gWorldExitPending.store(false, std::memory_order_release);
 }
 
-std::mutex& projectionWorldLifecycleMutex() {
+std::recursive_mutex& projectionWorldLifecycleMutex() {
     return gWorldLifecycleMutex;
 }
 
@@ -178,48 +238,31 @@ bool consumeWorldExitRequest() {
     return gWorldExitPending.load(std::memory_order_acquire);
 }
 
+bool projectionDimensionSourceDestroyed() {
+    return gDimensionSourceDestroyed.load(std::memory_order_acquire);
+}
+
+bool projectionWorldEventsFailed() { return gWorldEventFailure.failed(); }
+void markProjectionWorldEventsFailed() noexcept { gWorldEventFailure.mark(gWorldEventFailure.token()); }
+
 std::vector<PendingBlockChange> takePendingBlockChanges(std::size_t limit) {
     std::vector<PendingBlockChange> changes;
     {
         std::lock_guard lock(gPendingEventsMutex);
-        auto const count = std::min(limit, gIncomingBlockChanges.size());
-        changes.reserve(count);
-        for (std::size_t index = 0; index < count; ++index) {
-            changes.push_back(gIncomingBlockChanges.front());
-            gIncomingBlockChanges.pop_front();
-        }
+        changes = gIncomingBlockChanges.take(limit);
     }
     std::sort(changes.begin(), changes.end(), [](auto const& lhs, auto const& rhs) {
         return std::tie(lhs.position.x, lhs.position.y, lhs.position.z)
             < std::tie(rhs.position.x, rhs.position.y, rhs.position.z);
     });
-    std::vector<PendingBlockChange> merged;
-    merged.reserve(changes.size());
-    for (auto const& change : changes) {
-        if (!merged.empty()
-            && merged.back().position.x == change.position.x
-            && merged.back().position.y == change.position.y
-            && merged.back().position.z == change.position.z) {
-            // Preserve the latest destruction if one position changed more
-            // than once before this batch was consumed.
-            merged.back().destroyedAt = std::max(merged.back().destroyedAt, change.destroyedAt);
-            continue;
-        }
-        merged.push_back(change);
-    }
-    return merged;
+    return changes;
 }
 
 std::vector<SubChunkKey> takePendingLoadedSubChunks(std::size_t limit) {
     std::vector<SubChunkKey> loaded;
     {
         std::lock_guard lock(gPendingEventsMutex);
-        auto const count = std::min(limit, gIncomingLoadedSubChunks.size());
-        loaded.reserve(count);
-        for (std::size_t index = 0; index < count; ++index) {
-            loaded.push_back(gIncomingLoadedSubChunks.front());
-            gIncomingLoadedSubChunks.pop_front();
-        }
+        loaded = gIncomingLoadedSubChunks.take(limit);
     }
     return loaded;
 }

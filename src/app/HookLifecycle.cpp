@@ -5,17 +5,38 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 
 namespace lholo::app::hook_lifecycle {
 namespace {
 
-std::atomic<State>      gState{State::Disabled};
+constexpr unsigned kStateShift = 62;
+constexpr std::uint64_t kRunningCountMask = (std::uint64_t{1} << kStateShift) - 1;
+constexpr std::uint64_t encodedState(State state) noexcept {
+    return static_cast<std::uint64_t>(state) << kStateShift;
+}
+constexpr State decodedState(std::uint64_t value) noexcept {
+    return static_cast<State>(value >> kStateShift);
+}
+// State and admitted-body count share one atomic modification order. Closing
+// Running admission cannot race a count increment into a false zero snapshot.
+std::atomic_uint64_t    gRunningAdmission{encodedState(State::Disabled)};
 std::atomic_size_t      gActiveDetourThreads{};
 thread_local unsigned   gDetourDepth{};
 thread_local bool       gOuterRunning{};
 
 void notifyIfIdle(std::size_t previous) noexcept {
     if (previous == 1) gActiveDetourThreads.notify_all();
+}
+
+bool admitRunningBody() noexcept {
+    auto current = gRunningAdmission.load(std::memory_order_acquire);
+    while (decodedState(current) == State::Running) {
+        if ((current & kRunningCountMask) == kRunningCountMask) return false;
+        if (gRunningAdmission.compare_exchange_weak(current, current + 1,
+                std::memory_order_acq_rel, std::memory_order_acquire)) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -36,13 +57,17 @@ DetourGuard::DetourGuard() noexcept {
     gActiveDetourThreads.fetch_add(1, std::memory_order_acq_rel);
     gDetourDepth = 1;
     mOuterCounted = true;
-    gOuterRunning = gState.load(std::memory_order_acquire) == State::Running;
+    gOuterRunning = admitRunningBody();
     mRunning = gOuterRunning;
 }
 
 DetourGuard::~DetourGuard() {
     if (gDetourDepth != 0) --gDetourDepth;
     if (!mOuterCounted) return;
+    if (mRunning) {
+        auto const previous = gRunningAdmission.fetch_sub(1, std::memory_order_acq_rel);
+        if ((previous & kRunningCountMask) == 1) gRunningAdmission.notify_all();
+    }
     gOuterRunning = false;
     notifyIfIdle(gActiveDetourThreads.fetch_sub(1, std::memory_order_acq_rel));
 }
@@ -52,10 +77,10 @@ bool beginEnable() noexcept {
     // become a newly-admitted Running callback.
     if (gActiveDetourThreads.load(std::memory_order_acquire) != 0) return false;
 
-    auto expected = State::Disabled;
-    if (!gState.compare_exchange_strong(
+    auto expected = encodedState(State::Disabled);
+    if (!gRunningAdmission.compare_exchange_strong(
             expected,
-            State::Running,
+            encodedState(State::Running),
             std::memory_order_acq_rel,
             std::memory_order_acquire
         )) {
@@ -67,13 +92,20 @@ bool beginEnable() noexcept {
 }
 
 void beginQuiesce() noexcept {
-    auto expected = State::Running;
-    (void)gState.compare_exchange_strong(
-        expected,
-        State::Quiescing,
-        std::memory_order_acq_rel,
-        std::memory_order_acquire
-    );
+    auto current = gRunningAdmission.load(std::memory_order_acquire);
+    while (decodedState(current) == State::Running) {
+        auto const closed = encodedState(State::Quiescing) | (current & kRunningCountMask);
+        if (gRunningAdmission.compare_exchange_weak(current, closed,
+                std::memory_order_acq_rel, std::memory_order_acquire)) return;
+    }
+}
+
+void waitForRunningCallbacks() {
+    for (;;) {
+        auto const admission = gRunningAdmission.load(std::memory_order_acquire);
+        if ((admission & kRunningCountMask) == 0) return;
+        gRunningAdmission.wait(admission, std::memory_order_acquire);
+    }
 }
 
 void waitForQuiescence() {
@@ -89,11 +121,14 @@ void waitForQuiescence() {
 
 void markDisabled() noexcept {
     if (gActiveDetourThreads.load(std::memory_order_acquire) != 0) return;
-    gState.store(State::Disabled, std::memory_order_release);
+    auto current = gRunningAdmission.load(std::memory_order_acquire);
+    if ((current & kRunningCountMask) != 0) return;
+    (void)gRunningAdmission.compare_exchange_strong(current, encodedState(State::Disabled),
+        std::memory_order_acq_rel, std::memory_order_acquire);
 }
 
 bool isRunning() noexcept {
-    return gState.load(std::memory_order_acquire) == State::Running;
+    return decodedState(gRunningAdmission.load(std::memory_order_acquire)) == State::Running;
 }
 
 bool insideDetour() noexcept {
@@ -101,7 +136,7 @@ bool insideDetour() noexcept {
 }
 
 State state() noexcept {
-    return gState.load(std::memory_order_acquire);
+    return decodedState(gRunningAdmission.load(std::memory_order_acquire));
 }
 
 } // namespace lholo::app::hook_lifecycle

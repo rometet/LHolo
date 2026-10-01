@@ -6,22 +6,27 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "mc/deps/core/math/Vec3.h"
+
+class LocalPlayer;
+class Player;
 
 namespace lholo::place::detail {
 
 struct PlacementContext {
     Vec3  eye;
     float reachSquared;
-    int   eyeX;
-    int   eyeY;
-    int   eyeZ;
+    std::int64_t eyeX;
+    std::int64_t eyeY;
+    std::int64_t eyeZ;
     int   viewX;
     int   viewY;
     int   viewZ;
 };
 
-void tickEasyPlace();
+void tickEasyPlace(LocalPlayer& player);
 
 enum class ManualTargetStatus {
     None,
@@ -32,6 +37,6 @@ enum class ManualTargetStatus {
 // Fresh synchronous raytrace used by manual-mode hooks. Target detection and
 // inventory availability stay separate so a missing item is never reported as
 // an aiming failure or handed back to vanilla use-item handling.
-ManualTargetStatus manualTargetStatusUnderCrosshair();
+ManualTargetStatus manualTargetStatusUnderCrosshair(Player& localPlayer);
 
 } // namespace lholo::place::detail

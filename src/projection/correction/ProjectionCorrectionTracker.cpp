@@ -7,6 +7,9 @@
 // (at your option) any later version.
 
 #include "projection/correction/ProjectionCorrectionTracker.h"
+#include "projection/correction/ExtraCellRegistration.h"
+#include "app/NativeCallbackBoundary.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
 
 #include "block/BlockPlacementRules.h"
 #include "projection/core/ProjectionRules.h"
@@ -208,7 +211,12 @@ std::size_t ensureCorrectionSection(
         state.blockEntityPlaceholderSectionMeshes.resize(
             std::min(section, state.blockEntityPlaceholderSectionMeshes.size())
         );
-        return kInvalidSection;
+        app::reportNativeCallbackFailure("correction section creation", "section append failed; parallel storage rolled back");
+        // The caller has already advanced the extra-cell scan and may have
+        // published its HUD count. Returning an invalid section would leave
+        // this cell permanently without geometry in a stable world. Let the
+        // correction boundary invalidate the partial epoch instead.
+        throw;
     }
 }
 
@@ -415,8 +423,7 @@ CorrectionProgressChanges updateCorrectionTracker(
             );
             section = ensureCorrectionSection(state, localPosition, transformedPosition);
             if (section == kInvalidSection || !sectionStorageContains(state, section)) return;
-            state.extraBlockPositions.insert(key);
-            state.sectionExtraBlockPositions[section].insert(key);
+            registerExtraCell(state.extraBlockPositions, state.sectionExtraBlockPositions[section], key);
         } else {
             auto const sectionFound = state.localSectionIndices.find(localSectionKey(localPosition));
             if (sectionFound == state.localSectionIndices.end()) return;
@@ -467,11 +474,11 @@ CorrectionProgressChanges updateCorrectionTracker(
             ++correctionChecks;
             continue;
         }
-        BlockPos const transformed{
-            changedPosition.x - state.anchor.x - offsetX,
-            changedPosition.y - state.anchor.y - offsetY,
-            changedPosition.z - state.anchor.z - offsetZ,
-        };
+        auto const relative = checkedRelativeBlockCell(
+            {changedPosition.x, changedPosition.y, changedPosition.z},
+            {state.anchor.x, state.anchor.y, state.anchor.z}, {offsetX, offsetY, offsetZ});
+        if (!relative) continue; // A distant event cannot belong to the validated projection volume.
+        BlockPos const transformed{(*relative)[0], (*relative)[1], (*relative)[2]};
         auto const local = inverseTransformStructurePosition(
             transformed, *state.structure, mirrorMode, rotationTurns
         );
@@ -562,22 +569,23 @@ CorrectionProgressChanges updateCorrectionTracker(
         auto loaded = state.pendingLoadedSubChunks.begin();
         auto const [subChunkX, subChunkY, subChunkZ] = *loaded;
         state.pendingLoadedSubChunks.erase(loaded);
-        auto const minX = subChunkX * 16;
-        auto const minY = subChunkY * 16;
-        auto const minZ = subChunkZ * 16;
-        for (int x = minX; x < minX + 16; ++x) {
-            for (int y = minY; y < minY + 16; ++y) {
-                for (int z = minZ; z < minZ + 16; ++z) {
+        auto const bounds = checkedSubChunkBlockBounds({subChunkX, subChunkY, subChunkZ});
+        if (!bounds) return changes;
+        for (auto wideX = bounds->min[0]; wideX < bounds->max[0]; ++wideX) {
+            for (auto wideY = bounds->min[1]; wideY < bounds->max[1]; ++wideY) {
+                for (auto wideZ = bounds->min[2]; wideZ < bounds->max[2]; ++wideZ) {
+                    auto const x = static_cast<int>(wideX);
+                    auto const y = static_cast<int>(wideY);
+                    auto const z = static_cast<int>(wideZ);
                     auto const found = state.expectedWorldBlockIndices->find(std::tuple{x, y, z});
                     if (found != state.expectedWorldBlockIndices->end()) {
                         updateCorrection(found->second);
                         continue;
                     }
-                    BlockPos const transformed{
-                        x - state.anchor.x - offsetX,
-                        y - state.anchor.y - offsetY,
-                        z - state.anchor.z - offsetZ,
-                    };
+                    auto const relative = checkedRelativeBlockCell({x, y, z},
+                        {state.anchor.x, state.anchor.y, state.anchor.z}, {offsetX, offsetY, offsetZ});
+                    if (!relative) continue;
+                    BlockPos const transformed{(*relative)[0], (*relative)[1], (*relative)[2]};
                     auto const local = inverseTransformStructurePosition(
                         transformed, *state.structure, mirrorMode, rotationTurns
                     );

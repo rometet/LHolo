@@ -27,6 +27,7 @@ void drawHud(void* imguiContext) noexcept;
 void renderIndependent(void* device, void* deviceContext, void* window, bool guiVisible) noexcept;
 void forwardWindowMessage(void* window, unsigned message, std::uintptr_t wParam, std::intptr_t lParam) noexcept;
 void resetGraphics() noexcept;
-void shutdown() noexcept;
+bool beginSession() noexcept;
+bool shutdown() noexcept;
 
 } // namespace lholo::overlay::companion

@@ -419,41 +419,83 @@ std::vector<MaterialRequirement> StructureUiState::materialRequirements() const 
     return mMaterialRequirements;
 }
 
-void StructureUiState::replaceMaterialHudSnapshot(
-    std::vector<MaterialRequirement> materials,
-    std::vector<int>                 available
-) {
+std::uint64_t StructureUiState::materialHudRevision() const {
     std::lock_guard lock(mMaterialMutex);
-    mMaterialHudRequirements = std::move(materials);
-    mMaterialHudAvailability = std::move(available);
-    mMaterialHudReady = true;
+    return mMaterialHudRevision;
 }
 
-void StructureUiState::setMaterialHudAvailability(std::vector<int> counts) {
-    std::lock_guard lock(mMaterialMutex);
-    mMaterialHudAvailability = std::move(counts);
+bool StructureUiState::replaceMaterialHudSnapshot(
+    std::vector<MaterialRequirement> materials,
+    std::vector<int>                 available,
+    std::optional<std::uint64_t>     expectedRevision
+) {
+    auto next = std::make_shared<MaterialHudSnapshot>(
+        MaterialHudSnapshot{std::move(materials), std::move(available), true, 0});
+    std::shared_ptr<MaterialHudSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if (expectedRevision && *expectedRevision != mMaterialHudRevision) return false;
+        next->revision = ++mMaterialHudRevision;
+        retired = std::move(mMaterialHud);
+        mMaterialHud = std::move(next);
+    }
+    return true;
+}
+
+bool StructureUiState::setMaterialHudAvailability(std::uint64_t revision, std::vector<int> counts) {
+    auto const previous = materialHudView();
+    if (!previous || revision != previous->revision
+        || counts.size() != previous->requirements.size()) return false;
+    // Copy on the publishing tick, outside the mutex. The revision identifies
+    // immutable requirements; concurrent availability publications for those
+    // same requirements may still commit in their normal mutex order.
+    auto next = std::make_shared<MaterialHudSnapshot>(*previous);
+    next->available = std::move(counts);
+    std::shared_ptr<MaterialHudSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if (revision != mMaterialHudRevision || !mMaterialHud) return false;
+        retired = std::move(mMaterialHud);
+        mMaterialHud = std::move(next);
+    }
+    return true;
 }
 
 MaterialHudSnapshot StructureUiState::materialHudSnapshot() const {
+    std::shared_ptr<MaterialHudSnapshot const> current;
+    std::uint64_t revision;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        current = mMaterialHud;
+        revision = mMaterialHudRevision;
+    }
+    return current ? *current : MaterialHudSnapshot{{}, {}, false, revision};
+}
+
+std::shared_ptr<MaterialHudSnapshot const> StructureUiState::materialHudView() const {
     std::lock_guard lock(mMaterialMutex);
-    return {mMaterialHudRequirements, mMaterialHudAvailability, mMaterialHudReady};
+    return mMaterialHud;
 }
 
 void StructureUiState::clearMaterialHud() {
-    std::lock_guard lock(mMaterialMutex);
-    mMaterialHudRequirements.clear();
-    mMaterialHudAvailability.clear();
-    mMaterialHudReady = false;
+    std::shared_ptr<MaterialHudSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        retired = std::move(mMaterialHud);
+        ++mMaterialHudRevision;
+    }
 }
 
 void StructureUiState::clearMaterials() {
     mMaterialListRequested.store(false, std::memory_order_release);
     mMaterialListReady.store(false, std::memory_order_release);
-    std::lock_guard lock(mMaterialMutex);
-    mMaterialRequirements.clear();
-    mMaterialHudRequirements.clear();
-    mMaterialHudAvailability.clear();
-    mMaterialHudReady = false;
+    std::shared_ptr<MaterialHudSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        mMaterialRequirements.clear();
+        retired = std::move(mMaterialHud);
+        ++mMaterialHudRevision;
+    }
 }
 
 void StructureUiState::resetWorldSession() {

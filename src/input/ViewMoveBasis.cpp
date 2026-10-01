@@ -4,6 +4,7 @@
 #include "input/ViewMoveBasis.h"
 
 #include <cmath>
+#include <limits>
 
 namespace lholo::input {
 namespace {
@@ -36,6 +37,7 @@ Facing facingFromYaw(float yawDegrees) {
 // is a contract guard for callers other than viewRelativeMoveStep (a facing
 // built from a yaw is always unit length, so it cannot be hit from there).
 ViewMoveStep dominantHorizontalStep(float x, float z, int sign) {
+    if (!std::isfinite(x) || !std::isfinite(z)) return ViewMoveStep{};
     auto const magnitudeX = std::fabs(x);
     auto const magnitudeZ = std::fabs(z);
     if (magnitudeX == 0.0f && magnitudeZ == 0.0f) return ViewMoveStep{};
@@ -64,9 +66,17 @@ ViewMoveStep viewRelativeMoveStep(HotkeyId move, float yawDegrees) {
 
 ViewMoveStep viewForwardStep(float viewX, float viewY, float viewZ, int steps) {
     if (steps == 0) return ViewMoveStep{};
-    auto const dx = static_cast<int>(std::round(viewX)) * steps;
-    auto const dy = static_cast<int>(std::round(viewY)) * steps;
-    auto const dz = static_cast<int>(std::round(viewZ)) * steps;
+    auto const x = std::round(static_cast<double>(viewX)) * steps;
+    auto const y = std::round(static_cast<double>(viewY)) * steps;
+    auto const z = std::round(static_cast<double>(viewZ)) * steps;
+    auto const representable = [](double value) {
+        return std::isfinite(value) && value >= (std::numeric_limits<int>::min)()
+            && value <= (std::numeric_limits<int>::max)();
+    };
+    if (!representable(x) || !representable(y) || !representable(z)) return ViewMoveStep{};
+    auto const dx = static_cast<int>(x);
+    auto const dy = static_cast<int>(y);
+    auto const dz = static_cast<int>(z);
     if (dx == 0 && dy == 0 && dz == 0) return ViewMoveStep{};
     return ViewMoveStep{dx, dy, dz, true};
 }

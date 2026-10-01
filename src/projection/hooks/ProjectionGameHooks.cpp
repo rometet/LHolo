@@ -4,6 +4,7 @@
 #include "projection/hooks/ProjectionGameHooks.h"
 
 #include "app/HookLifecycle.h"
+#include "app/NativeCallbackBoundary.h"
 #include "overlay/ImGuiOverlay.h"
 #include "plugin/LHolo.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -74,7 +75,10 @@ LL_TYPE_INSTANCE_HOOK(
     if (!guard) return origin(position);
     try {
         if (auto const* block = findTessellationBlock(position)) return *block;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position);
 }
@@ -96,7 +100,10 @@ LL_TYPE_INSTANCE_HOOK(
         } else if (layer == 1) {
             if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
         }
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position, layer);
 }
@@ -113,7 +120,10 @@ LL_TYPE_INSTANCE_HOOK(
     if (!guard) return origin(position);
     try {
         if (auto const* liquid = findTessellationLiquid(position)) return *liquid;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position);
 }
@@ -130,7 +140,10 @@ LL_TYPE_INSTANCE_HOOK(
     if (!guard) return origin(position);
     try {
         if (auto const* actor = findTessellationBlockActor(position)) return actor;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position);
 }
@@ -156,7 +169,10 @@ LL_TYPE_INSTANCE_HOOK(
     if (!guard) return origin(position, block, updateFlags, syncMsg, changeSourceContext);
     try {
         if (regionWritesSuppressed()) return true;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position, block, updateFlags, syncMsg, changeSourceContext);
 }
@@ -184,7 +200,10 @@ LL_TYPE_INSTANCE_HOOK(
     }
     try {
         if (regionWritesSuppressed()) return true;
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection world hook", exception.what());
     } catch (...) {
+        app::reportNativeCallbackFailure("projection world hook", "unknown C++ exception");
     }
     return origin(position, block, updateFlags, blockEntity, syncMsg, changeSourceContext);
 }
@@ -205,8 +224,10 @@ LL_TYPE_INSTANCE_HOOK(
     bool consumed{};
     try {
         consumed = filterProjectionPacket(packet);
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection packet filter", exception.what());
     } catch (...) {
-        consumed = false;
+        app::reportNativeCallbackFailure("projection packet filter", "unknown C++ exception");
     }
     if (!consumed) origin(packet);
 }
@@ -227,8 +248,10 @@ LL_TYPE_INSTANCE_HOOK(
     bool consumed{};
     try {
         consumed = filterProjectionPacket(packet);
+    } catch (std::exception const& exception) {
+        app::reportNativeCallbackFailure("projection packet filter", exception.what());
     } catch (...) {
-        consumed = false;
+        app::reportNativeCallbackFailure("projection packet filter", "unknown C++ exception");
     }
     if (!consumed) origin(packet);
 }

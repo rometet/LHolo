@@ -1,3 +1,4 @@
+#include "render/RenderCameraPosition.h"
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
@@ -12,6 +13,7 @@
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
 #include "projection/mesh/ProjectionRenderer.h"
@@ -28,6 +30,7 @@
 #include "plugin/LHolo.h"
 #include "structure/capture/StructureCapture.h"
 #include "structure/StructureLoader.h"
+#include "structure/StructureSession.h"
 
 #include <algorithm>
 #include <cmath>
@@ -59,38 +62,8 @@ namespace lholo::projection::detail {
 namespace {
 
 Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
-    // 1.26.40 no longer exports BaseActorRenderContext::getCameraPosition(), and
-    // its backing member mCameraPosition moved into the opaque Impl together
-    // with mCameraTargetPosition/mWorldClipRegion. The generated header exposes
-    // no accessor, so the position is read back from Impl.
-    //
-    // Verified in game: float slots 10..12 mirror the eye position every frame
-    // (they tracked the player exactly), while mce::Camera::mPosition reads 0
-    // for both the ScreenContext camera and IClientInstance::getCamera().
-    auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
-    if (!impl) return {};
-
-    // mImpl is opaque in 1.26.x. Validate that the full span containing the
-    // three verified camera floats is readable before touching it, so a stale
-    // render context during teardown fails closed instead of AVing.
-    MEMORY_BASIC_INFORMATION memory{};
-    if (VirtualQuery(impl, &memory, sizeof(memory)) != sizeof(memory)
-        || memory.State != MEM_COMMIT
-        || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-        return {};
-    }
-    auto const begin = reinterpret_cast<std::uintptr_t>(impl);
-    auto const end = begin + 13U * sizeof(float);
-    auto const regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress)
-        + memory.RegionSize;
-    if (end < begin || end > regionEnd) return {};
-
-    Vec3 const camera{impl[10], impl[11], impl[12]};
-    if (!std::isfinite(camera.x) || !std::isfinite(camera.y)
-        || !std::isfinite(camera.z)) {
-        return {};
-    }
-    return camera;
+    auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
+    return camera ? Vec3{camera->x, camera->y, camera->z} : Vec3{};
 }
 
 void resetWorldAfterExit() {
@@ -125,11 +98,13 @@ bool enableStructureProjection(
         auto const& position = player->getPosition();
         // Player position is the feet/air cell. Default a newly loaded
         // structure to the supporting ground cell directly below it.
-        next.anchor = BlockPos(
-            std::floor(position.x),
-            std::floor(position.y) - 1,
-            std::floor(position.z)
-        );
+        auto const cell = checkedBlockCell({position.x, position.y, position.z}, 1);
+        if (!cell) {
+            logger().error("Projection activation rejected an invalid player position");
+            structure::showActionHint(i18n::Message{i18n::TextKey::StatusCoordinatesInvalid});
+            return false;
+        }
+        next.anchor = BlockPos{(*cell)[0], (*cell)[1] - 1, (*cell)[2]};
     }
     state = std::move(next);
     state.enabled = true;
@@ -147,6 +122,16 @@ bool enableStructureProjection(
         state.asyncMeshBuildingEnabled = false;
         disableMeshWorkerForSession();
         logger().warn("Projection mesh worker initialization failed; using synchronous fallback");
+    }
+    auto const transform = structure::detail::StructureSession::getInstance().transform();
+    if (auto const origin = checkedProjectionOrigin({state.anchor.x, state.anchor.y, state.anchor.z},
+            {transform.offsetX, transform.offsetY, transform.offsetZ},
+            {state.structure->sizeX, state.structure->sizeY, state.structure->sizeZ}, transform.rotation)) {
+        publishProjectionWorldEventInterest(makeProjectionWorldEventInterest(
+            *state.structure, *origin, transform.mirror, transform.rotation
+        ));
+    } else {
+        publishProjectionWorldEventInterest(WorldEventInterest{});
     }
     attachProjectionWorldEvents(player->getLevel(), player->getDimensionBlockSource());
     initializePublishedBuildProgress(state.structure->renderBlocks.size());
@@ -196,8 +181,9 @@ void renderProjection(
     auto& tessellator = renderContext.mScreenContext.tessellator;
     Vec3 const camera = renderCameraPosition(renderContext);
     if (!renderAlphaLayer) {
-        auto const mirrorMode = structure::getMirrorMode();
-        auto const rotationTurns = structure::getRotationQuarterTurns();
+        auto const transform = structure::detail::StructureSession::getInstance().transform();
+        auto const mirrorMode = transform.mirror;
+        auto const rotationTurns = transform.rotation;
         auto const mirror = getProjectionMirror(mirrorMode);
         auto const rotation = getProjectionRotation(rotationTurns);
         LegacyStructureSettings transformSettings{
@@ -207,11 +193,25 @@ void renderProjection(
             BoundingBox{}
         };
         bool const identityTransform = mirrorMode == 0 && rotationTurns == 0;
-        auto const offsetX = structure::getOffsetX();
-        auto const offsetY = structure::getOffsetY();
-        auto const offsetZ = structure::getOffsetZ();
-        auto const layerDisplayMode = structure::getLayerDisplayMode();
-        auto const layerAxis = structure::getLayerAxis();
+        auto const offsetX = transform.offsetX;
+        auto const offsetY = transform.offsetY;
+        auto const offsetZ = transform.offsetZ;
+        auto const layerDisplayMode = transform.layerDisplayMode;
+        auto const layerAxis = transform.layerAxis;
+        auto const origin = checkedProjectionOrigin(
+            {state.anchor.x, state.anchor.y, state.anchor.z},
+            {offsetX, offsetY, offsetZ},
+            {state.structure->sizeX, state.structure->sizeY, state.structure->sizeZ}, rotationTurns
+        );
+        if (!origin) {
+            if (!state.placementCoordinatesInvalid) {
+                logger().error("Projection origin/extent exceeds the int-coordinate domain; adjust its offset");
+                structure::showActionHint(i18n::Message{i18n::TextKey::StatusCoordinatesInvalid});
+            }
+            state.placementCoordinatesInvalid = true;
+            return;
+        }
+        state.placementCoordinatesInvalid = false;
         auto const maxLayer = layerAxis == structure::LayerAxis::Material
             ? std::max(0, static_cast<int>(state.structure->materialCount) - 1)
             : std::max(
@@ -220,7 +220,7 @@ void renderProjection(
                     ? state.structure->sizeX : state.structure->sizeY) - 1
             );
         auto const displayLayer = std::clamp(
-            structure::getDisplayLayer(), 0, maxLayer
+            transform.displayLayer, 0, maxLayer
         );
         auto& session = ProjectionSession::getInstance();
         auto const structureOpacity = session.opacity();
@@ -292,15 +292,15 @@ void renderProjection(
     // The alpha callback can arrive while the opaque callback is still
     // incrementally constructing the initial placement snapshot. Do not render
     // or schedule against a partial virtual world.
-    if (state.placementBuildActive) return;
+    if (state.placementBuildActive || state.placementCoordinatesInvalid) return;
 
     // Keep vanilla world queries at their real BlockPos, but do not upload large
     // absolute coordinates to the GPU. Render vertices relative to the projection
     // origin, matching the strategy used by chunk meshes.
     BlockPos const renderOrigin{
-        state.anchor.x + structure::getOffsetX(),
-        state.anchor.y + structure::getOffsetY(),
-        state.anchor.z + structure::getOffsetZ()
+        state.anchor.x + state.cachedOffsetX,
+        state.anchor.y + state.cachedOffsetY,
+        state.anchor.z + state.cachedOffsetZ
     };
     auto const structureOpacity = ProjectionSession::getInstance().opacity();
 
@@ -328,7 +328,7 @@ void renderProjection(
         return;
     }
 
-    if (!state.meshPreflightDone) {
+    if (state.meshDiagnosticGate.inspect(!state.meshPreflightDone, GetTickCount64())) {
         auto const countValid = [](auto const& meshes) {
             return std::count_if(meshes.begin(), meshes.end(), [](auto const& mesh) {
                 return mesh && mesh->isValid();
@@ -478,13 +478,14 @@ void renderProjection(
 } // namespace
 
 bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
+    if (projectionWorldEventsFailed()) return false;
     return ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe&) {
-            if (state.enabled && state.structure) {
+            if (state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive) {
                 auto const found = state.expectedWorldBlockIndices->find(
                     std::tuple{pos.x, pos.y, pos.z}
                 );
-                if (found != state.expectedWorldBlockIndices->end()) {
+                if (found != state.expectedWorldBlockIndices->end() && found->second < state.correctionStates.size()) {
                     auto const correctionState = state.correctionStates[found->second];
                     if (correctionState == CorrectionState::WrongType
                         || correctionState == CorrectionState::WrongState) {
@@ -495,11 +496,13 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
                         return true;
                     }
                 }
-                BlockPos const transformed{
-                    pos.x - state.anchor.x - state.cachedOffsetX,
-                    pos.y - state.anchor.y - state.cachedOffsetY,
-                    pos.z - state.anchor.z - state.cachedOffsetZ,
-                };
+                auto const x = static_cast<std::int64_t>(pos.x) - state.anchor.x - state.cachedOffsetX;
+                auto const y = static_cast<std::int64_t>(pos.y) - state.anchor.y - state.cachedOffsetY;
+                auto const z = static_cast<std::int64_t>(pos.z) - state.anchor.z - state.cachedOffsetZ;
+                auto const sizeX = state.cachedRotation & 1 ? state.structure->sizeZ : state.structure->sizeX;
+                auto const sizeZ = state.cachedRotation & 1 ? state.structure->sizeX : state.structure->sizeZ;
+                if (x < 0 || x >= sizeX || y < 0 || y >= state.structure->sizeY || z < 0 || z >= sizeZ) return false;
+                BlockPos const transformed{static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)};
                 auto const local = inverseTransformStructurePosition(
                     transformed,
                     *state.structure,
@@ -529,6 +532,18 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
     }
     ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe& captureBounds) {
+            // The Level listener already joins mesh workers before destruction.
+            // In-progress render calls need the same lifetime barrier: merely
+            // checking an exit flag before a frame leaves a teardown/use gap.
+            std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+            if (consumeWorldExitRequest()) {
+                worldExitPending = true;
+                return;
+            }
+            if (projectionDimensionSourceDestroyed() && state.enabled) {
+                suspendProjectionDimension(state);
+                return;
+            }
             if (auto const bounds = structure::capture::getBounds()) {
                 captureBounds.setBounds(
                     BlockPos{bounds->min.x, bounds->min.y, bounds->min.z},
@@ -590,6 +605,11 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
             }
 
             if (!state.enabled) return;
+            if (projectionWorldEventsFailed()) {
+                structure::detail::StructureSession::getInstance().setStatus(
+                    i18n::Message{i18n::TextKey::StatusWorldEventsFailed});
+                return;
+            }
             auto& client = renderContext.mClientInstance;
             auto const contextStatus = classifyProjectionContext(
                 state,

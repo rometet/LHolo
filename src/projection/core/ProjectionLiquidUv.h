@@ -1,7 +1,7 @@
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 //
-// Pure UV0 remapping used by the retained native-liquid experiment. The
+// Pure UV0 remapping shared by retained and Praxis compatibility liquids. The
 // caller supplies the typed atlas rectangle obtained from BlockGraphics; this
 // helper has no atlas lookup, renderer ownership or Minecraft ABI dependency.
 
@@ -57,6 +57,30 @@ bool remapNativeLiquidUvToAtlas(
         {{1.0f, 1.0f}},
         {{0.0f, 1.0f}},
     }};
+    auto const mapCoordinate = [](float value, float minimum, float maximum,
+                                  float targetMinimum, float targetMaximum, float fallback) {
+        auto const span = maximum - minimum;
+        auto normalized = fallback;
+        if (span > epsilon) {
+            if (std::isfinite(span)) {
+                normalized = std::clamp((value - minimum) / span, 0.0f, 1.0f);
+            } else {
+                normalized = static_cast<float>(std::clamp(
+                    (static_cast<double>(value) - minimum) / (static_cast<double>(maximum) - minimum),
+                    0.0, 1.0
+                ));
+            }
+        }
+        auto const targetSpan = targetMaximum - targetMinimum;
+        // Preserve the original float arithmetic for ordinary native atlas
+        // data. Finite endpoints can still have an infinite float difference;
+        // widen only that case so 0*inf and inf/inf never produce a UV NaN.
+        if (std::isfinite(targetSpan)) return targetMinimum + normalized * targetSpan;
+        auto const mapped = static_cast<double>(targetMinimum)
+            + normalized * (static_cast<double>(targetMaximum) - targetMinimum);
+        return static_cast<float>(std::clamp(mapped,
+            static_cast<double>(targetMinimum), static_cast<double>(targetMaximum)));
+    };
     for (std::size_t quad = 0; quad < uvs.size() / 4U; ++quad) {
         auto const first = quad * 4U;
         float minU = std::numeric_limits<float>::max();
@@ -77,20 +101,10 @@ bool remapNativeLiquidUvToAtlas(
             diagnostics->firstQuadMaxV = maxV;
         }
 
-        auto const spanU = maxU - minU;
-        auto const spanV = maxV - minV;
         for (std::size_t corner = 0; corner < 4U; ++corner) {
             auto& uv = uvs[first + corner];
-            auto normalizedU = canonicalCorners[corner][0];
-            auto normalizedV = canonicalCorners[corner][1];
-            if (spanU > epsilon) {
-                normalizedU = std::clamp((uv.x - minU) / spanU, 0.0f, 1.0f);
-            }
-            if (spanV > epsilon) {
-                normalizedV = std::clamp((uv.y - minV) / spanV, 0.0f, 1.0f);
-            }
-            uv.x = rect.u0 + normalizedU * (rect.u1 - rect.u0);
-            uv.y = rect.v0 + normalizedV * (rect.v1 - rect.v0);
+            uv.x = mapCoordinate(uv.x, minU, maxU, rect.u0, rect.u1, canonicalCorners[corner][0]);
+            uv.y = mapCoordinate(uv.y, minV, maxV, rect.v0, rect.v1, canonicalCorners[corner][1]);
         }
     }
     if (diagnostics) diagnostics->remappedVertices = uvs.size();

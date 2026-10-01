@@ -1,4 +1,6 @@
 #include "overlay/CompanionBridge.h"
+#include "app/NativeCallbackBoundary.h"
+#include "overlay/CompanionCallbackStore.h"
 
 #include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
@@ -7,100 +9,32 @@
 #include <Windows.h>
 #include <imgui.h>
 
-#include <atomic>
-#include <mutex>
-#include <thread>
 
 namespace lholo::overlay::companion {
 namespace {
 
-struct Registration {
-    void*              owner{};
-    unsigned           hotkey{};
-    DrawFn             drawGui{};
-    DrawFn             drawHud{};
-    HudNeededFn        hudNeeded{};
-    StateFn            stateChanged{};
-    RenderV3Fn         renderV3{};
-    WindowMessageV3Fn  windowMessageV3{};
-    GraphicsResetV3Fn  resetGraphicsV3{};
-    bool                independentRenderer{};
-};
-
-std::mutex       gMutex;
-Registration     gRegistration;
-std::atomic_bool gRegistered{};
-std::atomic_bool gVisible{};
-std::atomic_uint gReaders{};
-thread_local unsigned int gReaderDepth{};
+using detail::Registration;
+detail::CallbackStore gCallbacks;
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
 }
 
-struct CallbackLease {
-    Registration registration{};
-    bool active{};
-
-    CallbackLease() = default;
-    CallbackLease(Registration value, bool ownsReader)
-        : registration(value), active(ownsReader) {
-        if (active) ++gReaderDepth;
-    }
-    CallbackLease(CallbackLease const&) = delete;
-    CallbackLease& operator=(CallbackLease const&) = delete;
-    CallbackLease(CallbackLease&& other) noexcept
-        : registration(other.registration), active(other.active) {
-        other.active = false;
-    }
-    CallbackLease& operator=(CallbackLease&&) = delete;
-
-    ~CallbackLease() {
-        if (active) {
-            --gReaderDepth;
-            gReaders.fetch_sub(1, std::memory_order_release);
-        }
-    }
-};
-
-CallbackLease acquireCallbacks() noexcept {
-    std::lock_guard lock(gMutex);
-    if (!gRegistered.load(std::memory_order_acquire)) return {};
-    gReaders.fetch_add(1, std::memory_order_acq_rel);
-    return CallbackLease{gRegistration, true};
-}
-
-void waitForReaders() noexcept {
-    while (gReaders.load(std::memory_order_acquire) != 0) {
-        std::this_thread::yield();
-    }
-}
+auto acquireCallbacks() noexcept { return gCallbacks.acquire(); }
 
 bool setVisible(bool value) noexcept {
-    StateFn callback{};
-    {
-        std::lock_guard lock(gMutex);
-        if (!gRegistered.load(std::memory_order_acquire)) return false;
-        if (gVisible.load(std::memory_order_relaxed) == value) return true;
-        gVisible.store(value, std::memory_order_release);
-        callback = gRegistration.stateChanged;
-        if (callback) gReaders.fetch_add(1, std::memory_order_acq_rel);
-    }
-    if (callback) {
-        ++gReaderDepth;
-        callback(value);
-        --gReaderDepth;
-        gReaders.fetch_sub(1, std::memory_order_release);
+    auto lease = gCallbacks.changeVisibility(value);
+    if (!lease.active()) return false;
+    if (lease.changed && lease.registration.stateChanged) {
+        lease.registration.stateChanged(value);
     }
     return true;
 }
 
 bool hotkeyMatches(unsigned int key) noexcept {
-    std::lock_guard lock(gMutex);
-    return gRegistered.load(std::memory_order_acquire)
-        && gRegistration.hotkey == key;
+    auto lease = acquireCallbacks();
+    return lease.active() && lease.registration.hotkey == key;
 }
-
 bool registerProviderV2(
     void* owner,
     unsigned hotkey,
@@ -118,22 +52,19 @@ bool registerProviderV2(
         || ioSize != sizeof(ImGuiIO)
         || styleSize != sizeof(ImGuiStyle)
         || drawVertSize != sizeof(ImDrawVert)) {
-        logger().error(
+        app::invokeNativeCallback([&] { logger().error(
             "Companion GUI bridge rejected: ImGui ABI mismatch "
             "(version {} vs {}, io {} vs {}, style {} vs {}, vert {} vs {})",
             imguiVersion, IMGUI_VERSION_NUM,
             ioSize, sizeof(ImGuiIO),
             styleSize, sizeof(ImGuiStyle),
             drawVertSize, sizeof(ImDrawVert)
-        );
+        ); }, [](char const* reason) noexcept {
+            app::reportNativeCallbackFailure("companion ABI diagnostic", reason);
+        });
         return false;
     }
 
-    std::lock_guard lock(gMutex);
-    if (gRegistered.load(std::memory_order_acquire)
-        && gRegistration.owner != owner) {
-        return false;
-    }
     Registration next{};
     next.owner = owner;
     next.hotkey = hotkey;
@@ -141,10 +72,9 @@ bool registerProviderV2(
     next.drawHud = drawHud;
     next.hudNeeded = hudNeeded;
     next.stateChanged = stateChanged;
-    gRegistration = next;
-    gVisible.store(false, std::memory_order_release);
-    gRegistered.store(true, std::memory_order_release);
-    logger().info("Companion GUI bridge v2 registered");
+    if (!gCallbacks.publish(next)) return false;
+    app::invokeNativeCallback([] { logger().info("Companion GUI bridge v2 registered"); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("companion registration diagnostic", reason); });
     return true;
 }
 
@@ -160,11 +90,6 @@ bool registerProviderV3(
     if (!owner || !render || !windowMessage || !stateChanged || !resetGraphics || hotkey == 0)
         return false;
 
-    std::lock_guard lock(gMutex);
-    if (gRegistered.load(std::memory_order_acquire)
-        && gRegistration.owner != owner) {
-        return false;
-    }
     Registration next{};
     next.owner = owner;
     next.hotkey = hotkey;
@@ -174,61 +99,46 @@ bool registerProviderV3(
     next.windowMessageV3 = windowMessage;
     next.resetGraphicsV3 = resetGraphics;
     next.independentRenderer = true;
-    gRegistration = next;
-    gVisible.store(false, std::memory_order_release);
-    gRegistered.store(true, std::memory_order_release);
-    logger().info("Companion GUI bridge v3 registered (independent ImGui state)");
+    if (!gCallbacks.publish(next)) return false;
+    app::invokeNativeCallback([] { logger().info("Companion GUI bridge v3 registered (independent ImGui state)"); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("companion registration diagnostic", reason); });
+    return true;
+}
+
+bool retireProvider(void* owner, bool shutdown) noexcept {
+    auto retirement = gCallbacks.beginRetirement(owner, shutdown);
+    if (!retirement) return false;
+    gCallbacks.waitForReaders();
+    auto const& registration = retirement->registration;
+    if (retirement->wasVisible && registration.stateChanged) registration.stateChanged(false);
+    if (registration.resetGraphicsV3) registration.resetGraphicsV3();
+    gCallbacks.finishRetirement();
     return true;
 }
 
 bool unregisterProvider(void* owner) noexcept {
-    if (gReaderDepth != 0) return false;
-
-    StateFn stateChanged{};
-    GraphicsResetV3Fn resetGraphics{};
-    bool wasVisible{};
-    {
-        std::lock_guard lock(gMutex);
-        if (!gRegistered.load(std::memory_order_acquire)) return true;
-        if (!owner || gRegistration.owner != owner) return false;
-        gRegistered.store(false, std::memory_order_release);
-        wasVisible = gVisible.exchange(false, std::memory_order_acq_rel);
-        stateChanged = gRegistration.stateChanged;
-        resetGraphics = gRegistration.resetGraphicsV3;
-    }
-
-    waitForReaders();
-    if (wasVisible && stateChanged) stateChanged(false);
-    if (resetGraphics) resetGraphics();
-
-    {
-        std::lock_guard lock(gMutex);
-        if (gRegistration.owner == owner) gRegistration = {};
-    }
-    logger().info("Companion GUI bridge unregistered");
+    if (!retireProvider(owner, false)) return false;
+    app::invokeNativeCallback([] { logger().info("Companion GUI bridge unregistered"); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("companion retirement diagnostic", reason); });
     return true;
 }
 
 bool registeredFor(void* owner) noexcept {
-    std::lock_guard lock(gMutex);
-    return gRegistered.load(std::memory_order_acquire)
-        && gRegistration.owner == owner;
+    return owner && gCallbacks.registered(owner);
 }
-
 } // namespace
 
 bool isRegistered() noexcept {
-    return gRegistered.load(std::memory_order_acquire);
+    return gCallbacks.registered();
 }
 
 bool isVisible() noexcept {
-    return gRegistered.load(std::memory_order_acquire)
-        && gVisible.load(std::memory_order_acquire);
+    return gCallbacks.visible();
 }
 
 bool hudNeeded() noexcept {
     auto lease = acquireCallbacks();
-    return lease.active && lease.registration.hudNeeded
+    return lease.active() && lease.registration.hudNeeded
         && lease.registration.hudNeeded();
 }
 
@@ -237,9 +147,8 @@ bool inputCaptured() noexcept {
 }
 
 bool usesIndependentRenderer() noexcept {
-    std::lock_guard lock(gMutex);
-    return gRegistered.load(std::memory_order_acquire)
-        && gRegistration.independentRenderer;
+    auto lease = acquireCallbacks();
+    return lease.active() && lease.registration.independentRenderer;
 }
 
 bool handleHotkeyKeyDown(unsigned int key, bool repeated) noexcept {
@@ -258,14 +167,14 @@ void close() noexcept {
 
 void drawGui(void* imguiContext) noexcept {
     auto lease = acquireCallbacks();
-    if (!lease.active || lease.registration.independentRenderer
+    if (!lease.active() || lease.registration.independentRenderer
         || !isVisible() || !lease.registration.drawGui) return;
     lease.registration.drawGui(imguiContext);
 }
 
 void drawHud(void* imguiContext) noexcept {
     auto lease = acquireCallbacks();
-    if (!lease.active || lease.registration.independentRenderer
+    if (!lease.active() || lease.registration.independentRenderer
         || isVisible() || !lease.registration.drawHud) return;
     if (lease.registration.hudNeeded && !lease.registration.hudNeeded()) return;
     lease.registration.drawHud(imguiContext);
@@ -273,7 +182,7 @@ void drawHud(void* imguiContext) noexcept {
 
 void renderIndependent(void* device, void* deviceContext, void* window, bool guiVisible) noexcept {
     auto lease = acquireCallbacks();
-    if (!lease.active || !lease.registration.independentRenderer
+    if (!lease.active() || !lease.registration.independentRenderer
         || !lease.registration.renderV3) return;
     if (guiVisible != isVisible()) return;
     if (!guiVisible && lease.registration.hudNeeded && !lease.registration.hudNeeded()) return;
@@ -287,36 +196,20 @@ void forwardWindowMessage(
     std::intptr_t lParam
 ) noexcept {
     auto lease = acquireCallbacks();
-    if (!lease.active || !lease.registration.independentRenderer
+    if (!lease.active() || !lease.registration.independentRenderer
         || !lease.registration.windowMessageV3 || !isVisible()) return;
     lease.registration.windowMessageV3(window, message, wParam, lParam);
 }
 
 void resetGraphics() noexcept {
     auto lease = acquireCallbacks();
-    if (!lease.active || !lease.registration.independentRenderer
+    if (!lease.active() || !lease.registration.independentRenderer
         || !lease.registration.resetGraphicsV3) return;
     lease.registration.resetGraphicsV3();
 }
 
-void shutdown() noexcept {
-    StateFn stateChanged{};
-    GraphicsResetV3Fn resetGraphics{};
-    bool wasVisible{};
-    {
-        std::lock_guard lock(gMutex);
-        if (!gRegistered.load(std::memory_order_acquire)) return;
-        gRegistered.store(false, std::memory_order_release);
-        wasVisible = gVisible.exchange(false, std::memory_order_acq_rel);
-        stateChanged = gRegistration.stateChanged;
-        resetGraphics = gRegistration.resetGraphicsV3;
-    }
-    waitForReaders();
-    if (wasVisible && stateChanged) stateChanged(false);
-    if (resetGraphics) resetGraphics();
-    std::lock_guard lock(gMutex);
-    gRegistration = {};
-}
+bool beginSession() noexcept { return gCallbacks.beginSession(); }
+bool shutdown() noexcept { return retireProvider(nullptr, true); }
 } // namespace lholo::overlay::companion
 
 extern "C" __declspec(dllexport) bool __cdecl lholo_register_companion_gui_v2(

@@ -30,13 +30,15 @@ struct ViewMoveStep {
 // The dominant horizontal axis wins, so a step always changes exactly one
 // coordinate and diagonal facings never produce a diagonal step; ties (facing
 // exactly along a diagonal) resolve to X so the same facing is always the same
-// step.
+// step. Non-finite yaw values produce no horizontal step; vertical hotkeys
+// do not depend on yaw.
 [[nodiscard]] ViewMoveStep viewRelativeMoveStep(HotkeyId move, float yawDegrees);
 
 // Step along a view vector (the fixed Alt+wheel gesture). Unlike the hotkeys
 // above this keeps its own rule: pitch participates and every axis rounds
 // independently, so a diagonal view produces a diagonal step. `steps` is the
-// wheel's whole-notch count.
+// wheel's whole-notch count. Returns an invalid step when any resulting axis
+// is non-finite or cannot be represented by an int.
 [[nodiscard]] ViewMoveStep viewForwardStep(float viewX, float viewY, float viewZ, int steps);
 
 } // namespace lholo::input

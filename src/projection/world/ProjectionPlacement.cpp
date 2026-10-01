@@ -7,10 +7,14 @@
 // (at your option) any later version.
 
 #include "projection/world/ProjectionPlacement.h"
+#include "app/RetainedObject.h"
+#include "app/ScopeExit.h"
+#include "app/NativeCallbackBoundary.h"
 
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionVirtualWorld.h"
+#include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
 
 #include <algorithm>
@@ -99,36 +103,58 @@ bool rebuildProjectionPlacement(
     }
 
     if (restart) {
+        // Block queries/alpha rendering immediately. If preparation throws,
+        // force a complete restart on the next opaque pass rather than leaving
+        // cached settings paired with a partial virtual-world snapshot.
+        state.placementBuildActive = true;
+        bool prepared{};
+        app::ScopeExit retry([&]() noexcept {
+            if (!prepared) { state.cachedRotation = -1; state.cachedMirror = -1; }
+        });
+        publishProjectionWorldEventInterest(makeProjectionWorldEventInterest(
+            *state.structure, {state.anchor.x + settings.offsetX, state.anchor.y + settings.offsetY,
+                              state.anchor.z + settings.offsetZ}, settings.mirrorMode, settings.rotationTurns
+        ));
         // A moved placement keeps its local GPU geometry, but the virtual world
         // and correction lookup must follow the new world origin.
-        state.blockTessellator = std::make_unique<BlockTessellator>(&region);
+        auto blockTessellator = std::make_unique<BlockTessellator>(&region);
 
         // Publish a fresh snapshot, then populate it incrementally. No mesh
         // worker is scheduled until the snapshot is complete, so workers never
         // observe partially built maps.
-        state.expectedWorldBlocks = std::make_shared<ExpectedBlockMap>();
-        state.expectedWorldLiquids = std::make_shared<ExpectedLiquidMap>();
-        state.expectedWorldBlockActors = std::make_shared<ExpectedBlockActorMap>();
-        state.expectedWorldBlockIndices = std::make_shared<ExpectedBlockIndexMap>();
+        auto blocks = std::make_shared<ExpectedBlockMap>();
+        auto liquids = std::make_shared<ExpectedLiquidMap>();
+        auto actors = std::make_shared<ExpectedBlockActorMap>();
+        auto indices = std::make_shared<ExpectedBlockIndexMap>();
 
         auto const expectedCells = state.structure->renderBlocks.size();
-        state.expectedWorldBlocks->reserve(expectedCells);
-        state.expectedWorldLiquids->reserve(expectedCells);
-        state.expectedWorldBlockIndices->reserve(expectedCells);
-        state.expectedWorldBlockActors->reserve(std::min<std::size_t>(
+        blocks->reserve(expectedCells);
+        liquids->reserve(expectedCells);
+        indices->reserve(expectedCells);
+        actors->reserve(std::min<std::size_t>(
             expectedCells, 1024
         ));
+        std::vector<Vec3> centerSums(state.sections.size());
+        std::vector<std::size_t> centerCounts(state.sections.size());
 
+        // All allocations succeeded. Retire borrowed records before owners;
+        // the following publication uses only nonthrowing moves/clears.
         state.projectedBlockActors.clear();
+        state.blockTessellator = std::move(blockTessellator);
+        state.expectedWorldBlocks = std::move(blocks);
+        state.expectedWorldLiquids = std::move(liquids);
+        state.expectedWorldBlockActors = std::move(actors);
+        state.expectedWorldBlockIndices = std::move(indices);
         std::fill(
             state.blockActorRendererAvailable.begin(),
             state.blockActorRendererAvailable.end(),
             0
         );
-        state.placementCenterSums.assign(state.sections.size(), Vec3{});
-        state.placementCenterCounts.assign(state.sections.size(), 0);
+        state.placementCenterSums = std::move(centerSums);
+        state.placementCenterCounts = std::move(centerCounts);
         state.placementBuildCursor = 0;
         state.placementBuildActive = true;
+        prepared = true;
     }
 
     if (!state.placementBuildActive) return true;
@@ -150,6 +176,7 @@ bool rebuildProjectionPlacement(
             // Hidden layers behave like completed cells for mesh generation,
             // but are excluded from the world lookup below.
             state.correctionStates[index] = CorrectionState::Correct;
+            state.placementBuildCursor = index + 1;
             continue;
         }
         auto const transformed = transformStructurePosition(
@@ -178,9 +205,12 @@ bool rebuildProjectionPlacement(
                             blockActor->load(*state.level, *entry.blockEntityNbt, dataLoadHelper);
                             blockActor->mPosition = worldPosition;
                         }
-                        auto* actor = blockActor.get();
-                        state.expectedWorldBlockActors->emplace(worldKey, std::move(blockActor));
-                        auto* renderComponent = actor->_getRenderComponent();
+                        auto const retained = app::retainOwnedObject(
+                            *state.expectedWorldBlockActors, worldKey, std::move(blockActor)
+                        );
+                        auto* actor = retained.first;
+                        auto* renderComponent = state.blockActorRendererAvailable[index]
+                            ? nullptr : actor->_getRenderComponent();
                         if (renderComponent) {
                             auto const rendererId = renderComponent->getRendererId();
                             auto const rendererIndex = static_cast<unsigned int>(rendererId);
@@ -194,10 +224,13 @@ bool rebuildProjectionPlacement(
                             }
                         }
                     }
+                } catch (std::exception const& exception) {
+                    app::reportNativeCallbackFailure("projected block actor", exception.what());
                 } catch (...) {
                     // Block-entity NBT is file-controlled. A malformed or
                     // version-incompatible actor must not unwind through the
                     // render hook; the ghost block itself remains renderable.
+                    app::reportNativeCallbackFailure("projected block actor", "unknown C++ exception");
                 }
             }
         }
@@ -222,6 +255,9 @@ bool rebuildProjectionPlacement(
             };
             ++state.placementCenterCounts[section];
         }
+        // Earlier successful cells must not be replayed/count their centers
+        // twice if a later cell's map allocation fails in this frame.
+        state.placementBuildCursor = index + 1;
     }
 
     state.placementBuildCursor = end;

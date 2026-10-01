@@ -124,7 +124,10 @@ void StructureSession::clearLoaded(i18n::Message status) {
     mStatus = std::move(status);
 }
 
-StructureTransformSnapshot StructureSession::transform() const { return transformRelaxed(); }
+StructureTransformSnapshot StructureSession::transform() const {
+    std::lock_guard lock(mMutex);
+    return transformRelaxed();
+}
 
 bool StructureSession::layerDisplayEnabled() const {
     return layerDisplayModeFromInt(mLayerDisplayMode.load(std::memory_order_acquire))
@@ -132,6 +135,7 @@ bool StructureSession::layerDisplayEnabled() const {
 }
 
 void StructureSession::resetTransform() {
+    std::lock_guard lock(mMutex);
     mRotationQuarterTurns.store(0, std::memory_order_relaxed);
     mMirrorMode.store(0, std::memory_order_relaxed);
     mOffsetX.store(0, std::memory_order_relaxed);
@@ -142,37 +146,43 @@ void StructureSession::resetTransform() {
     mLayerAxis.store(0, std::memory_order_relaxed);
 }
 
-bool StructureSession::setRotation(int value) { return exchangeIfChanged(mRotationQuarterTurns, value); }
-bool StructureSession::setMirror(int value) { return exchangeIfChanged(mMirrorMode, value); }
-bool StructureSession::setOffsetX(int value) { return exchangeIfChanged(mOffsetX, value); }
-bool StructureSession::setOffsetY(int value) { return exchangeIfChanged(mOffsetY, value); }
-bool StructureSession::setOffsetZ(int value) { return exchangeIfChanged(mOffsetZ, value); }
+bool StructureSession::setRotation(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mRotationQuarterTurns, value & 3); }
+bool StructureSession::setMirror(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mMirrorMode, std::clamp(value, 0, 2)); }
+bool StructureSession::setOffsetX(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mOffsetX, value); }
+bool StructureSession::setOffsetY(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mOffsetY, value); }
+bool StructureSession::setOffsetZ(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mOffsetZ, value); }
 bool StructureSession::setLayerDisplayMode(LayerDisplayMode value) {
+    std::lock_guard lock(mMutex);
     return exchangeIfChanged(mLayerDisplayMode, toInt(value));
 }
-bool StructureSession::setDisplayLayer(int value) { return exchangeIfChanged(mDisplayLayer, value); }
+bool StructureSession::setDisplayLayer(int value) { std::lock_guard lock(mMutex); return exchangeIfChanged(mDisplayLayer, value); }
 bool StructureSession::setLayerAxis(LayerAxis value) {
+    std::lock_guard lock(mMutex);
     return exchangeIfChanged(mLayerAxis, toInt(value));
 }
 
 void StructureSession::adjustOffsets(int deltaX, int deltaY, int deltaZ) {
-    if (deltaX != 0) setOffsetX(addClamped(mOffsetX.load(std::memory_order_relaxed), deltaX));
-    if (deltaY != 0) setOffsetY(addClamped(mOffsetY.load(std::memory_order_relaxed), deltaY));
-    if (deltaZ != 0) setOffsetZ(addClamped(mOffsetZ.load(std::memory_order_relaxed), deltaZ));
+    std::lock_guard lock(mMutex);
+    if (deltaX != 0) mOffsetX.store(addClamped(mOffsetX.load(std::memory_order_relaxed), deltaX), std::memory_order_relaxed);
+    if (deltaY != 0) mOffsetY.store(addClamped(mOffsetY.load(std::memory_order_relaxed), deltaY), std::memory_order_relaxed);
+    if (deltaZ != 0) mOffsetZ.store(addClamped(mOffsetZ.load(std::memory_order_relaxed), deltaZ), std::memory_order_relaxed);
 }
 
 bool StructureSession::adjustDisplayLayer(int delta) {
+    std::lock_guard lock(mMutex);
     if (delta == 0 || layerDisplayModeFromInt(mLayerDisplayMode.load(std::memory_order_relaxed))
         == LayerDisplayMode::All) return false;
     auto const axis = layerAxisFromInt(mLayerAxis.load(std::memory_order_relaxed));
     auto       maxLayer = 0;
     {
-        std::lock_guard lock(mMutex);
         if (mLoaded) {
             maxLayer = axis == LayerAxis::Material
-                ? static_cast<int>(mLoaded->materialCount)
+                ? static_cast<int>(std::min<std::uint64_t>(
+                      mLoaded->materialCount,
+                      static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+                  ))
                 : maxLayerFor(*mLoaded, axis);
-            if (maxLayer > 0) --maxLayer;
+            if (axis == LayerAxis::Material && maxLayer > 0) --maxLayer;
         }
     }
     auto const current = static_cast<long long>(mDisplayLayer.load(std::memory_order_relaxed));
@@ -192,8 +202,8 @@ void StructureSession::setSavedProjection(SavedProjectionSnapshot const& saved) 
     mSavedAnchorX.store(saved.anchorX, std::memory_order_relaxed);
     mSavedAnchorY.store(saved.anchorY, std::memory_order_relaxed);
     mSavedAnchorZ.store(saved.anchorZ, std::memory_order_relaxed);
-    mSavedRotation.store(saved.transform.rotation, std::memory_order_relaxed);
-    mSavedMirror.store(saved.transform.mirror, std::memory_order_relaxed);
+    mSavedRotation.store(saved.transform.rotation & 3, std::memory_order_relaxed);
+    mSavedMirror.store(std::clamp(saved.transform.mirror, 0, 2), std::memory_order_relaxed);
     mSavedOffsetX.store(saved.transform.offsetX, std::memory_order_relaxed);
     mSavedOffsetY.store(saved.transform.offsetY, std::memory_order_relaxed);
     mSavedOffsetZ.store(saved.transform.offsetZ, std::memory_order_relaxed);

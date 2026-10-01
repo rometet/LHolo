@@ -17,7 +17,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale);
 
 void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale);
 
-MenuActions buildStructureMenuActions(bool& refreshModel);
+MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureRevision);
 
 void renderStructureMenu();
 

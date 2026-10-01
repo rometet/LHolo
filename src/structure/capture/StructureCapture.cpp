@@ -2,29 +2,53 @@
 
 #include "i18n/Message.h"
 #include "structure/capture/McstructureExporter.h"
+#include "structure/capture/CaptureBounds.h"
+#include "structure/capture/CaptureRequests.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
+#include "app/ListenerRetirement.h"
 
 #include <algorithm>
 #include <mutex>
 
-#include "ll/api/service/Bedrock.h"
-#include "mc/client/game/ClientInstance.h"
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/world/level/BlockPos.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/Level.h"
+#include "mc/world/level/LevelListener.h"
 #include "mc/world/level/dimension/Dimension.h"
 #include "mc/world/level/levelgen/structure/BoundingBox.h"
 #include "mc/world/level/levelgen/structure/StructureTemplate.h"
+#include "mc/deps/core/math/Vec3.h"
 
 namespace lholo::structure::capture {
 namespace {
 
 std::mutex    gMutex;
+std::mutex    gLifecycleMutex;
+detail::CaptureRequests gRequests;
 Draft         gDraft;
 i18n::Message gStatus{i18n::TextKey::CaptureStatusNeedTwoPoints};
 Level*        gLevel{};
 Dimension*    gDimension{};
 std::uint64_t gRevision{};
+structure::detail::ClientViewState gClientView;
+
+void resetLocked();
+
+// Capture works even without an active projection. Its own level listener
+// invalidates cached value state and queued UI requests before world destruction.
+class CaptureLevelListener final : public LevelListener {
+public:
+    void onLevelDestruction(std::string const&) override {
+        std::lock_guard lifecycleLock(gLifecycleMutex);
+        std::lock_guard lock(gMutex);
+        gLevel = nullptr;
+        gDimension = nullptr;
+        gClientView.invalidate();
+        resetLocked();
+    }
+};
+CaptureLevelListener gLevelListener;
 
 struct ClientContext {
     LocalPlayer* player{};
@@ -32,14 +56,12 @@ struct ClientContext {
     Dimension*   dimension{};
 };
 
-ClientContext currentContext() {
-    auto client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return {};
-    return {player, &player->getLevel(), &player->getDimension()};
+ClientContext currentContext(LocalPlayer& player) {
+    return {&player, &player.getLevel(), &player.getDimension()};
 }
 
 void resetLocked() {
+    gRequests.resetSession();
     gDraft = {};
     gStatus = i18n::Message{i18n::TextKey::CaptureStatusNeedTwoPoints};
     ++gRevision;
@@ -74,25 +96,20 @@ void setStatus(i18n::Message const& status) {
 } // namespace
 
 Snapshot getSnapshot() {
-    auto const context = currentContext();
     std::lock_guard lock(gMutex);
-    syncContextLocked(context);
-    return {gDraft, static_cast<bool>(context.player), i18n::format(gStatus), gRevision};
+    return {gDraft, gLevel != nullptr, i18n::format(gStatus), gRevision};
 }
 
 std::optional<Bounds> getBounds() {
-    auto const context = currentContext();
     std::lock_guard lock(gMutex);
-    syncContextLocked(context);
-    if (!context.player || !gDraft.first || !gDraft.second) return std::nullopt;
+    if (!gLevel || !gDraft.first || !gDraft.second) return std::nullopt;
+    if (!detail::captureBoundsSupported(*gDraft.first, *gDraft.second)) return std::nullopt;
     return normalizedBounds(gDraft);
 }
 
-void updateDraft(Draft const& draft) {
-    auto const context = currentContext();
+void updateDraft(Draft const& draft, std::uint64_t revision) {
     std::lock_guard lock(gMutex);
-    syncContextLocked(context);
-    if (!context.player) return;
+    if (!gLevel || revision != gRevision) return;
     if (gDraft == draft) return;
     gDraft = draft;
     if (gDraft.first && gDraft.second) {
@@ -105,57 +122,117 @@ void updateDraft(Draft const& draft) {
     ++gRevision;
 }
 
-void setPointFromPlayer(PointSlot slot) {
-    auto const context = currentContext();
-    if (!context.player) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusNoWorld});
+void setPointFromPlayer(PointSlot slot, std::uint64_t revision) {
+    std::lock_guard lock(gMutex);
+    if (!gLevel) {
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusNoWorld};
         return;
     }
-    auto const position = context.player->getFeetBlockPos();
-
-    std::lock_guard lock(gMutex);
-    syncContextLocked(context);
-    auto& point = slot == PointSlot::First ? gDraft.first : gDraft.second;
-    point = Point{position.x, position.y, position.z};
-    gStatus = i18n::Message{
-        slot == PointSlot::First
-            ? i18n::TextKey::CaptureStatusPoint1Recorded
-            : i18n::TextKey::CaptureStatusPoint2Recorded
-    };
-    ++gRevision;
+    if (revision != gRevision) {
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusSelectionChanged};
+        return;
+    }
+    gRequests.requestPoint(slot);
 }
 
-void exportStructure(Draft const& draft, std::filesystem::path const& output) {
-    auto const context = currentContext();
-    if (!context.player) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusNoWorld});
+std::optional<structure::detail::ClientViewSnapshot> getClientViewSnapshot() {
+    std::lock_guard lock(gMutex);
+    return gClientView.snapshot();
+}
+
+void exportStructure(Draft const& draft, std::filesystem::path const& output, std::uint64_t revision) {
+    std::lock_guard lock(gMutex);
+    if (!gLevel) {
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusNoWorld};
         return;
     }
     if (draft.mode != CaptureMode::Client) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusSingleplayerUnsupported});
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusSingleplayerUnsupported};
         return;
     }
     if (!draft.first || !draft.second) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusNeedBothPoints});
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusNeedBothPoints};
         return;
     }
+    if (revision != gRevision) {
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusSelectionChanged};
+        return;
+    }
+    if (!detail::captureBoundsSupported(*draft.first, *draft.second)) {
+        gStatus = i18n::Message{i18n::TextKey::CaptureStatusBoundsInvalid};
+        return;
+    }
+    gRequests.requestExport(draft, output);
+    if (gDraft != draft) { gDraft = draft; ++gRevision; }
+    gStatus = i18n::Message{i18n::TextKey::CaptureStatusExportQueued};
+}
 
-    Bounds bounds;
+void tick(LocalPlayer& player) {
+    // The native player is borrowed only for the duration of its own tick.
+    // Lifecycle -> value-state is also the destruction/shutdown lock order.
+    std::lock_guard lifecycleLock(gLifecycleMutex);
+    auto const context = currentContext(player);
+    Level* previous{};
+    {
+        std::lock_guard lock(gMutex);
+        previous = gLevel;
+    }
+    if (previous != context.level) {
+        app::detachAndRetireListener(previous,
+            [](Level& level) { level.removeListener(gLevelListener); },
+            [] {
+                std::lock_guard lock(gMutex);
+                gLevel = nullptr;
+                gDimension = nullptr;
+                gClientView.invalidate();
+                resetLocked();
+            });
+        context.level->addListener(gLevelListener);
+    }
+
+    std::optional<detail::CaptureRequests::Export> request;
     {
         std::lock_guard lock(gMutex);
         syncContextLocked(context);
-        if (gDraft != draft) {
-            gDraft = draft;
-            ++gRevision;
+        auto const forward = player.getViewVector(1.0f);
+        gClientView.publish(context.level, context.dimension, player.getRotation().y,
+            {forward.x, forward.y, forward.z});
+        auto const points = gRequests.takePoints();
+        if (points) {
+            auto const position = player.getFeetPos();
+            auto const cell = projection::detail::checkedBlockCell({position.x, position.y, position.z}, 1);
+            if (!cell) {
+                gStatus = i18n::Message{i18n::TextKey::CaptureStatusBoundsInvalid};
+            } else {
+                Point const point{(*cell)[0], (*cell)[1], (*cell)[2]};
+                if (points & 1u) gDraft.first = point;
+                if (points & 2u) gDraft.second = point;
+                gStatus = i18n::Message{points & 2u ? i18n::TextKey::CaptureStatusPoint2Recorded
+                                                 : i18n::TextKey::CaptureStatusPoint1Recorded};
+                ++gRevision;
+            }
         }
-        bounds = normalizedBounds(gDraft);
+        request = gRequests.takeExport();
     }
+    if (!request) return;
+    auto const& draft = request->draft;
+    if (!draft.first || !draft.second || !detail::captureBoundsSupported(*draft.first, *draft.second)) {
+        setStatus(i18n::Message{i18n::TextKey::CaptureStatusBoundsInvalid});
+        return;
+    }
+    auto const bounds = normalizedBounds(draft);
+    auto status = [&](i18n::TextKey key) {
+        std::lock_guard lock(gMutex);
+        // Clear/world replacement may cancel a request during a slow export.
+        if (gRequests.session() == request->session) gStatus = i18n::Message{key};
+    };
 
+    try {
     BlockPos const min{bounds.min.x, bounds.min.y, bounds.min.z};
     BlockPos const max{bounds.max.x, bounds.max.y, bounds.max.z};
-    auto& region = context.player->getDimensionBlockSource();
+    auto& region = player.getDimensionBlockSource();
     if (!region.areChunksFullyLoaded(min, max)) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusRegionNotLoaded});
+        status(i18n::TextKey::CaptureStatusRegionNotLoaded);
         return;
     }
 
@@ -167,19 +244,45 @@ void exportStructure(Draft const& draft, std::filesystem::path const& output) {
         !draft.includeEntities
     );
     if (!structure) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusTemplateFailed});
+        status(i18n::TextKey::CaptureStatusTemplateFailed);
         return;
     }
-    if (!exportMcstructure(*structure, output)) {
-        setStatus(i18n::Message{i18n::TextKey::CaptureStatusWriteFailed});
+    if (!exportMcstructure(*structure, request->output)) {
+        status(i18n::TextKey::CaptureStatusWriteFailed);
         return;
     }
-    setStatus(i18n::Message{i18n::TextKey::CaptureStatusExported});
+    status(i18n::TextKey::CaptureStatusExported);
+    } catch (...) {
+        status(i18n::TextKey::CaptureStatusExportFailed);
+        throw; // The native callback boundary logs the original exception.
+    }
 }
 
 void clear() {
     std::lock_guard lock(gMutex);
     resetLocked();
+}
+
+void shutdown() {
+    std::lock_guard lifecycleLock(gLifecycleMutex);
+    Level* previous{};
+    {
+        std::lock_guard lock(gMutex);
+        previous = gLevel;
+    }
+    auto retire = [] {
+        std::lock_guard lock(gMutex);
+        gLevel = nullptr;
+        gDimension = nullptr;
+        gClientView.invalidate();
+        resetLocked();
+    };
+    if (previous) {
+        app::detachAndRetireListener(previous,
+            [](Level& level) { level.removeListener(gLevelListener); }, retire);
+    } else {
+        retire();
+    }
 }
 
 } // namespace lholo::structure::capture

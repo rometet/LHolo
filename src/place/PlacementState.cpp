@@ -15,13 +15,49 @@ PlacementState& PlacementState::getInstance() {
 }
 
 bool PlacementState::enabled() const { return mEnabled.load(std::memory_order_acquire); }
-void PlacementState::setEnabled(bool enabled) { mEnabled.store(enabled, std::memory_order_release); }
+void PlacementState::setEnabled(bool enabled) {
+    std::lock_guard lock(mManualInputMutex);
+    if (mEnabled.load(std::memory_order_relaxed) == enabled) return;
+    mEnabled.store(enabled, std::memory_order_release);
+    ++mModesRevision;
+}
 
 bool PlacementState::rangeEnabled() const { return mRangeEnabled.load(std::memory_order_acquire); }
-void PlacementState::setRangeEnabled(bool enabled) { mRangeEnabled.store(enabled, std::memory_order_release); }
+void PlacementState::setRangeEnabled(bool enabled) {
+    std::lock_guard lock(mManualInputMutex);
+    if (mRangeEnabled.load(std::memory_order_relaxed) == enabled) return;
+    mRangeEnabled.store(enabled, std::memory_order_release);
+    ++mModesRevision;
+}
 
 bool PlacementState::manualMode() const { return mManualMode.load(std::memory_order_acquire); }
-void PlacementState::setManualMode(bool manual) { mManualMode.store(manual, std::memory_order_release); }
+void PlacementState::setManualMode(bool manual) {
+    std::lock_guard lock(mManualInputMutex);
+    auto const changed = mManualMode.load(std::memory_order_relaxed) != manual;
+    mManualMode.store(manual, std::memory_order_release);
+    if (changed || !manual) invalidateManualInputLocked(true);
+    if (changed) ++mModesRevision;
+}
+
+PlacementModes PlacementState::modes() const {
+    std::lock_guard lock(mManualInputMutex);
+    return {mEnabled.load(std::memory_order_relaxed), mManualMode.load(std::memory_order_relaxed),
+        mRangeEnabled.load(std::memory_order_relaxed), mModesRevision};
+}
+
+bool PlacementState::applyModes(PlacementModes const& modes) {
+    std::lock_guard lock(mManualInputMutex);
+    if (modes.revision != mModesRevision) return false;
+    auto const manualChanged = mManualMode.load(std::memory_order_relaxed) != modes.manual;
+    if (mEnabled.load(std::memory_order_relaxed) == modes.enabled
+        && mRangeEnabled.load(std::memory_order_relaxed) == modes.range && !manualChanged) return true;
+    mEnabled.store(modes.enabled, std::memory_order_release);
+    mRangeEnabled.store(modes.range, std::memory_order_release);
+    mManualMode.store(modes.manual, std::memory_order_release);
+    if (manualChanged) invalidateManualInputLocked(true);
+    ++mModesRevision;
+    return true;
+}
 
 std::vector<std::string> PlacementState::manualPlacementAllowedItems() const {
     std::lock_guard lock(mManualPlacementItemsMutex);
@@ -61,26 +97,44 @@ void PlacementState::setAutoPlacementBreakCooldownSeconds(int seconds) {
 
 bool PlacementState::manualHeld() const { return mManualHeld.load(std::memory_order_acquire); }
 
-bool PlacementState::beginManualPress(std::uint64_t time) {
-    if (mManualHeld.exchange(true, std::memory_order_acq_rel)) return false;
+std::uint64_t PlacementState::manualInputEpoch() const {
+    return mManualInputEpoch.load(std::memory_order_acquire);
+}
+
+bool PlacementState::beginManualPress(std::uint64_t time, std::uint64_t inputEpoch) {
+    std::lock_guard lock(mManualInputMutex);
+    if (inputEpoch != mManualInputEpoch.load(std::memory_order_relaxed)
+        || !mManualMode.load(std::memory_order_relaxed)
+        || mManualHeld.load(std::memory_order_relaxed)) return false;
     mManualPressAt.store(time, std::memory_order_relaxed);
+    mManualHeld.store(true, std::memory_order_release);
     mManualPlaceRequested.store(true, std::memory_order_release);
     return true;
 }
 
 void PlacementState::releaseManualPress() {
+    std::lock_guard lock(mManualInputMutex);
     mManualHeld.store(false, std::memory_order_release);
 }
 
-void PlacementState::cancelManualPress() {
+void PlacementState::invalidateManualInputLocked(bool resetTiming) {
     mManualHeld.store(false, std::memory_order_relaxed);
     mManualPlaceRequested.store(false, std::memory_order_release);
+    if (resetTiming) {
+        mManualPressAt.store(0, std::memory_order_relaxed);
+        mLastManualPlaceAt.store(0, std::memory_order_release);
+    }
+    mManualInputEpoch.fetch_add(1, std::memory_order_release);
+}
+
+void PlacementState::cancelManualPress() {
+    std::lock_guard lock(mManualInputMutex);
+    invalidateManualInputLocked(false);
 }
 
 void PlacementState::resetManualInput() {
-    cancelManualPress();
-    mManualPressAt.store(0, std::memory_order_relaxed);
-    mLastManualPlaceAt.store(0, std::memory_order_release);
+    std::lock_guard lock(mManualInputMutex);
+    invalidateManualInputLocked(true);
 }
 
 bool PlacementState::manualPlaceRequested() const {
@@ -216,9 +270,16 @@ void PlacementState::resetDimensionSession() {
 }
 
 void PlacementState::resetWorldSession() {
-    mEnabled.store(false, std::memory_order_release);
-    mRangeEnabled.store(false, std::memory_order_release);
-    mManualMode.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock(mManualInputMutex);
+        mEnabled.store(false, std::memory_order_release);
+        mRangeEnabled.store(false, std::memory_order_release);
+        mManualMode.store(false, std::memory_order_release);
+        invalidateManualInputLocked(true);
+        // Even a previously disabled model may contain a new user choice.
+        // Retirement must reject it rather than enabling the next session.
+        ++mModesRevision;
+    }
     resetDimensionSession();
 }
 

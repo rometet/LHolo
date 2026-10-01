@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -47,6 +48,7 @@ struct MaterialHudSnapshot {
     std::vector<MaterialRequirement> requirements;
     std::vector<int>                 available;
     bool                             ready{};
+    std::uint64_t                    revision{};
 };
 
 struct HudStateSnapshot {
@@ -61,6 +63,11 @@ struct HudStateSnapshot {
     bool  showProjectedBlockName{true};
     int   position{1};
     float uiScale{2.0f};
+
+    [[nodiscard]] bool hasVisibleFields() const noexcept {
+        return enabled && (showFileName || showLayer || showOverallProgress || showProgress
+            || showWrongState || showWrongType || showExtraBlocks || showProjectedBlockName);
+    }
 };
 
 struct HotkeyBindingSnapshot {
@@ -166,12 +173,20 @@ public:
     // The material-list popup and the current-layer HUD deliberately own
     // separate snapshots: the popup covers the whole structure, while the HUD
     // follows projection correction and layer visibility.
-    void replaceMaterialHudSnapshot(
+    // Capture before validating a result's projection key. A clear or newer
+    // requirements publication invalidates the later conditional commit.
+    [[nodiscard]] std::uint64_t materialHudRevision() const;
+    bool replaceMaterialHudSnapshot(
         std::vector<MaterialRequirement> materials,
-        std::vector<int>                 available
+        std::vector<int>                 available,
+        std::optional<std::uint64_t>     expectedRevision = std::nullopt
     );
-    void setMaterialHudAvailability(std::vector<int> counts);
+    bool setMaterialHudAvailability(std::uint64_t revision, std::vector<int> counts);
     [[nodiscard]] MaterialHudSnapshot materialHudSnapshot() const;
+    // A Present frame keeps this immutable owner alive until all borrowed
+    // display-name pointers have been drawn. Publication and acquisition are
+    // constant-time under the material mutex; no per-frame string copies.
+    [[nodiscard]] std::shared_ptr<MaterialHudSnapshot const> materialHudView() const;
     void clearMaterialHud();
     void clearMaterials();
 
@@ -236,9 +251,8 @@ private:
     std::atomic_bool                  mMaterialListRequested{false};
     std::atomic_bool                  mMaterialListReady{false};
     std::vector<MaterialRequirement>  mMaterialRequirements;
-    std::vector<MaterialRequirement>  mMaterialHudRequirements;
-    std::vector<int>                  mMaterialHudAvailability;
-    bool                              mMaterialHudReady{};
+    std::shared_ptr<MaterialHudSnapshot const> mMaterialHud;
+    std::uint64_t                     mMaterialHudRevision{};
 };
 
 } // namespace lholo::structure::detail

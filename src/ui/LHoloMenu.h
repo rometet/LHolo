@@ -93,6 +93,7 @@ struct MenuModel {
     bool easyPlaceEnabled{};
     bool manualPlace{};
     bool rangeEnabled{};
+    std::uint64_t placementModesRevision{};
     bool experimentalConsent{};
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};

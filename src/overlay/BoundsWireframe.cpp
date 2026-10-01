@@ -1,3 +1,4 @@
+#include "render/RenderCameraPosition.h"
 #include "overlay/BoundsWireframe.h"
 
 #include "render/OverlayMaterials.h"
@@ -14,6 +15,7 @@
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/game/LevelRenderer.h"
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
+#include "mc/client/renderer/game/ItemInHandRenderer.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
 #include "mc/deps/minecraft_renderer/renderer/Mesh.h"
 #include "mc/deps/renderer/Camera.h"
@@ -23,28 +25,8 @@ namespace lholo::overlay {
 namespace {
 
 Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
-    // Same source as the projection pass: see renderCameraPosition() in
-    // ProjectionRenderFrame.cpp for why this reads through Impl on 1.26.40.
-    auto const* impl = reinterpret_cast<float const*>(renderContext.mImpl.get());
-    if (!impl) return {};
-    MEMORY_BASIC_INFORMATION memory{};
-    if (VirtualQuery(impl, &memory, sizeof(memory)) != sizeof(memory)
-        || memory.State != MEM_COMMIT
-        || (memory.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-        return {};
-    }
-    auto const begin = reinterpret_cast<std::uintptr_t>(impl);
-    auto const end = begin + 13U * sizeof(float);
-    auto const regionEnd = reinterpret_cast<std::uintptr_t>(memory.BaseAddress)
-        + memory.RegionSize;
-    if (end < begin || end > regionEnd) return {};
-
-    Vec3 const camera{impl[10], impl[11], impl[12]};
-    if (!std::isfinite(camera.x) || !std::isfinite(camera.y)
-        || !std::isfinite(camera.z)) {
-        return {};
-    }
-    return camera;
+    auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
+    return camera ? Vec3{camera->x, camera->y, camera->z} : Vec3{};
 }
 
 OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
@@ -88,9 +70,9 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
         float const x0 = -expansion;
         float const y0 = -expansion;
         float const z0 = -expansion;
-        float const x1 = static_cast<float>(mMax.x - mMin.x + 1) + expansion;
-        float const y1 = static_cast<float>(mMax.y - mMin.y + 1) + expansion;
-        float const z1 = static_cast<float>(mMax.z - mMin.z + 1) + expansion;
+        float const x1 = static_cast<float>(static_cast<std::int64_t>(mMax.x) - mMin.x + 1) + expansion;
+        float const y1 = static_cast<float>(static_cast<std::int64_t>(mMax.y) - mMin.y + 1) + expansion;
+        float const z1 = static_cast<float>(static_cast<std::int64_t>(mMax.z) - mMin.z + 1) + expansion;
 
         auto& tessellator = renderContext.mScreenContext.tessellator;
         tessellator.begin(
@@ -127,8 +109,10 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
     // The box color lives in vertex data; prefer the glow sign text material
     // whose shader outputs it as-is, keeping the vanilla selection outline
     // (uniform-driven color) as fallback.
-    auto const* glowMaterial = render::resolveGlowSignMaterial();
     auto* levelRendererPlayer = levelRenderer->mLevelRendererPlayer.get();
+    auto const glowMaterial = render::resolveGlowSignMaterial(
+        renderContext.mItemInHandRenderer.mMatBlendBlock.get()
+    );
     if (!glowMaterial && !levelRendererPlayer) return;
     auto const& material = glowMaterial
         ? *glowMaterial

@@ -233,6 +233,7 @@
     LHOLO_TEXT_KEY("status.loaded", StatusLoaded, "")                                                    \
     LHOLO_TEXT_KEY("status.worldExited", StatusWorldExited, "")                                          \
     LHOLO_TEXT_KEY("status.projectionClosed", StatusProjectionClosed, "")                                \
+    LHOLO_TEXT_KEY("status.coordinatesInvalid", StatusCoordinatesInvalid, "")                            \
     LHOLO_TEXT_KEY("captureStatus.needTwoPoints", CaptureStatusNeedTwoPoints, "")                        \
     LHOLO_TEXT_KEY("captureStatus.selectionReady", CaptureStatusSelectionReady, "")                      \
     LHOLO_TEXT_KEY("captureStatus.needOtherPoint", CaptureStatusNeedOtherPoint, "")                      \
@@ -245,6 +246,11 @@
     LHOLO_TEXT_KEY("captureStatus.exported", CaptureStatusExported, "")                                  \
     LHOLO_TEXT_KEY("captureStatus.point1Recorded", CaptureStatusPoint1Recorded, "")                      \
     LHOLO_TEXT_KEY("captureStatus.point2Recorded", CaptureStatusPoint2Recorded, "")                      \
+    LHOLO_TEXT_KEY("status.worldEventsFailed", StatusWorldEventsFailed, "")                              \
+    LHOLO_TEXT_KEY("captureStatus.boundsInvalid", CaptureStatusBoundsInvalid, "")                        \
+    LHOLO_TEXT_KEY("captureStatus.exportQueued", CaptureStatusExportQueued, "")                          \
+    LHOLO_TEXT_KEY("captureStatus.exportFailed", CaptureStatusExportFailed, "")                          \
+    LHOLO_TEXT_KEY("captureStatus.selectionChanged", CaptureStatusSelectionChanged, "")                  \
                                                                                                          \
     /* Transient action hints */                                                                         \
     LHOLO_TEXT_KEY("actionHint.projectionSuspended", ActionHintProjectionSuspended, "")                  \

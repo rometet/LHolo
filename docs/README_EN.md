@@ -58,6 +58,8 @@ Example version: `v26.51.2`
 
 ## Showcase
 
+These screenshots show the earlier interface. This fork defaults to Japanese and uses a centered Praxis-inspired menu.
+
 **Mod menu**
 
 ![image-20260918202008186](images/image-20260918202008186.png)

@@ -7,6 +7,8 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionMeshWorker.h"
+#include "projection/mesh/WorkerTaskBoundary.h"
+#include "projection/mesh/SingleTaskWorker.h"
 
 #include <algorithm>
 #include <atomic>
@@ -15,29 +17,27 @@
 #include <mutex>
 #include <utility>
 
-#include "ll/api/thread/ThreadPoolExecutor.h"
-
 namespace lholo::projection::detail {
 namespace {
 
 std::mutex                                      gMeshWorkerMutex;
 std::mutex                                      gMeshWorkerLifecycleMutex;
 std::deque<AsyncSectionBuildResult>             gCompletedSectionBuilds;
-std::unique_ptr<ll::thread::ThreadPoolExecutor> gMeshWorkerExecutor;
+std::unique_ptr<SingleTaskWorker>               gMeshWorkerExecutor;
 std::atomic_bool                                gMeshWorkerBusy{};
 std::atomic_uint64_t                            gMeshWorkerGeneration{1};
 std::atomic_bool                                gMeshWorkerDisabledForSession{};
+std::atomic_bool                                gMeshWorkerFatalFailure{};
 
 } // namespace
 
 std::uint64_t startMeshWorker() {
     std::lock_guard lifecycleLock(gMeshWorkerLifecycleMutex);
     if (!gMeshWorkerExecutor) {
-        gMeshWorkerExecutor = std::make_unique<ll::thread::ThreadPoolExecutor>(
-            "LHoloProjectionMesh", 1
-        );
+        gMeshWorkerExecutor = std::make_unique<SingleTaskWorker>();
+        gMeshWorkerBusy.store(false, std::memory_order_release);
+        gMeshWorkerFatalFailure.store(false, std::memory_order_release);
     }
-    gMeshWorkerBusy.store(false, std::memory_order_release);
     return gMeshWorkerGeneration.load(std::memory_order_acquire);
 }
 
@@ -46,13 +46,14 @@ void stopMeshWorker() {
     auto const nextGeneration = gMeshWorkerGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     (void)nextGeneration;
     if (gMeshWorkerExecutor) {
-        // destroy() drains the executor and joins its sole worker. Tasks never
+        // stop() drains the executor and joins its sole worker. Tasks never
         // acquire the active projection mutex, so this is safe while state is
         // detached from the active world.
-        gMeshWorkerExecutor->destroy();
+        gMeshWorkerExecutor->stop();
         gMeshWorkerExecutor.reset();
     }
     gMeshWorkerBusy.store(false, std::memory_order_release);
+    gMeshWorkerFatalFailure.store(false, std::memory_order_release);
     std::lock_guard lock(gMeshWorkerMutex);
     gCompletedSectionBuilds.clear();
 }
@@ -74,28 +75,30 @@ bool submitMeshWorkerTask(
         return false;
     }
     try {
-        gMeshWorkerExecutor->execute([
+        auto const admitted = gMeshWorkerExecutor->submit([
             workerGeneration,
             task = std::move(task)
-        ]() mutable {
-            AsyncSectionBuildResult result;
-            try {
-                result = task();
-            } catch (std::exception const& exception) {
-                result.workerGeneration = workerGeneration;
-                result.success = false;
-                result.failureReason = std::string{"uncaught task exception: "} + exception.what();
-            } catch (...) {
-                result.workerGeneration = workerGeneration;
-                result.success = false;
-                result.failureReason = "uncaught non-standard task exception";
-            }
-            if (workerGeneration == gMeshWorkerGeneration.load(std::memory_order_acquire)) {
-                std::lock_guard lock(gMeshWorkerMutex);
-                gCompletedSectionBuilds.emplace_back(std::move(result));
-            }
-            gMeshWorkerBusy.store(false, std::memory_order_release);
+        ]() mutable noexcept {
+            runLeasedWorkerTaskBoundary(
+                gMeshWorkerBusy,
+                task,
+                [&](AsyncSectionBuildResult result) {
+                    if (workerGeneration == gMeshWorkerGeneration.load(std::memory_order_acquire)) {
+                        std::lock_guard lock(gMeshWorkerMutex);
+                        gCompletedSectionBuilds.emplace_back(std::move(result));
+                    }
+                },
+                [workerGeneration]() noexcept {
+                    if (workerGeneration == gMeshWorkerGeneration.load(std::memory_order_acquire)) {
+                        gMeshWorkerFatalFailure.store(true, std::memory_order_release);
+                    }
+                }
+            );
         });
+        if (!admitted) {
+            gMeshWorkerBusy.store(false, std::memory_order_release);
+            return false;
+        }
     } catch (...) {
         gMeshWorkerBusy.store(false, std::memory_order_release);
         return false;
@@ -117,6 +120,10 @@ std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limi
 
 bool meshWorkerIsBusy() {
     return gMeshWorkerBusy.load(std::memory_order_acquire);
+}
+
+bool consumeMeshWorkerFatalFailure() {
+    return gMeshWorkerFatalFailure.exchange(false, std::memory_order_acq_rel);
 }
 
 bool meshWorkerIsDisabledForSession() {

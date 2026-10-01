@@ -15,6 +15,14 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "overlay/ImGuiOverlay.h"
+#include "overlay/OverlayFonts.h"
+#include "app/NativeCallbackBoundary.h"
+#include "app/ScopeExit.h"
+#include "overlay/ImGuiFrameRecovery.h"
+#include "overlay/OverlayResourceGate.h"
+#include "overlay/WindowCursorRestore.h"
+#include "overlay/OverlayInstallRetry.h"
+#include "overlay/NativeHookBinding.h"
 #include "overlay/CompanionBridge.h"
 
 #include <Windows.h>
@@ -30,6 +38,8 @@
 #undef D3D12_FEATURE_DATA_ARCHITECTURE
 #undef D3D12_RAYTRACING_GEOMETRY_DESC
 
+#include "overlay/D3D12QueueBinding.h"
+
 #include <MinHook.h>
 #include <backends/imgui_impl_dx11.h>
 #include <backends/imgui_impl_win32.h>
@@ -40,6 +50,7 @@
 #include <cfloat>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "input/MenuInputGuard.h"
@@ -74,23 +85,24 @@ ResizeBuffersFn       gOriginalResizeBuffers{};
 ResizeBuffers1Fn      gOriginalResizeBuffers1{};
 ExecuteCommandListsFn gOriginalExecuteCommandLists{};
 
-void* gPresentTarget{};
-void* gPresent1Target{};
-void* gResizeTarget{};
-void* gResize1Target{};
-void* gExecuteTarget{};
+detail::NativeHookBinding gPresentTarget;
+detail::NativeHookBinding gPresent1Target;
+detail::NativeHookBinding gResizeTarget;
+detail::NativeHookBinding gResize1Target;
+detail::NativeHookBinding gExecuteTarget;
 
 ID3D11Device*        gDevice{};
 ID3D11DeviceContext* gDeviceContext{};
 ID3D11On12Device*    gDevice11On12{};
-ID3D12CommandQueue*  gGameQueue{};
+detail::D3D12QueueBinding gGameQueue;
 // Weak identity of the swap chain currently owned by LHolo. Access is guarded
 // by gResourceMutex; retaining it avoids extending the game's COM lifetime.
 IDXGISwapChain*      gActiveSwapChain{};
 
 HWND    gWindow{};
-WNDPROC gOriginalWndProc{};
+std::atomic<WNDPROC> gOriginalWndProc{};
 std::atomic_bool gInstalled{false};
+std::atomic_bool gExecuteHookInstalled{false};
 std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
 std::atomic_uint gHookCallbacks{};
@@ -99,10 +111,14 @@ thread_local char const*  gHookCallbackKind{"none"};
 thread_local UINT         gHookCallbackMessage{};
 std::atomic_ullong gGraphicsResumeAt{};
 std::mutex       gResourceMutex;
+// Render holds resources before ImGui. WndProc only takes this context lock
+// around the backend handler and releases it before forwarding to Minecraft.
+// Recursive acquisition permits Win32's synchronous capture-change messages.
+std::recursive_mutex gImGuiMutex;
 std::mutex       gInputStateMutex;
 std::mutex       gInstallMutex;
 std::atomic_ullong gInstallRetryAt{};
-bool             gImGuiInitialized{};
+std::atomic_bool gImGuiInitialized{};
 bool             gGraphicsInitialized{};
 bool             gGuiVisibleLastFrame{};
 std::atomic_bool gMouseHandoffActive{};
@@ -222,6 +238,7 @@ HWND findProcessWindow() {
 }
 
 void releaseGraphicsBackend() {
+    std::lock_guard imguiLock(gImGuiMutex);
     // A v3 companion owns its own ImGui/DX11 backend on the same device/context.
     // Tear it down before LHolo releases or recreates the shared graphics device.
     companion::resetGraphics();
@@ -256,6 +273,26 @@ bool canUseSwapChainLocked(IDXGISwapChain* swapChain) {
         && description.OutputWindow == gWindow;
 }
 
+bool retireGraphicsDeviceLossLocked(IDXGISwapChain* swapChain, HRESULT result) {
+    if (!canUseSwapChainLocked(swapChain)) return false;
+    if (!gGameQueue.retireAfterDeviceLoss(result, [] { releaseGraphicsBackend(); })) return false;
+    gActiveSwapChain = nullptr;
+    return true;
+}
+
+void handlePresentationResult(IDXGISwapChain* swapChain, HRESULT result, char const* operation) {
+    if (result != DXGI_ERROR_DEVICE_REMOVED && result != DXGI_ERROR_DEVICE_RESET) return;
+    app::invokeNativeCallback([&] {
+        std::lock_guard lock(gResourceMutex);
+        if (!gShuttingDown.load(std::memory_order_acquire)
+            && retireGraphicsDeviceLossLocked(swapChain, result)) {
+            logGraphicsFailure(swapChain, operation, result);
+        }
+    }, [](char const* reason) noexcept {
+        app::reportNativeCallbackFailure("graphics device retirement", reason);
+    });
+}
+
 // Callers must hold gResourceMutex across both helpers and the original DXGI
 // resize call so Present cannot rebuild against a swap chain mid-transition.
 void prepareForSwapChainResizeLocked() {
@@ -274,64 +311,11 @@ void deferGraphicsResumeAfterSwapChainResizeLocked() {
 }
 
 void loadFonts() {
-    auto& io = ImGui::GetIO();
-    ImFontConfig config{};
-    config.OversampleH = 2;
-    config.OversampleV = 2;
-    auto const chineseFont = "C:\\Windows\\Fonts\\msyh.ttc";
-    if (std::filesystem::exists(chineseFont)) {
-        // Build the atlas at 2x the logical base size. A 4K/default 2x UI can
-        // then render at native font resolution instead of magnifying an 18px
-        // atlas, which made text and navigation edges look pixelated.
-        io.Fonts->AddFontFromFileTTF(
-            chineseFont,
-            36.0f,
-            &config,
-            io.Fonts->GetGlyphRangesChineseFull()
-        );
-
-        // Merge Cyrillic glyphs into the already loaded font. Use ImGui's
-        // stable built-in range pointer; atlas construction happens later,
-        // so a temporary range buffer must not be passed here.
-        ImFontConfig cyrillicConfig = config;
-        cyrillicConfig.MergeMode = true;
-        io.Fonts->AddFontFromFileTTF(
-            chineseFont,
-            36.0f,
-            &cyrillicConfig,
-            io.Fonts->GetGlyphRangesCyrillic()
-        );
-    } else {
-        io.Fonts->AddFontDefault();
-    }
-
-    // Merge Windows' Japanese glyphs so kana and Japanese kanji use native
-    // forms instead of falling back to the Simplified Chinese atlas.
-    auto const japaneseFont = "C:\\Windows\\Fonts\\meiryo.ttc";
-    if (std::filesystem::exists(japaneseFont)) {
-        ImFontConfig japaneseConfig = config;
-        japaneseConfig.MergeMode = true;
-        io.Fonts->AddFontFromFileTTF(
-            japaneseFont,
-            36.0f,
-            &japaneseConfig,
-            io.Fonts->GetGlyphRangesJapanese()
-        );
-    }
-
-    // Chinese glyph ranges do not include the warning sign used by the
-    // experimental-feature notice. Merge that single glyph from Windows'
-    // symbol font so the original label is rendered instead of as '?'.
-    auto const symbolFont = "C:\\Windows\\Fonts\\seguisym.ttf";
-    if (std::filesystem::exists(symbolFont)) {
-        static constexpr ImWchar warningGlyphRange[]{0x26A0, 0x26A0, 0};
-        ImFontConfig symbolConfig{};
-        symbolConfig.MergeMode = true;
-        symbolConfig.PixelSnapH = true;
-        symbolConfig.OversampleH = 2;
-        symbolConfig.OversampleV = 2;
-        io.Fonts->AddFontFromFileTTF(symbolFont, 36.0f, &symbolConfig, warningGlyphRange);
-    }
+    loadOverlayFonts(*ImGui::GetIO().Fonts, {
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\meiryo.ttc",
+        "C:\\Windows\\Fonts\\seguisym.ttf"
+    });
 }
 
 LRESULT forwardToGame(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -467,14 +451,14 @@ void acquireMenuCursor() {
         ShowCursor(FALSE);
         return;
     }
-    gMenuCursorShowCount.fetch_add(1, std::memory_order_relaxed);
+    gMenuCursorShowCount.fetch_add(1, std::memory_order_acq_rel);
 }
 
 // Drop exactly the increments acquireMenuCursor() forced. Minecraft's own
 // negative counter is never touched, so gameplay still hides the cursor.
 void releaseMenuCursor() {
-    while (gMenuCursorShowCount.load(std::memory_order_relaxed) > 0) {
-        gMenuCursorShowCount.fetch_sub(1, std::memory_order_relaxed);
+    while (gMenuCursorShowCount.load(std::memory_order_acquire) > 0) {
+        gMenuCursorShowCount.fetch_sub(1, std::memory_order_acq_rel);
         ShowCursor(FALSE);
     }
 }
@@ -520,20 +504,19 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
     return 1;
 }
 
-LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    HookCallbackGuard callbackGuard{"WndProc", message};
-    if (gShuttingDown.load(std::memory_order_acquire)) {
-        return gOriginalWndProc
-            ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
-            : DefWindowProcW(window, message, wParam, lParam);
-    }
-    if (message == kMsgAcquireMenuCursor) {
-        acquireMenuCursor();
-        return 0;
-    }
+std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    // Shutdown must still be able to return its ShowCursor increments on this
+    // owning thread before restoring the original window procedure.
     if (message == kMsgRestoreNativeCursor) {
         releaseMenuCursor();
         ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+        return 0;
+    }
+    if (gShuttingDown.load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    if (message == kMsgAcquireMenuCursor) {
+        acquireMenuCursor();
         return 0;
     }
     if (message == WM_KILLFOCUS || (message == WM_ACTIVATEAPP && wParam == FALSE)) {
@@ -640,12 +623,13 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 static_cast<std::intptr_t>(lParam)
             );
         } else {
-            ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+            std::lock_guard imguiLock(gImGuiMutex);
+            if (gImGuiInitialized && !gShuttingDown.load(std::memory_order_acquire)) {
+                ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+            }
         }
         if (isFullscreenKeyMessage(message, wParam)) {
-            return gOriginalWndProc
-                ? CallWindowProcW(gOriginalWndProc, window, message, wParam, lParam)
-                : DefWindowProcW(window, message, wParam, lParam);
+            return std::nullopt;
         }
         if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
             gConsumeEscapeRelease.store(true, std::memory_order_release);
@@ -664,6 +648,19 @@ LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         && !isFullscreenKeyMessage(message, wParam)) {
         return consumeMenuInputMessage(window, message, wParam, lParam);
     }
+    return std::nullopt;
+}
+
+LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    HookCallbackGuard callbackGuard{"WndProc", message};
+    std::optional<LRESULT> handled;
+    auto const succeeded = app::invokeNativeCallback([&] {
+        handled = handleWindowMessage(window, message, wParam, lParam);
+    }, [](char const* reason) noexcept {
+        app::reportNativeCallbackFailure("window input", reason);
+    });
+    if (succeeded && handled) return *handled;
+    // Forward the real message once, outside the LHolo exception boundary.
     return forwardToGame(window, message, wParam, lParam);
 }
 
@@ -671,13 +668,10 @@ void executeCommandListsHook(ID3D12CommandQueue* queue, UINT count, ID3D12Comman
     HookCallbackGuard callbackGuard{"ExecuteCommandLists"};
     if (!gShuttingDown.load(std::memory_order_acquire)
         && queue
-        && !gGameQueue
+        && !gGameQueue.captured()
         && queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
         std::lock_guard lock(gResourceMutex);
-        if (!gGameQueue) {
-            gGameQueue = queue;
-            gGameQueue->AddRef();
-        }
+        gGameQueue.capture(*queue);
     }
     gOriginalExecuteCommandLists(queue, count, lists);
 }
@@ -692,22 +686,25 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
     if (SUCCEEDED(swapChain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&gDevice)))) {
         gDevice->GetImmediateContext(&gDeviceContext);
     } else {
-        if (!gGameQueue) return false;
-        ID3D12Device* device12{};
-        if (FAILED(swapChain->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&device12)))) return false;
+        Microsoft::WRL::ComPtr<ID3D12Device> device12;
+        if (FAILED(swapChain->GetDevice(IID_PPV_ARGS(&device12)))) return false;
+        // A different mod/device may have executed first. Keep the target
+        // device while waiting, and accept only its next direct queue. The old
+        // backend has already been flushed above before the capture flag clears.
+        if (!gGameQueue.bindDevice(*device12.Get())) return false;
+        IUnknown* queues[]{gGameQueue.get()};
         auto const result = D3D11On12CreateDevice(
-            device12,
+            device12.Get(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             nullptr,
             0,
-            reinterpret_cast<IUnknown**>(&gGameQueue),
+            queues,
             1,
             0,
             &gDevice,
             &gDeviceContext,
             nullptr
         );
-        device12->Release();
         if (FAILED(result) || !gDevice) {
             releaseGraphicsBackend();
             return false;
@@ -732,6 +729,12 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
     if (!gImGuiInitialized) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        app::ScopeExit rollbackContext([]() noexcept {
+            if (gImGuiInitialized || !ImGui::GetCurrentContext()) return;
+            if (ImGui::GetIO().BackendPlatformUserData) ImGui_ImplWin32_Shutdown();
+            ui::resetFluentTheme();
+            ImGui::DestroyContext();
+        });
         ImGui::StyleColorsDark();
         loadFonts();
         if (!ImGui_ImplWin32_Init(window)) {
@@ -741,9 +744,34 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
             return false;
         }
         gWindow = window;
-        gOriginalWndProc = reinterpret_cast<WNDPROC>(
+        // Publish a forwarding target before installing our procedure: an
+        // unrelated window message may enter it immediately on the UI thread.
+        auto const forwardingWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(gWindow, GWLP_WNDPROC));
+        if (!forwardingWndProc) {
+            logger().error("Could not read the game window procedure: Win32 error {}", GetLastError());
+            ImGui_ImplWin32_Shutdown();
+            ui::resetFluentTheme();
+            ImGui::DestroyContext();
+            gWindow = nullptr;
+            releaseGraphicsBackend();
+            return false;
+        }
+        gOriginalWndProc.store(forwardingWndProc, std::memory_order_release);
+        SetLastError(0);
+        auto const previousWndProc = reinterpret_cast<WNDPROC>(
             SetWindowLongPtrW(gWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(windowProc))
         );
+        if (!previousWndProc) {
+            logger().error("Could not subclass the game window: Win32 error {}", GetLastError());
+            ImGui_ImplWin32_Shutdown();
+            ui::resetFluentTheme();
+            ImGui::DestroyContext();
+            gWindow = nullptr;
+            gOriginalWndProc.store(nullptr, std::memory_order_release);
+            releaseGraphicsBackend();
+            return false;
+        }
+        gOriginalWndProc.store(previousWndProc, std::memory_order_release);
         gImGuiInitialized = true;
         logger().info("Injected Dear ImGui overlay initialized");
     }
@@ -761,7 +789,9 @@ void render(IDXGISwapChain* swapChain) {
     if (gShuttingDown.load(std::memory_order_acquire)) return;
     if (gRendering.exchange(true, std::memory_order_acq_rel)) return;
     struct Reset { ~Reset() { gRendering.store(false, std::memory_order_release); } } reset;
-    std::lock_guard lock(gResourceMutex);
+    auto lock = detail::acquireLiveOverlayResources(gResourceMutex, gShuttingDown);
+    if (!lock.owns_lock()) return;
+    std::lock_guard imguiLock(gImGuiMutex);
     if (!canUseSwapChainLocked(swapChain)) return;
 
     // Initialize the backend and install the WndProc on the first usable
@@ -802,6 +832,10 @@ void render(IDXGISwapChain* swapChain) {
 
     auto draw = [](ID3D11RenderTargetView* target) {
         gDeviceContext->OMSetRenderTargets(1, &target, nullptr);
+        app::ScopeExit resetTarget([&]() noexcept {
+            ID3D11RenderTargetView* empty{};
+            gDeviceContext->OMSetRenderTargets(1, &empty, nullptr);
+        });
 
         auto const companionVisible = companion::isVisible();
         auto const independentCompanion = companion::usesIndependentRenderer();
@@ -815,6 +849,7 @@ void render(IDXGISwapChain* swapChain) {
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
+            detail::ImGuiFrameRecovery frameRecovery;
 
             if (structure::isGuiVisible()) {
                 structure::renderGui();
@@ -844,8 +879,6 @@ void render(IDXGISwapChain* swapChain) {
             gGuiVisibleLastFrame = false;
         }
 
-        ID3D11RenderTargetView* empty{};
-        gDeviceContext->OMSetRenderTargets(1, &empty, nullptr);
     };
 
     if (gDevice11On12) {
@@ -866,6 +899,7 @@ void render(IDXGISwapChain* swapChain) {
                 reinterpret_cast<void**>(&backBuffer)
             );
         if (FAILED(getBufferResult)) {
+            retireGraphicsDeviceLossLocked(swapChain, getBufferResult);
             logGraphicsFailure(swapChain, "GetBuffer(D3D12)", getBufferResult);
             return;
         }
@@ -881,22 +915,26 @@ void render(IDXGISwapChain* swapChain) {
         );
         backBuffer->Release();
         if (FAILED(wrappedResult) || !wrappedBuffer) {
+            retireGraphicsDeviceLossLocked(swapChain, wrappedResult);
             logGraphicsFailure(swapChain, "CreateWrappedResource", wrappedResult);
             return;
         }
+        app::ScopeExit releaseWrapped([&]() noexcept { wrappedBuffer->Release(); });
 
         ID3D11RenderTargetView* target{};
         auto const targetResult = gDevice->CreateRenderTargetView(wrappedBuffer, nullptr, &target);
+        app::ScopeExit releaseTarget([&]() noexcept { if (target) target->Release(); });
         if (SUCCEEDED(targetResult) && target) {
             gDevice11On12->AcquireWrappedResources(&wrappedBuffer, 1);
+            app::ScopeExit releaseAcquisition([&]() noexcept {
+                gDevice11On12->ReleaseWrappedResources(&wrappedBuffer, 1);
+                gDeviceContext->Flush();
+            });
             draw(target);
-            gDevice11On12->ReleaseWrappedResources(&wrappedBuffer, 1);
-            gDeviceContext->Flush();
         } else {
+            retireGraphicsDeviceLossLocked(swapChain, targetResult);
             logGraphicsFailure(swapChain, "CreateRenderTargetView(D3D11On12)", targetResult);
         }
-        if (target) target->Release();
-        wrappedBuffer->Release();
     } else {
         ID3D11Texture2D* backBuffer{};
         auto const getBufferResult = swapChain->GetBuffer(
@@ -905,16 +943,18 @@ void render(IDXGISwapChain* swapChain) {
             reinterpret_cast<void**>(&backBuffer)
         );
         if (FAILED(getBufferResult)) {
+            retireGraphicsDeviceLossLocked(swapChain, getBufferResult);
             logGraphicsFailure(swapChain, "GetBuffer(D3D11)", getBufferResult);
             return;
         }
         ID3D11RenderTargetView* target{};
         auto const result = gDevice->CreateRenderTargetView(backBuffer, nullptr, &target);
         backBuffer->Release();
-        if (SUCCEEDED(result)) {
+        app::ScopeExit releaseTarget([&]() noexcept { if (target) target->Release(); });
+        if (SUCCEEDED(result) && target) {
             draw(target);
-            target->Release();
         } else {
+            retireGraphicsDeviceLossLocked(swapChain, result);
             logGraphicsFailure(swapChain, "CreateRenderTargetView(D3D11)", result);
         }
     }
@@ -922,8 +962,14 @@ void render(IDXGISwapChain* swapChain) {
 
 HRESULT __stdcall presentHook(IDXGISwapChain* swapChain, UINT interval, UINT flags) {
     HookCallbackGuard callbackGuard{"Present"};
-    if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
-    return gOriginalPresent(swapChain, interval, flags);
+    if (!gShuttingDown.load(std::memory_order_acquire)) {
+        app::invokeNativeCallback([&] { render(swapChain); }, [](char const* reason) noexcept {
+            app::reportNativeCallbackFailure("Present", reason);
+        });
+    }
+    auto const result = gOriginalPresent(swapChain, interval, flags);
+    handlePresentationResult(swapChain, result, "Present(device loss)");
+    return result;
 }
 
 HRESULT __stdcall present1Hook(
@@ -933,8 +979,14 @@ HRESULT __stdcall present1Hook(
     DXGI_PRESENT_PARAMETERS const* parameters
 ) {
     HookCallbackGuard callbackGuard{"Present1"};
-    if (!gShuttingDown.load(std::memory_order_acquire)) render(swapChain);
-    return gOriginalPresent1(swapChain, interval, flags, parameters);
+    if (!gShuttingDown.load(std::memory_order_acquire)) {
+        app::invokeNativeCallback([&] { render(swapChain); }, [](char const* reason) noexcept {
+            app::reportNativeCallbackFailure("Present1", reason);
+        });
+    }
+    auto const result = gOriginalPresent1(swapChain, interval, flags, parameters);
+    handlePresentationResult(swapChain, result, "Present1(device loss)");
+    return result;
 }
 
 HRESULT __stdcall resizeHook(
@@ -965,7 +1017,11 @@ HRESULT __stdcall resizeHook(
     auto const result = gOriginalResizeBuffers(swapChain, count, width, height, format, flags);
     deferGraphicsResumeAfterSwapChainResizeLocked();
     if (FAILED(result)) {
-        logGraphicsFailure(swapChain, "ResizeBuffers", result);
+        app::invokeNativeCallback([&] {
+            retireGraphicsDeviceLossLocked(swapChain, result);
+            logGraphicsFailure(swapChain, "ResizeBuffers", result);
+        },
+            [](char const* reason) noexcept { app::reportNativeCallbackFailure("resize diagnostic", reason); });
     }
     return result;
 }
@@ -1020,25 +1076,68 @@ HRESULT __stdcall resize1Hook(
     );
     deferGraphicsResumeAfterSwapChainResizeLocked();
     if (FAILED(result)) {
-        logGraphicsFailure(swapChain, "ResizeBuffers1", result);
+        app::invokeNativeCallback([&] {
+            retireGraphicsDeviceLossLocked(swapChain, result);
+            logGraphicsFailure(swapChain, "ResizeBuffers1", result);
+        },
+            [](char const* reason) noexcept { app::reportNativeCallbackFailure("resize diagnostic", reason); });
     }
     return result;
 }
 
-bool installHook(void* target, void* detour, void** original) {
-    return target && MH_CreateHook(target, detour, original) == MH_OK && MH_EnableHook(target) == MH_OK;
+bool installHook(detail::NativeHookBinding& binding, void* target, void* detour, void** original) {
+    if (!target) return false;
+    auto const created = binding.create(target, detour, original);
+    if (created != MH_OK) {
+        logger().error("Overlay hook creation failed: {}", static_cast<int>(created));
+        return false;
+    }
+    auto const enabled = binding.enable();
+    if (enabled != MH_OK) {
+        logger().error("Overlay hook enable refused/failed: {}", static_cast<int>(enabled));
+        return false; // Retain the owned target for rollback.
+    }
+    return true;
 }
 
-bool disableHook(void* target) {
-    if (!target) return true;
-    auto const status = MH_DisableHook(target);
-    return status == MH_OK || status == MH_ERROR_DISABLED || status == MH_ERROR_NOT_CREATED;
+bool disableHook(detail::NativeHookBinding& binding) {
+    if (binding.disable()) return true;
+    logger().error("Overlay hook disable refused/failed: target={} patchOwned={} native status={}; retaining trampoline",
+        binding.target(), binding.currentPatchOwned(), static_cast<int>(binding.lastStatus()));
+    return false;
 }
 
-void removeHook(void*& target) {
-    if (!target) return;
-    (void)MH_RemoveHook(target);
-    target = nullptr;
+bool removeHook(detail::NativeHookBinding& binding) {
+    if (!binding.remove()) {
+        logger().error("Overlay hook removal refused/failed: target={} enabled={} native status={}",
+            binding.target(), binding.enabled(), static_cast<int>(binding.lastStatus()));
+        return false;
+    }
+    return true;
+}
+
+bool tryInstallExecuteHook() {
+    HRESULT discovered = S_OK;
+    // Keep discovery's COM objects alive until CreateHook/EnableHook completes.
+    Microsoft::WRL::ComPtr<ID3D12Device> device;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
+    bool const installed = gExecuteTarget.installOrRetry(
+        reinterpret_cast<void*>(executeCommandListsHook), reinterpret_cast<void**>(&gOriginalExecuteCommandLists), [&]() -> void* {
+            discovered = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+            if (FAILED(discovered)) return nullptr;
+            D3D12_COMMAND_QUEUE_DESC description{};
+            description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            discovered = device->CreateCommandQueue(&description, IID_PPV_ARGS(&queue));
+            if (FAILED(discovered)) return nullptr;
+            return (*reinterpret_cast<void***>(queue.Get()))[kExecuteCommandListsVtableIndex];
+        }
+    );
+    gExecuteHookInstalled.store(installed, std::memory_order_release);
+    if (!installed) {
+        logger().warn("D3D12 Execute hook deferred: discovery HRESULT=0x{:08X} native status={}; retrying",
+            static_cast<unsigned long>(discovered), static_cast<int>(gExecuteTarget.lastStatus()));
+    }
+    return installed;
 }
 
 } // namespace
@@ -1050,23 +1149,45 @@ bool shutdownLocked();
 } // namespace
 
 bool ensureInstalled() {
-    if (gInstalled.load(std::memory_order_acquire)) return true;
+    bool const installed = gInstalled.load(std::memory_order_acquire);
+    if (installed && gExecuteHookInstalled.load(std::memory_order_acquire)) {
+        return !gShuttingDown.load(std::memory_order_acquire);
+    }
     auto const now = GetTickCount64();
-    if (now < gInstallRetryAt.load(std::memory_order_acquire)) return false;
+    if (now < gInstallRetryAt.load(std::memory_order_acquire)) {
+        return installed && !gShuttingDown.load(std::memory_order_acquire);
+    }
     std::lock_guard installLock(gInstallMutex);
-    if (gInstalled.load(std::memory_order_acquire)) return true;
+    if (gInstalled.load(std::memory_order_acquire)) {
+        if (gShuttingDown.load(std::memory_order_acquire)) return false;
+        if (!gExecuteHookInstalled.load(std::memory_order_acquire)
+            && GetTickCount64() >= gInstallRetryAt.load(std::memory_order_acquire)) {
+            gInstallRetryAt.store(GetTickCount64() + kInstallRetryIntervalMs, std::memory_order_release);
+            // Keep working DXGI/DX11 state; only the missing optional D3D12
+            // entry needs another attempt. A partial record stays owned.
+            if (tryInstallExecuteHook()) gInstallRetryAt.store(0, std::memory_order_release);
+        }
+        return true;
+    }
     if (GetTickCount64() < gInstallRetryAt.load(std::memory_order_acquire)) return false;
 
+    // Throttle exceptions as well as explicit failures. Never overwrite native
+    // target records left by an incomplete rollback or a partial install.
+    gInstallRetryAt.store(GetTickCount64() + kInstallRetryIntervalMs, std::memory_order_release);
+    if (!detail::prepareOverlayInstall(gShuttingDown, [] { return shutdownLocked(); })) return false;
+    // A completed old retirement clears its deadline; the newly admitted
+    // attempt must still throttle exceptions before beginning fallible work.
+    gInstallRetryAt.store(GetTickCount64() + kInstallRetryIntervalMs, std::memory_order_release);
+
     auto failInstall = [&]() {
-        (void)shutdownLocked();
-        gInstallRetryAt.store(
-            GetTickCount64() + kInstallRetryIntervalMs,
-            std::memory_order_release
-        );
+        gInstallRetryAt.store(GetTickCount64() + kInstallRetryIntervalMs, std::memory_order_release);
+        if (!shutdownLocked()) {
+            logger().error("Overlay installation rollback incomplete; retaining native resources");
+        }
         return false;
     };
 
-    gShuttingDown.store(false, std::memory_order_release);
+    if (!companion::beginSession()) return false;
     auto window = findProcessWindow();
     if (!window) return failInstall();
     auto const status = MH_Initialize();
@@ -1081,61 +1202,48 @@ bool ensureInstalled() {
     description.SampleDesc.Count = 1;
     description.Windowed = TRUE;
     description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    ID3D11Device* dummyDevice{};
-    ID3D11DeviceContext* dummyContext{};
-    IDXGISwapChain* dummySwapChain{};
+    Microsoft::WRL::ComPtr<ID3D11Device> dummyDevice;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> dummyContext;
+    Microsoft::WRL::ComPtr<IDXGISwapChain> dummySwapChain;
     if (FAILED(D3D11CreateDeviceAndSwapChain(
             nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &featureLevel, 1, D3D11_SDK_VERSION,
             &description, &dummySwapChain, &dummyDevice, nullptr, &dummyContext
         ))) return failInstall();
 
-    auto** swapVtable = *reinterpret_cast<void***>(dummySwapChain);
-    gPresentTarget = swapVtable[kPresentVtableIndex];
-    gResizeTarget = swapVtable[kResizeBuffersVtableIndex];
-    bool ok = installHook(gPresentTarget, reinterpret_cast<void*>(presentHook), reinterpret_cast<void**>(&gOriginalPresent))
-        && installHook(gResizeTarget, reinterpret_cast<void*>(resizeHook), reinterpret_cast<void**>(&gOriginalResizeBuffers));
-    IDXGISwapChain1* swapChain1{};
-    if (SUCCEEDED(dummySwapChain->QueryInterface(__uuidof(IDXGISwapChain1), reinterpret_cast<void**>(&swapChain1)))) {
-        gPresent1Target = (*reinterpret_cast<void***>(swapChain1))[kPresent1VtableIndex];
-        ok = installHook(gPresent1Target, reinterpret_cast<void*>(present1Hook), reinterpret_cast<void**>(&gOriginalPresent1)) && ok;
-        swapChain1->Release();
+    auto** swapVtable = *reinterpret_cast<void***>(dummySwapChain.Get());
+    bool ok = installHook(gPresentTarget, swapVtable[kPresentVtableIndex], reinterpret_cast<void*>(presentHook), reinterpret_cast<void**>(&gOriginalPresent))
+        && installHook(gResizeTarget, swapVtable[kResizeBuffersVtableIndex], reinterpret_cast<void*>(resizeHook), reinterpret_cast<void**>(&gOriginalResizeBuffers));
+    Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain1;
+    if (SUCCEEDED(dummySwapChain.As(&swapChain1))) {
+        auto const present1Target = (*reinterpret_cast<void***>(swapChain1.Get()))[kPresent1VtableIndex];
+        ok = installHook(gPresent1Target, present1Target, reinterpret_cast<void*>(present1Hook), reinterpret_cast<void**>(&gOriginalPresent1)) && ok;
+        swapChain1.Reset();
     }
-    IDXGISwapChain3* swapChain3{};
-    if (SUCCEEDED(dummySwapChain->QueryInterface(__uuidof(IDXGISwapChain3), reinterpret_cast<void**>(&swapChain3)))) {
-        gResize1Target = (*reinterpret_cast<void***>(swapChain3))[kResizeBuffers1VtableIndex];
+    Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain3;
+    if (SUCCEEDED(dummySwapChain.As(&swapChain3))) {
+        auto const resize1Target = (*reinterpret_cast<void***>(swapChain3.Get()))[kResizeBuffers1VtableIndex];
         ok = installHook(
                  gResize1Target,
+                 resize1Target,
                  reinterpret_cast<void*>(resize1Hook),
                  reinterpret_cast<void**>(&gOriginalResizeBuffers1)
              )
           && ok;
-        swapChain3->Release();
+        swapChain3.Reset();
     } else {
         ok = false;
     }
-    dummySwapChain->Release();
-    dummyContext->Release();
-    dummyDevice->Release();
-
-    ID3D12Device* dummyDevice12{};
-    if (SUCCEEDED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), reinterpret_cast<void**>(&dummyDevice12)))) {
-        D3D12_COMMAND_QUEUE_DESC queueDescription{};
-        queueDescription.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        ID3D12CommandQueue* dummyQueue{};
-        if (SUCCEEDED(dummyDevice12->CreateCommandQueue(&queueDescription, __uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&dummyQueue)))) {
-            gExecuteTarget = (*reinterpret_cast<void***>(dummyQueue))[kExecuteCommandListsVtableIndex];
-            ok = installHook(gExecuteTarget, reinterpret_cast<void*>(executeCommandListsHook), reinterpret_cast<void**>(&gOriginalExecuteCommandLists)) && ok;
-            dummyQueue->Release();
-        }
-        dummyDevice12->Release();
-    }
-
+    dummySwapChain.Reset();
+    dummyContext.Reset();
+    dummyDevice.Reset();
 
     if (!ok) {
         return failInstall();
     }
+    bool const executeReady = tryInstallExecuteHook();
     gInstalled.store(true, std::memory_order_release);
-    gInstallRetryAt.store(0, std::memory_order_release);
+    gShuttingDown.store(false, std::memory_order_release);
+    if (executeReady) gInstallRetryAt.store(0, std::memory_order_release);
     logger().info("Injected ImGui DXGI hooks installed");
     return true;
 }
@@ -1189,16 +1297,39 @@ bool shutdownLocked() {
     hooksDisabled = disableHook(gPresent1Target) && hooksDisabled;
     hooksDisabled = disableHook(gResizeTarget) && hooksDisabled;
     hooksDisabled = disableHook(gPresentTarget) && hooksDisabled;
-    if (gOriginalWndProc && gWindow && IsWindow(gWindow)) {
+    // Complete an initializer that already owns resources. A callback waiting
+    // for that mutex will now fail render's under-lock shutdown check instead
+    // of installing a WndProc after this snapshot/restoration.
+    auto const [window, originalWndProc] = detail::snapshotAfterOverlayInitialization(gResourceMutex, [] {
+        return std::pair{gWindow, gOriginalWndProc.load(std::memory_order_acquire)};
+    });
+    if (originalWndProc && window && IsWindow(window)) {
+        auto const currentWndProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window, GWLP_WNDPROC));
+        if (currentWndProc != windowProc && currentWndProc != originalWndProc) {
+            logger().error("Another window subclass still chains through LHolo; retaining DLL until it is detached");
+            return false;
+        }
+        if (currentWndProc == windowProc || gMenuCursorShowCount.load(std::memory_order_acquire) != 0) {
+            auto const restored = detail::restoreWindowCursor(window, kMsgRestoreNativeCursor,
+                gMenuCursorShowCount, [] { releaseMenuCursor(); });
+            if (restored != detail::CursorRestoreResult::Restored) {
+                logger().error("Window-thread cursor restoration failed: result={} Win32 error={}; retaining overlay state",
+                    static_cast<int>(restored), GetLastError());
+                return false;
+            }
+        }
         SetLastError(0);
         auto const previous = SetWindowLongPtrW(
-            gWindow,
+            window,
             GWLP_WNDPROC,
-            reinterpret_cast<LONG_PTR>(gOriginalWndProc)
+            reinterpret_cast<LONG_PTR>(originalWndProc)
         );
         if (previous == 0 && GetLastError() != 0) {
             hooksDisabled = false;
         }
+    } else if (gMenuCursorShowCount.load(std::memory_order_acquire) != 0) {
+        logger().error("Cursor ownership remains without a reachable game window; retaining overlay state");
+        return false;
     }
 
     if (!hooksDisabled) {
@@ -1207,25 +1338,32 @@ bool shutdownLocked() {
     }
 
     waitForHookCallbacks(allowedCurrentThreadDepth);
+    if (gMenuCursorShowCount.load(std::memory_order_acquire) != 0) {
+        logger().error("A drained window callback left cursor ownership outstanding; retaining overlay state");
+        return false;
+    }
 
     // Praxis callbacks run inside Present/WndProc and have their own reader
     // barrier. After the outer hook drain, clearing the bridge cannot race UI
     // code executing in the companion DLL.
-    companion::shutdown();
+    if (!companion::shutdown()) {
+        logger().error("Companion callback retirement incomplete; retaining LHolo DLL and graphics state");
+        return false;
+    }
 
-    // Best effort: leave the cursor exactly where Minecraft expects it if the
-    // mod is unloaded while the menu is still open.
-    releaseMenuCursor();
     ClipCursor(nullptr);
 
-    removeHook(gExecuteTarget);
-    removeHook(gResize1Target);
-    removeHook(gPresent1Target);
-    removeHook(gResizeTarget);
-    removeHook(gPresentTarget);
+    bool hooksRemoved = true;
+    hooksRemoved = removeHook(gExecuteTarget) && hooksRemoved;
+    hooksRemoved = removeHook(gResize1Target) && hooksRemoved;
+    hooksRemoved = removeHook(gPresent1Target) && hooksRemoved;
+    hooksRemoved = removeHook(gResizeTarget) && hooksRemoved;
+    hooksRemoved = removeHook(gPresentTarget) && hooksRemoved;
+    if (!hooksRemoved) return false;
     gOriginalWndProc = nullptr;
 
     std::lock_guard lock(gResourceMutex);
+    std::lock_guard imguiLock(gImGuiMutex);
     releaseGraphicsBackend();
     if (gImGuiInitialized) {
         ImGui_ImplWin32_Shutdown();
@@ -1233,8 +1371,7 @@ bool shutdownLocked() {
         ImGui::DestroyContext();
         gImGuiInitialized = false;
     }
-    if (gGameQueue) gGameQueue->Release();
-    gGameQueue = nullptr;
+    gGameQueue.reset();
     gActiveSwapChain = nullptr;
     {
         std::lock_guard inputLock(gInputStateMutex);
@@ -1246,6 +1383,7 @@ bool shutdownLocked() {
     gInstallRetryAt.store(0, std::memory_order_release);
     gGuiVisibleLastFrame = false;
     gWindow = nullptr;
+    gExecuteHookInstalled.store(false, std::memory_order_release);
     gInstalled.store(false, std::memory_order_release);
     return true;
 }

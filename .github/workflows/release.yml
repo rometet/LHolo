@@ -18,8 +18,8 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - uses: xmake-io/github-action-setup-xmake@v1
-        # with:
-        #   xmake-version: branch@master
+        with:
+          xmake-version: '3.1.1'
 
       - uses: actions/cache@v5
         with:
@@ -32,7 +32,7 @@ jobs:
       - name: Setup LLVM
         uses: ZhongRuoyu/setup-llvm@v0
         with:
-          llvm-version: 22
+          llvm-version: 22.1.8
 
       - run: |
           xmake repo -u
@@ -51,6 +51,30 @@ jobs:
         run: |
           xmake run LHoloLogicTests
 
+      - name: Build and run NBT parser tests
+        run: |
+          xmake -v -y LHoloNbtTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloNbtTests
+
+      - name: Build and run language initialization failure tests
+        run: |
+          xmake -v -y LHoloLanguageStoreTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloLanguageStoreTests
+
+      - name: Build and run menu rendering tests
+        run: |
+          xmake -v -y LHoloUiTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloUiTests
+
+      - name: Build and run D3D11On12 queue binding tests
+        run: |
+          xmake -v -y LHoloGraphicsTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloGraphicsTests
+
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-${{ github.sha }}-client-windows-x64
@@ -58,6 +82,7 @@ jobs:
             bin/
 
   update-release-notes:
+    needs: build
     permissions:
       contents: write
     runs-on: ubuntu-latest

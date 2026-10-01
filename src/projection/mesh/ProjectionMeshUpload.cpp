@@ -242,6 +242,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 );
                 state.praxisCompatLiquidAggregate.reset();
                 state.praxisCompatLiquidAggregateOrder.clear();
+                state.praxisCompatLiquidBoundaryMaskCache.clear();
                 state.praxisCompatLiquidAggregateDirty = true;
                 state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
                 state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
@@ -300,10 +301,19 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     );
                 }
             } catch (std::exception const& exception) {
+                // Restore retry eligibility before any allocating diagnostic.
+                markSectionDirty(state, section, true);
+                if (++state.consecutiveMeshWorkerFailures >= 3) {
+                    state.asyncMeshBuildingEnabled = false;
+                    disableMeshWorkerForSession();
+                    stopMeshWorker();
+                    logger().warn("Projection mesh upload failed three times; using synchronous fallback for this session");
+                }
                 logger().warn(
                     "Projection mesh upload for section {} revision {} failed: {}",
                     section, result.revision, exception.what()
                 );
+            } catch (...) {
                 markSectionDirty(state, section, true);
                 if (++state.consecutiveMeshWorkerFailures >= 3) {
                     state.asyncMeshBuildingEnabled = false;
@@ -311,18 +321,10 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     stopMeshWorker();
                     logger().warn("Projection mesh upload failed three times; using synchronous fallback for this session");
                 }
-            } catch (...) {
                 logger().warn(
                     "Projection mesh upload for section {} revision {} failed with a non-standard exception",
                     section, result.revision
                 );
-                markSectionDirty(state, section, true);
-                if (++state.consecutiveMeshWorkerFailures >= 3) {
-                    state.asyncMeshBuildingEnabled = false;
-                    disableMeshWorkerForSession();
-                    stopMeshWorker();
-                    logger().warn("Projection mesh upload failed three times; using synchronous fallback for this session");
-                }
             }
         }
     }

@@ -6,10 +6,76 @@
 
 #include <fstream>
 #include <stdexcept>
+#include <atomic>
+#include <limits>
+#include <system_error>
+#include <utility>
+
+#include <Windows.h>
 
 #include <nlohmann/json.hpp>
 
 namespace lholo::settings {
+namespace {
+
+template <class T>
+T valueWithLegacyKey(nlohmann::json const& json, char const* currentKey, char const* legacyKey, T fallback) {
+    // Parse only the selected field. json.value(current, json.value(legacy,
+    // fallback)) eagerly validates obsolete data even when current is present.
+    if (auto const current = json.find(currentKey); current != json.end()) {
+        return current->get<T>();
+    }
+    return json.value(legacyKey, fallback);
+}
+
+[[noreturn]] void throwFileError(char const* operation, DWORD error) {
+    throw std::system_error(static_cast<int>(error), std::system_category(), operation);
+}
+
+void writeAtomically(std::filesystem::path const& path, std::string const& contents) {
+    static std::atomic_uint64_t sequence{};
+    struct TemporaryFile {
+        std::filesystem::path path;
+        HANDLE handle{INVALID_HANDLE_VALUE};
+        bool owned{};
+        ~TemporaryFile() {
+            if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+            if (owned) DeleteFileW(path.c_str());
+        }
+    } temporary;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        temporary.path = path.native() + L".lholo-tmp-" + std::to_wstring(GetCurrentProcessId())
+            + L"-" + std::to_wstring(sequence.fetch_add(1, std::memory_order_relaxed));
+        temporary.handle = CreateFileW(temporary.path.c_str(), GENERIC_WRITE, 0,
+            nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (temporary.handle != INVALID_HANDLE_VALUE) { temporary.owned = true; break; }
+        auto const error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            throwFileError("create settings temporary file", error);
+        }
+    }
+    if (!temporary.owned) throwFileError("allocate settings temporary filename", ERROR_FILE_EXISTS);
+    std::size_t offset{};
+    while (offset < contents.size()) {
+        auto const amount = static_cast<DWORD>((std::min)(contents.size() - offset,
+            static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
+        DWORD written{};
+        if (!WriteFile(temporary.handle, contents.data() + offset, amount, &written, nullptr)) {
+            throwFileError("write settings", GetLastError());
+        }
+        if (!written) throwFileError("write settings", ERROR_WRITE_FAULT);
+        offset += written;
+    }
+    if (!FlushFileBuffers(temporary.handle)) throwFileError("flush settings", GetLastError());
+    auto const handle = std::exchange(temporary.handle, INVALID_HANDLE_VALUE);
+    if (!CloseHandle(handle)) throwFileError("close settings", GetLastError());
+    if (!MoveFileExW(temporary.path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        throwFileError("replace settings", GetLastError());
+    }
+    temporary.owned = false;
+}
+
+} // namespace
 
 bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     if (!std::filesystem::exists(path)) return false;
@@ -18,27 +84,28 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     auto const json = nlohmann::json::parse(input, nullptr, true, true);
     auto const schemaVersion = json.value("version", 0);
 
-    out.lastStructurePath = json.value("lastStructurePath", out.lastStructurePath);
+    auto parsed = out;
+    parsed.lastStructurePath = json.value("lastStructurePath", parsed.lastStructurePath);
     if (auto const language = json.find("language");
         language != json.end() && language->is_string()) {
-        out.language = language->get<std::string>();
+        parsed.language = language->get<std::string>();
     } else {
         // Language preferences intentionally have no old integer migration:
         // missing or malformed values use the default locale.
-        out.language = "ja_JP";
+        parsed.language = "ja_JP";
     }
-    out.uiScale = json.value("uiScale", out.uiScale);
-    out.opacity = json.value("opacity", out.opacity);
-    out.correctionFillOpacity = json.value("correctionFillOpacity", out.correctionFillOpacity);
-    out.correctionOutlineOpacity = json.value("correctionOutlineOpacity", out.correctionOutlineOpacity);
-    out.structureBoundsEnabled = json.value("structureBoundsEnabled", out.structureBoundsEnabled);
-    out.correctionSeeThrough = json.value("correctionSeeThrough", out.correctionSeeThrough);
-    out.missingSeeThrough = json.value("missingSeeThrough", out.missingSeeThrough);
-    out.experimentalConsent = json.value("experimentalConsent", out.experimentalConsent);
-    out.materialHudEnabled = json.value("materialHudEnabled", out.materialHudEnabled);
-    out.materialHudPosition = json.value("materialHudPosition", out.materialHudPosition);
+    parsed.uiScale = json.value("uiScale", parsed.uiScale);
+    parsed.opacity = json.value("opacity", parsed.opacity);
+    parsed.correctionFillOpacity = json.value("correctionFillOpacity", parsed.correctionFillOpacity);
+    parsed.correctionOutlineOpacity = json.value("correctionOutlineOpacity", parsed.correctionOutlineOpacity);
+    parsed.structureBoundsEnabled = json.value("structureBoundsEnabled", parsed.structureBoundsEnabled);
+    parsed.correctionSeeThrough = json.value("correctionSeeThrough", parsed.correctionSeeThrough);
+    parsed.missingSeeThrough = json.value("missingSeeThrough", parsed.missingSeeThrough);
+    parsed.experimentalConsent = json.value("experimentalConsent", parsed.experimentalConsent);
+    parsed.materialHudEnabled = json.value("materialHudEnabled", parsed.materialHudEnabled);
+    parsed.materialHudPosition = json.value("materialHudPosition", parsed.materialHudPosition);
     // Malformed/missing lists fail closed without invalidating unrelated settings.
-    out.manualPlacementAllowedItems.clear();
+    parsed.manualPlacementAllowedItems.clear();
     if (auto const allowed = json.find("manualPlacementAllowedItems");
         allowed != json.end() && allowed->is_array()
         && allowed->size() <= place::detail::kMaxManualPlacementAllowedItems) {
@@ -50,60 +117,62 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         }
         if (valid) {
             if (auto normalized = place::detail::normalizeManualPlacementAllowedItems(items)) {
-                out.manualPlacementAllowedItems = std::move(*normalized);
+                parsed.manualPlacementAllowedItems = std::move(*normalized);
             }
         }
     }
-    out.placementRadius = json.value("placementRadius", out.placementRadius);
-    out.autoPlacementBreakCooldownSeconds = json.value(
+    parsed.placementRadius = json.value("placementRadius", parsed.placementRadius);
+    parsed.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
-        out.autoPlacementBreakCooldownSeconds
+        parsed.autoPlacementBreakCooldownSeconds
     );
-    out.hudEnabled = json.value("hudEnabled", out.hudEnabled);
-    out.hudShowFileName = json.value("hudShowFileName", out.hudShowFileName);
-    out.hudShowLayer = json.value("hudShowLayer", out.hudShowLayer);
-    out.hudShowOverallProgress = json.value("hudShowOverallProgress", out.hudShowOverallProgress);
-    out.hudShowProgress = json.value("hudShowProgress", out.hudShowProgress);
-    out.hudShowWrongState = json.value("hudShowWrongState", out.hudShowWrongState);
-    out.hudShowWrongType = json.value("hudShowWrongType", out.hudShowWrongType);
-    out.hudShowExtraBlocks = json.value("hudShowExtraBlocks", out.hudShowExtraBlocks);
-    out.hudShowProjectedBlockName = json.value(
+    parsed.hudEnabled = json.value("hudEnabled", parsed.hudEnabled);
+    parsed.hudShowFileName = json.value("hudShowFileName", parsed.hudShowFileName);
+    parsed.hudShowLayer = json.value("hudShowLayer", parsed.hudShowLayer);
+    parsed.hudShowOverallProgress = json.value("hudShowOverallProgress", parsed.hudShowOverallProgress);
+    parsed.hudShowProgress = json.value("hudShowProgress", parsed.hudShowProgress);
+    parsed.hudShowWrongState = json.value("hudShowWrongState", parsed.hudShowWrongState);
+    parsed.hudShowWrongType = json.value("hudShowWrongType", parsed.hudShowWrongType);
+    parsed.hudShowExtraBlocks = json.value("hudShowExtraBlocks", parsed.hudShowExtraBlocks);
+    parsed.hudShowProjectedBlockName = valueWithLegacyKey(
+        json,
         "hudShowProjectedBlockName",
-        json.value("hudShowBlockEntity", out.hudShowProjectedBlockName)
+        "hudShowBlockEntity",
+        parsed.hudShowProjectedBlockName
     );
-    out.hudPosition = json.value("hudPosition", out.hudPosition);
-    out.guiHotkey = json.value("guiHotkey", out.guiHotkey);
-    out.guiHotkeyModifiers = json.value("guiHotkeyModifiers", out.guiHotkeyModifiers);
+    parsed.hudPosition = json.value("hudPosition", parsed.hudPosition);
+    parsed.guiHotkey = json.value("guiHotkey", parsed.guiHotkey);
+    parsed.guiHotkeyModifiers = json.value("guiHotkeyModifiers", parsed.guiHotkeyModifiers);
     // Upstream schema 12 used Simplified Chinese and Alt+M as defaults. On the
     // first launch of this Japanese fork, migrate only those exact defaults;
     // custom languages and key bindings remain untouched. Schema 13 prevents
     // the migration from running again after the user changes a preference.
     if (schemaVersion <= 12) {
-        if (out.language == "zh_CN") out.language = "ja_JP";
-        if (out.guiHotkey == 'M' && out.guiHotkeyModifiers == 2) {
-            out.guiHotkey = 0x2D; // VK_INSERT
-            out.guiHotkeyModifiers = 0;
+        if (parsed.language == "zh_CN") parsed.language = "ja_JP";
+        if (parsed.guiHotkey == 'M' && parsed.guiHotkeyModifiers == 2) {
+            parsed.guiHotkey = 0x2D; // VK_INSERT
+            parsed.guiHotkeyModifiers = 0;
         }
     }
-    out.layerIncreaseHotkey = json.value("layerIncreaseHotkey", out.layerIncreaseHotkey);
-    out.layerDecreaseHotkey = json.value("layerDecreaseHotkey", out.layerDecreaseHotkey);
-    out.layerIncreaseHotkeyModifiers
-        = json.value("layerIncreaseHotkeyModifiers", out.layerIncreaseHotkeyModifiers);
-    out.layerDecreaseHotkeyModifiers
-        = json.value("layerDecreaseHotkeyModifiers", out.layerDecreaseHotkeyModifiers);
-    out.loadProjectionHotkey = json.value("loadProjectionHotkey", out.loadProjectionHotkey);
-    out.loadProjectionHotkeyModifiers
-        = json.value("loadProjectionHotkeyModifiers", out.loadProjectionHotkeyModifiers);
-    out.closeProjectionHotkey = json.value("closeProjectionHotkey", out.closeProjectionHotkey);
-    out.closeProjectionHotkeyModifiers
-        = json.value("closeProjectionHotkeyModifiers", out.closeProjectionHotkeyModifiers);
+    parsed.layerIncreaseHotkey = json.value("layerIncreaseHotkey", parsed.layerIncreaseHotkey);
+    parsed.layerDecreaseHotkey = json.value("layerDecreaseHotkey", parsed.layerDecreaseHotkey);
+    parsed.layerIncreaseHotkeyModifiers
+        = json.value("layerIncreaseHotkeyModifiers", parsed.layerIncreaseHotkeyModifiers);
+    parsed.layerDecreaseHotkeyModifiers
+        = json.value("layerDecreaseHotkeyModifiers", parsed.layerDecreaseHotkeyModifiers);
+    parsed.loadProjectionHotkey = json.value("loadProjectionHotkey", parsed.loadProjectionHotkey);
+    parsed.loadProjectionHotkeyModifiers
+        = json.value("loadProjectionHotkeyModifiers", parsed.loadProjectionHotkeyModifiers);
+    parsed.closeProjectionHotkey = json.value("closeProjectionHotkey", parsed.closeProjectionHotkey);
+    parsed.closeProjectionHotkeyModifiers
+        = json.value("closeProjectionHotkeyModifiers", parsed.closeProjectionHotkeyModifiers);
     // Restore the historic manual-placement toggle field only. Easy/range
     // toggles remain intentionally absent from the current UI/runtime.
-    out.toggleManualHotkey = json.value("toggleManualHotkey", out.toggleManualHotkey);
-    out.toggleManualHotkeyModifiers
-        = json.value("toggleManualHotkeyModifiers", out.toggleManualHotkeyModifiers);
-    out.altWheelOffsetEnabled
-        = json.value("altWheelOffsetEnabled", out.altWheelOffsetEnabled);
+    parsed.toggleManualHotkey = json.value("toggleManualHotkey", parsed.toggleManualHotkey);
+    parsed.toggleManualHotkeyModifiers
+        = json.value("toggleManualHotkeyModifiers", parsed.toggleManualHotkeyModifiers);
+    parsed.altWheelOffsetEnabled
+        = json.value("altWheelOffsetEnabled", parsed.altWheelOffsetEnabled);
 
     // Slot order: left, right, forward, backward, up, down. These are the
     // directions the slots produce now; configs written while the slots were
@@ -141,36 +210,41 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         "moveYPlusHotkeyModifiers",
         "moveYMinusHotkeyModifiers"
     };
-    for (std::size_t index = 0; index < out.moveHotkeys.size(); ++index) {
-        out.moveHotkeys[index] = json.value(
+    for (std::size_t index = 0; index < parsed.moveHotkeys.size(); ++index) {
+        parsed.moveHotkeys[index] = valueWithLegacyKey(
+            json,
             moveKeyNames[index],
-            json.value(legacyMoveKeyNames[index], out.moveHotkeys[index])
+            legacyMoveKeyNames[index],
+            parsed.moveHotkeys[index]
         );
-        out.moveHotkeyModifiers[index] = json.value(
+        parsed.moveHotkeyModifiers[index] = valueWithLegacyKey(
+            json,
             moveModifierNames[index],
-            json.value(legacyMoveModifierNames[index], out.moveHotkeyModifiers[index])
+            legacyMoveModifierNames[index],
+            parsed.moveHotkeyModifiers[index]
         );
     }
 
-    out.hasSavedProjection = json.value("hasSavedProjection", out.hasSavedProjection);
-    out.savedAnchorX = json.value("savedAnchorX", out.savedAnchorX);
-    out.savedAnchorY = json.value("savedAnchorY", out.savedAnchorY);
-    out.savedAnchorZ = json.value("savedAnchorZ", out.savedAnchorZ);
-    out.savedRotation = json.value("savedRotation", out.savedRotation);
-    out.savedMirror = json.value("savedMirror", out.savedMirror);
-    out.savedOffsetX = json.value("savedOffsetX", out.savedOffsetX);
-    out.savedOffsetY = json.value("savedOffsetY", out.savedOffsetY);
-    out.savedOffsetZ = json.value("savedOffsetZ", out.savedOffsetZ);
-    out.savedLayerDisplayMode = json.value("savedLayerDisplayMode", out.savedLayerDisplayMode);
-    out.savedDisplayLayer = json.value("savedDisplayLayer", out.savedDisplayLayer);
-    out.savedLayerAxis = json.value("savedLayerAxis", out.savedLayerAxis);
-    out.savedStructurePath = json.value("savedStructurePath", out.savedStructurePath);
+    parsed.hasSavedProjection = json.value("hasSavedProjection", parsed.hasSavedProjection);
+    parsed.savedAnchorX = json.value("savedAnchorX", parsed.savedAnchorX);
+    parsed.savedAnchorY = json.value("savedAnchorY", parsed.savedAnchorY);
+    parsed.savedAnchorZ = json.value("savedAnchorZ", parsed.savedAnchorZ);
+    parsed.savedRotation = json.value("savedRotation", parsed.savedRotation);
+    parsed.savedMirror = json.value("savedMirror", parsed.savedMirror);
+    parsed.savedOffsetX = json.value("savedOffsetX", parsed.savedOffsetX);
+    parsed.savedOffsetY = json.value("savedOffsetY", parsed.savedOffsetY);
+    parsed.savedOffsetZ = json.value("savedOffsetZ", parsed.savedOffsetZ);
+    parsed.savedLayerDisplayMode = json.value("savedLayerDisplayMode", parsed.savedLayerDisplayMode);
+    parsed.savedDisplayLayer = json.value("savedDisplayLayer", parsed.savedDisplayLayer);
+    parsed.savedLayerAxis = json.value("savedLayerAxis", parsed.savedLayerAxis);
+    parsed.savedStructurePath = json.value("savedStructurePath", parsed.savedStructurePath);
+    out = std::move(parsed);
     return true;
 }
 
 void saveSettingsFile(std::filesystem::path const& path, Settings const& settings) {
     std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), error);
     if (error) throw std::runtime_error(error.message());
 
     nlohmann::ordered_json const json{
@@ -240,9 +314,9 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"savedDisplayLayer", settings.savedDisplayLayer},
         {"savedLayerAxis", settings.savedLayerAxis}
     };
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output) throw std::runtime_error("无法写入配置文件");
-    output << json.dump(2);
+    // Serialize before touching the destination: invalid UTF-8/allocations can
+    // throw. Replacement occurs only after a complete, flushed write succeeds.
+    writeAtomically(path, json.dump(2));
 }
 
 } // namespace lholo::settings

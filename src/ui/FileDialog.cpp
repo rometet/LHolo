@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -14,6 +15,13 @@
 
 namespace lholo::ui {
 namespace {
+
+void checkFileDialogFailure(char const* operation) {
+    auto const error = CommDlgExtendedError();
+    if (error != 0U) {
+        throw std::runtime_error(std::string{operation} + " dialog failed (code " + std::to_string(error) + ")");
+    }
+}
 
 std::wstring utf8ToWide(std::string_view text) {
     if (text.empty()) return {};
@@ -45,7 +53,7 @@ std::wstring buildFilter(std::initializer_list<std::pair<i18n::TextKey, char con
 } // namespace
 
 std::optional<std::filesystem::path> openStructureFile(std::filesystem::path const& current) {
-    std::vector<wchar_t> buffer(32768, L'\0');
+    std::vector<wchar_t> buffer(FileDialogPathCodeUnitCapacity, L'\0');
     if (!current.empty()) {
         auto const value = current.native();
         std::copy_n(value.data(), std::min(value.size(), buffer.size() - 1), buffer.data());
@@ -65,12 +73,15 @@ std::optional<std::filesystem::path> openStructureFile(std::filesystem::path con
     dialog.nFilterIndex = 1;
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
     dialog.lpstrDefExt = L"mcstructure";
-    if (!GetOpenFileNameW(&dialog)) return std::nullopt;
+    if (!GetOpenFileNameW(&dialog)) {
+        checkFileDialogFailure("Open structure file");
+        return std::nullopt;
+    }
     return std::filesystem::path{buffer.data()};
 }
 
 std::optional<std::filesystem::path> saveMcstructureFile() {
-    std::vector<wchar_t> buffer(32768, L'\0');
+    std::vector<wchar_t> buffer(FileDialogPathCodeUnitCapacity, L'\0');
     constexpr wchar_t defaultName[] = L"structure.mcstructure";
     std::copy_n(defaultName, std::size(defaultName), buffer.data());
 
@@ -86,7 +97,10 @@ std::optional<std::filesystem::path> saveMcstructureFile() {
     dialog.nFilterIndex = 1;
     dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
     dialog.lpstrDefExt = L"mcstructure";
-    if (!GetSaveFileNameW(&dialog)) return std::nullopt;
+    if (!GetSaveFileNameW(&dialog)) {
+        checkFileDialogFailure("Save mcstructure file");
+        return std::nullopt;
+    }
     return std::filesystem::path{buffer.data()};
 }
 

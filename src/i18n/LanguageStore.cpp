@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -141,7 +142,7 @@ char const* tableLookup(ParsedLanguage const& entry, TextKey key) noexcept {
 } // namespace
 
 void initLanguageStore() {
-    auto* state = new LanguageStoreState;
+    auto state = std::make_unique<LanguageStoreState>();
     auto const count = generated::kLanguageResources.size();
     state->infos.resize(count);
     state->parsed.resize(count);
@@ -165,7 +166,7 @@ void initLanguageStore() {
 
     // Published once, on the main thread, before any render or worker thread
     // can call lookupText(); plain publication is sufficient.
-    gState = state;
+    gState = state.release();
 }
 
 std::span<LanguageInfo const> languages() noexcept {

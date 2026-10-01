@@ -7,7 +7,10 @@
 #pragma once
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/ProjectionTypes.h"
+#include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/runtime/MeshDiagnosticGate.h"
 
 #include <array>
 #include <cstddef>
@@ -51,6 +54,7 @@ struct SectionState {
 
 struct ProjectionState {
     bool                            enabled{};
+    bool                            placementCoordinatesInvalid{};
     BlockPos                        anchor{};
     IClientInstance*                client{};
     Level*                          level{};
@@ -74,6 +78,23 @@ struct ProjectionState {
     // Updating one byte and two counters keeps the HUD O(1) per frame.
     std::vector<uchar>              progressErrorKind;
     std::vector<uchar>              blockActorRendererAvailable;
+    std::optional<SectionBlockSnapshot> sectionBlockSnapshot;
+    bool hasBuildBlockState(std::size_t index) const {
+        return sectionBlockSnapshot ? sectionBlockSnapshot->find(index) != nullptr
+            : index < correctionStates.size() && index < blockActorRendererAvailable.size();
+    }
+    CorrectionState buildCorrectionState(std::size_t index) const {
+        if (!sectionBlockSnapshot) return correctionStates.at(index);
+        auto const* value = sectionBlockSnapshot->find(index);
+        if (!value) throw std::out_of_range("section correction snapshot missing block");
+        return static_cast<CorrectionState>(value->correction);
+    }
+    bool buildActorRendererAvailable(std::size_t index) const {
+        if (!sectionBlockSnapshot) return blockActorRendererAvailable.at(index) != 0;
+        auto const* value = sectionBlockSnapshot->find(index);
+        if (!value) throw std::out_of_range("section actor snapshot missing block");
+        return value->actorRenderer != 0;
+    }
     std::uint64_t                   progressCorrectCount{};
     std::uint64_t                   progressVisibleCorrectCount{};
     std::uint64_t                   progressWrongTypeCount{};
@@ -116,6 +137,7 @@ struct ProjectionState {
     std::vector<std::unique_ptr<PraxisCompatLiquidSectionData>> praxisCompatLiquidSections;
     std::unique_ptr<PraxisCompatLiquidSectionData> praxisCompatLiquidAggregate;
     std::vector<std::size_t>                       praxisCompatLiquidAggregateOrder;
+    LiquidBoundaryMaskCache                       praxisCompatLiquidBoundaryMaskCache;
     bool                                           praxisCompatLiquidAggregateDirty{true};
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
     std::vector<std::size_t>                nativeLiquidSectionCellCounts;
@@ -162,6 +184,7 @@ struct ProjectionState {
 
     NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
+    MeshDiagnosticGate                      meshDiagnosticGate;
 };
 
 } // namespace lholo::projection::detail

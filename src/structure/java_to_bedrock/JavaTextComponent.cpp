@@ -9,35 +9,41 @@
 #include "structure/java_to_bedrock/JavaBlockEntityToBedrock.h"
 
 #include <nlohmann/json.hpp>
+#include <vector>
 
 namespace lholo::structure::detail {
 namespace {
 
 void appendJavaText(nlohmann::json const& value, std::string& output) {
-    if (value.is_string()) {
-        output += value.get_ref<std::string const&>();
-        return;
-    }
-    if (value.is_array()) {
-        for (auto const& child : value) appendJavaText(child, output);
-        return;
-    }
-    if (!value.is_object()) return;
+    // A legal 65535-byte NBT string can contain tens of thousands of nested
+    // JSON arrays. Preserve traversal order using owned heap storage instead
+    // of consuming the native callback's C++ stack once per component.
+    std::vector<nlohmann::json const*> pending{&value};
+    while (!pending.empty()) {
+        auto const& current = *pending.back();
+        pending.pop_back();
+        if (current.is_string()) {
+            output += current.get_ref<std::string const&>();
+            continue;
+        }
+        if (current.is_array()) {
+            for (auto child = current.rbegin(); child != current.rend(); ++child) pending.push_back(&*child);
+            continue;
+        }
+        if (!current.is_object()) continue;
 
-    if (auto const text = value.find("text"); text != value.end() && text->is_string()) {
-        output += text->get_ref<std::string const&>();
-    } else if (auto const fallback = value.find("fallback");
-               fallback != value.end() && fallback->is_string()) {
-        output += fallback->get_ref<std::string const&>();
-    } else if (auto const translate = value.find("translate");
-               translate != value.end() && translate->is_string()) {
-        // Client language tables are not available in this format converter.
-        // Keeping the translation key is deterministic and preferable to
-        // silently dropping the component.
-        output += translate->get_ref<std::string const&>();
+        if (auto const text = current.find("text"); text != current.end() && text->is_string()) {
+            output += text->get_ref<std::string const&>();
+        } else if (auto const fallback = current.find("fallback");
+                   fallback != current.end() && fallback->is_string()) {
+            output += fallback->get_ref<std::string const&>();
+        } else if (auto const translate = current.find("translate");
+                   translate != current.end() && translate->is_string()) {
+            // Client language tables are not available in this converter.
+            output += translate->get_ref<std::string const&>();
+        }
+        if (auto const extra = current.find("extra"); extra != current.end()) pending.push_back(&*extra);
     }
-
-    if (auto const extra = value.find("extra"); extra != value.end()) appendJavaText(*extra, output);
 }
 
 } // namespace

@@ -33,6 +33,13 @@ struct ProjectionSectionBuildSettings {
     bool     identityTransform{};
 };
 
+// Shared by the async owner's lightweight setup and synchronous section build.
+// Never mode leaves bounds to the render owner; an existing mesh is reused.
+void buildStructureBoundsMesh(
+    ProjectionState& state, Tessellator& tessellator, Tessellator::UploadMode uploadMode,
+    ProjectionSectionBuildSettings const& settings
+);
+
 void buildProjectionSection(
     ProjectionState&                      state,
     Tessellator&                          tessellator,

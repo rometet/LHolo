@@ -6,6 +6,8 @@
 // with Minecraft's immediate submission path.
 
 #pragma once
+#include "projection/core/ProjectionCoordinateKey.h"
+#include "projection/core/LiquidReplayRules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,29 +27,6 @@ class Block;
 class BlockActor;
 
 namespace lholo::projection::detail {
-
-using SubChunkKey = std::tuple<int, int, int>;
-
-struct SubChunkKeyHash {
-    std::size_t operator()(SubChunkKey const& key) const noexcept {
-        auto const [x, y, z] = key;
-        // Coordinates are signed block/section coordinates. Mix their raw
-        // 32-bit representations into one 64-bit avalanche hash; ordering is
-        // irrelevant for all projected-world lookup tables.
-        auto mix = [](std::uint64_t value) {
-            value ^= value >> 30U;
-            value *= 0xBF58476D1CE4E5B9ULL;
-            value ^= value >> 27U;
-            value *= 0x94D049BB133111EBULL;
-            value ^= value >> 31U;
-            return value;
-        };
-        auto hash = mix(static_cast<std::uint32_t>(x));
-        hash ^= mix(static_cast<std::uint32_t>(y) + 0x9E3779B9U);
-        hash ^= mix(static_cast<std::uint32_t>(z) + 0x85EBCA6BU);
-        return static_cast<std::size_t>(hash);
-    }
-};
 
 enum class CorrectionState : std::uint8_t { Unknown, Missing, Correct, WrongType, WrongState };
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
@@ -95,6 +74,7 @@ struct PraxisCompatLiquidSectionData {
         };
         auto const& quadInfo = tessellatorState.quadInfo;
         return vertexCount != 0U
+            && replayVertexCountFits(vertexCount)
             && vertexCount % 4U == 0U
             && nativeStream->mMode == mce::PrimitiveMode::QuadList
             && nativeStream->mIndices.get().empty()

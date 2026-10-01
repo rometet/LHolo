@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionRenderer.h"
+#include "app/NativeCallbackBoundary.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
@@ -64,11 +65,6 @@ std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 
-enum class PraxisLiquidMaterialCandidate : std::uint8_t {
-    SignText,
-    BlendBlock
-};
-
 // Candidate A remains available as an explicit diagnostic build. Phase 4B
 // uses Candidate B and changes only the MaterialPtr passed to Exact Replay.
 #if defined(LHOLO_PRAXIS_LIQUID_SIGN_TEXT_DIAGNOSTIC)
@@ -103,8 +99,9 @@ OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
 
 // Temporarily turns off depth testing on a shared render material so correction
 // overlay geometry draws through world blocks (X-ray), restoring it when the scope ends.
-// Safe because projection rendering runs synchronously on the present thread and
-// vanilla never draws between the set and the restore.
+// This scope runs inside the LevelRenderer hook and restores on C++ unwind.
+// The engine's consumption/serialization of shared material state requires
+// real-device validation; synchronous C++ scope alone does not prove it.
 class ScopedNoDepthTest {
 public:
     ScopedNoDepthTest(mce::MaterialPtr const& material, bool enable) {
@@ -168,6 +165,11 @@ bool appendPraxisExactReplayStream(
     if (!destination.ready() || !source.ready()) return false;
     auto& destinationData = *destination.nativeStream;
     auto const& sourceData = *source.nativeStream;
+    auto const counts = combineReplayCounts(
+        destinationData.mPositions.get().size(), sourceData.mPositions.get().size(),
+        destination.tessellatorState.maxVertexCount, source.tessellatorState.maxVertexCount
+    );
+    if (!counts) return false;
     if (destinationData.mMode != sourceData.mMode
         || destinationData.mFieldEnabled.get() != sourceData.mFieldEnabled.get()
         || destination.tessellatorState.isFormatFixed
@@ -238,14 +240,8 @@ bool appendPraxisExactReplayStream(
         source.tessellatorState.quadInfo.begin(),
         source.tessellatorState.quadInfo.end()
     );
-    destination.tessellatorState.count = static_cast<std::uint32_t>(
-        destinationData.mPositions.get().size()
-    );
-    destination.tessellatorState.maxVertexCount = std::max(
-        destination.tessellatorState.count,
-        destination.tessellatorState.maxVertexCount
-            + source.tessellatorState.maxVertexCount
-    );
+    destination.tessellatorState.count = counts->vertices;
+    destination.tessellatorState.maxVertexCount = counts->capacity;
     return destination.ready();
 }
 
@@ -275,19 +271,7 @@ void compactPraxisAggregatePerVertexField(
     std::vector<Value>&                 field,
     std::span<std::uint8_t const>       removeQuads
 ) {
-    if (field.empty()) return;
-    std::size_t write = 0;
-    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
-        if (removeQuads[quad] != 0U) continue;
-        auto const read = quad * 4U;
-        for (std::size_t corner = 0; corner < 4U; ++corner) {
-            if (write != read + corner) {
-                field[write] = std::move(field[read + corner]);
-            }
-            ++write;
-        }
-    }
-    field.resize(write);
+    compactLiquidQuadField(field, removeQuads, 4U);
 }
 
 template <class Value>
@@ -295,14 +279,7 @@ void compactPraxisAggregatePerQuadField(
     std::vector<Value>&                 field,
     std::span<std::uint8_t const>       removeQuads
 ) {
-    if (field.empty()) return;
-    std::size_t write = 0;
-    for (std::size_t quad = 0; quad < removeQuads.size(); ++quad) {
-        if (removeQuads[quad] != 0U) continue;
-        if (write != quad) field[write] = std::move(field[quad]);
-        ++write;
-    }
-    field.resize(write);
+    compactLiquidQuadField(field, removeQuads, 1U);
 }
 
 std::unique_ptr<PraxisCompatLiquidSectionData> clonePraxisExactReplayData(
@@ -326,7 +303,9 @@ struct PraxisAggregateBoundaryCullResult {
 };
 
 PraxisAggregateBoundaryCullResult cullPraxisAggregateBoundaryFaces(
-    PraxisCompatLiquidSectionData& data
+    PraxisCompatLiquidSectionData& data,
+    NativeLiquidFaceCullMask const* cachedMask,
+    NativeLiquidFaceCullMask& computedMask
 ) {
     PraxisAggregateBoundaryCullResult result{};
     if (!data.ready()) return result;
@@ -359,9 +338,11 @@ PraxisAggregateBoundaryCullResult cullPraxisAggregateBoundaryFaces(
         return result;
     }
 
-    auto const cullMask = buildNativeLiquidInternalFaceCullMask(
-        std::span<glm::vec3 const>{positions.data(), positions.size()}
+    auto freshMask = cachedMask ? NativeLiquidFaceCullMask{} : buildNativeLiquidInternalFaceCullMask(
+        std::span<glm::vec3 const>{positions.data(), positions.size()},
+        NativeLiquidFullFaceTolerance, std::span<PraxisCompatLiquidKind const>{data.liquidKinds}
     );
+    auto const& cullMask = cachedMask ? *cachedMask : freshMask;
     if (!cullMask.valid || cullMask.removeQuads.size() != quadCount
         || cullMask.removedVertices() >= vertexCount) {
         return result;
@@ -422,6 +403,7 @@ PraxisAggregateBoundaryCullResult cullPraxisAggregateBoundaryFaces(
     result.verticesCulled = cullMask.removedVertices();
     result.verticesAfter = finalVertexCount;
     result.facePairsCulled = cullMask.facePairs;
+    if (!cachedMask) computedMask = std::move(freshMask);
     return result;
 }
 
@@ -429,6 +411,24 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
     ProjectionState&                   state,
     std::span<std::size_t const>       sections
 ) {
+    if (state.praxisCompatLiquidAggregateDirty) state.praxisCompatLiquidBoundaryMaskCache.clear();
+    // Reject an oversized batch before copying streams. The caller will replay
+    // each original section, preserving geometry and the native int begin ABI.
+    ReplayCounts aggregateCounts{};
+    std::vector<LiquidSectionQuadCount> sectionQuadCounts;
+    sectionQuadCounts.reserve(sections.size());
+    for (auto const section : sections) {
+        if (section >= state.praxisCompatLiquidSections.size()) return {};
+        auto const& source = state.praxisCompatLiquidSections[section];
+        if (!source || !source->ready()) return {};
+        auto const combined = combineReplayCounts(
+            aggregateCounts.vertices, source->nativeStream->mPositions.get().size(),
+            aggregateCounts.capacity, source->tessellatorState.maxVertexCount
+        );
+        if (!combined) return {};
+        aggregateCounts = *combined;
+        sectionQuadCounts.push_back({section, source->nativeStream->mPositions.get().size() / 4U});
+    }
     std::unique_ptr<PraxisCompatLiquidSectionData> result;
     for (auto const section : sections) {
         if (section >= state.praxisCompatLiquidSections.size()) return {};
@@ -448,9 +448,11 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
     }
     if (!result || !result->ready()) return {};
 
+    auto const cachedMask = state.praxisCompatLiquidBoundaryMaskCache.forOrder(sectionQuadCounts);
+    NativeLiquidFaceCullMask computedMask;
     auto candidate = clonePraxisExactReplayData(*result);
     auto const boundaryCull = candidate
-        ? cullPraxisAggregateBoundaryFaces(*candidate)
+        ? cullPraxisAggregateBoundaryFaces(*candidate, cachedMask ? &*cachedMask : nullptr, computedMask)
         : PraxisAggregateBoundaryCullResult{};
     auto& telemetry = state.nativeLiquidTelemetry;
     telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull =
@@ -465,6 +467,9 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
         telemetry.praxisCompatAggregateBoundaryFacePairsCulled =
             boundaryCull.facePairsCulled;
         telemetry.praxisCompatAggregateBoundaryCullSkipped = 0U;
+        if (!cachedMask && !state.praxisCompatLiquidBoundaryMaskCache.remember(sectionQuadCounts, computedMask)) {
+            state.praxisCompatLiquidBoundaryMaskCache.clear();
+        }
         result = std::move(candidate);
     } else {
         telemetry.praxisCompatAggregateVerticesBoundaryCulled = 0U;
@@ -474,7 +479,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
         telemetry.praxisCompatAggregateBoundaryCullSkipped = 1U;
         refreshPraxisExactReplayBounds(*result);
     }
-    logger().info(
+    if (!cachedMask) logger().info(
         "PRAXIS_LIQUID_BOUNDARY_CULL before={} culled={} after={} pairs={} sections={} skipped={}",
         telemetry.praxisCompatAggregateVerticesBeforeBoundaryCull,
         telemetry.praxisCompatAggregateVerticesBoundaryCulled,
@@ -499,6 +504,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     mce::TexturePtr const&               terrainTexture
 ) {
     PraxisExactReplaySubmitResult result{};
+    if (!data.ready()) return result;
     auto const replayStarted = std::chrono::steady_clock::now();
     // Do not borrow ScreenContext's shared Tessellator here. Minecraft reuses
     // that object for later UI/item rendering in the same frame; Exact Replay
@@ -576,8 +582,8 @@ void submitProjectedBlockActorPass(
         return;
     }
 
-    alignas(mce::MaterialPtr) static const std::byte sNoForcedMaterialStorage[sizeof(mce::MaterialPtr)]{};
-    auto const& noForcedMaterial = *reinterpret_cast<mce::MaterialPtr const*>(sNoForcedMaterialStorage);
+    mce::MaterialPtr noForcedMaterial{renderContext.mItemInHandRenderer.mMatBlendBlock.get()};
+    noForcedMaterial.mRenderMaterialInfoPtr.reset();
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
     ScopedTessellationBlocks blockActorWorldScope(
         *state.expectedWorldBlocks,
@@ -618,9 +624,10 @@ void submitProjectedBlockActorPass(
                 -1,
                 std::nullopt
             );
+        } catch (std::exception const& exception) {
+            app::reportNativeCallbackFailure("projected block actor render", exception.what());
         } catch (...) {
-            // A version-mismatched block actor renderer must not unwind out of
-            // Minecraft's render callback.
+            app::reportNativeCallbackFailure("projected block actor render", "unknown C++ exception");
         }
     }
 }
@@ -661,7 +668,6 @@ void submitProjectionMeshPass(
     // Retained meshes exist only for a section whose exact build failed, or in
     // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
-    bool nativeLiquidDrawnWithSelectedMaterial{};
     if (renderAlphaLayer) {
         auto& telemetry = state.nativeLiquidTelemetry;
         telemetry.praxisCompatImmediateSubmitsPerFrame = 0;
@@ -690,17 +696,18 @@ void submitProjectionMeshPass(
             }
         );
         if (!nativeLiquidSections.empty()) {
-            if (auto const* signText = render::resolveSignTextMaterial()) {
-                auto const signTextReady = tryRenderMaterial(*signText) != nullptr;
+            auto const signText = render::resolveSignTextMaterial(blendMaterial);
+            {
+                auto const signTextReady = signText && tryRenderMaterial(*signText) != nullptr;
                 auto const blendMaterialReady =
                     tryRenderMaterial(blendMaterial) != nullptr;
-                auto const& exactReplayMaterial =
+                auto const* exactReplayMaterial =
                     ActivePraxisLiquidMaterial
                             == PraxisLiquidMaterialCandidate::BlendBlock
-                        ? blendMaterial
-                        : *signText;
+                        ? &blendMaterial
+                        : (signText ? &*signText : nullptr);
                 auto const exactReplayMaterialReady =
-                    tryRenderMaterial(exactReplayMaterial) != nullptr;
+                    liquidReplayMaterialReady(ActivePraxisLiquidMaterial, signTextReady, blendMaterialReady);
                 telemetry.nativeLiquidSignTextResolved = signTextReady ? 1U : 0U;
                 telemetry.praxisCompatSignTextResolved = signTextReady ? 1U : 0U;
                 telemetry.praxisLiquidMaterialSignTextReady =
@@ -712,8 +719,11 @@ void submitProjectionMeshPass(
                             == PraxisLiquidMaterialCandidate::BlendBlock
                         ? 1U
                         : 0U;
-                if (!gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
+                if (signTextReady && !gSignTextResolvedLogged.exchange(true, std::memory_order_acq_rel)) {
                     logger().info("NATIVE_LIQUID_SIGN_TEXT_RESOLVED material=sign_text");
+                }
+                if (!signTextReady && !gSignTextUnavailableLogged.exchange(true, std::memory_order_acq_rel)) {
+                    logger().warn("NATIVE_LIQUID_SIGN_TEXT_UNAVAILABLE material=sign_text");
                 }
                 telemetry.praxisCompatTerrainTextureReady =
                     state.terrainTexture ? 1U : 0U;
@@ -757,7 +767,7 @@ void submitProjectionMeshPass(
                         auto const submitted = submitPraxisExactReplayImmediately(
                             renderContext.mScreenContext,
                             data,
-                            exactReplayMaterial,
+                            *exactReplayMaterial,
                             *state.terrainTexture
                         );
                         ++telemetry.praxisCompatImmediateSubmits;
@@ -769,7 +779,6 @@ void submitProjectionMeshPass(
                         telemetry.praxisCompatFullNativeStreamsPreserved = 1;
                         telemetry.praxisCompatTextureRefSubmit = 1;
                         telemetry.praxisCompatTerrainTextureBound = 1;
-                        nativeLiquidDrawnWithSelectedMaterial = true;
 
                         if (!gPraxisLiquidMaterialParityLogged.exchange(
                                 true,
@@ -802,23 +811,29 @@ void submitProjectionMeshPass(
                     }
                 }
 
+                auto const retainedCandidate = retainedLiquidMaterial(signTextReady, blendMaterialReady);
+                auto const* retainedMaterial = !retainedCandidate ? nullptr
+                    : (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText ? &*signText : &blendMaterial);
                 for (auto const section : retainedSections) {
                     auto const& mesh = state.nativeLiquidSectionMeshes[section];
-                    if (!mesh || !mesh->isValid()) continue;
+                    if (!retainedMaterial || !mesh || !mesh->isValid()) continue;
                     mesh->renderMesh(
                         renderContext.mScreenContext,
-                        *signText,
+                        *retainedMaterial,
                         *state.terrainTextureVariant,
                         0,
                         mesh->mVertexCount.get().value_or(0u),
                         emptyOffscreenCaptureDescription(),
                         nullptr
                     );
-                    ++telemetry.nativeLiquidSignTextDraws;
+                    if (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText) {
+                        ++telemetry.nativeLiquidSignTextDraws;
+                    } else {
+                        ++telemetry.nativeLiquidLegacyMaterialDraws;
+                    }
                     if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
                         ++telemetry.praxisCompatRetainedFallbackDraws;
                     }
-                    nativeLiquidDrawnWithSelectedMaterial = true;
                 }
 
                 if (!exactSections.empty()
@@ -848,11 +863,6 @@ void submitProjectionMeshPass(
                         telemetry.praxisCompatRetainedFallbackDraws
                     );
                 }
-            } else if (!gSignTextUnavailableLogged.exchange(
-                           true,
-                           std::memory_order_acq_rel
-                       )) {
-                logger().warn("NATIVE_LIQUID_SIGN_TEXT_UNAVAILABLE material=sign_text");
             }
         }
     }
@@ -972,29 +982,6 @@ void submitProjectionMeshPass(
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
-    // If the selected Exact Replay material is unavailable, retain the legacy
-    // mesh fallback. Candidate A still requires exact sign_text resolution;
-    // Candidate B requires the typed mMatBlendBlock MaterialPtr instead.
-    if (renderAlphaLayer && !nativeLiquidDrawnWithSelectedMaterial) {
-        for (auto const section : nativeLiquidSections) {
-            auto const& mesh = state.nativeLiquidSectionMeshes[section];
-            if (!mesh || !mesh->isValid()) continue;
-            mesh->renderMesh(
-                renderContext.mScreenContext,
-                blendMaterial,
-                *state.terrainTextureVariant,
-                0,
-                mesh->mVertexCount.get().value_or(0u),
-                emptyOffscreenCaptureDescription(),
-                nullptr
-            );
-            ++state.nativeLiquidTelemetry.nativeLiquidLegacyMaterialDraws;
-            if (ActiveNativeLiquidRenderPath == NativeLiquidRenderPath::PraxisCompat) {
-                ++state.nativeLiquidTelemetry.praxisCompatRetainedFallbackDraws;
-            }
-        }
-    }
-
     // Textured liquid hulls travel the proven glass path: blend-block material
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
@@ -1060,7 +1047,7 @@ void submitProjectionMeshPass(
     // Prefer the glow sign text material for the bounds box: its shader reads
     // the vertex color the builder wrote (bright cyan) instead of the
     // engine-driven uniform color of the selection outline family.
-    auto const* glowMaterial = render::resolveGlowSignMaterial();
+    auto const glowMaterial = render::resolveGlowSignMaterial(outlineMaterial);
     auto const& boundsMaterial = glowMaterial ? *glowMaterial : outlineMaterial;
     if (materialExists(boundsMaterial) && structureBoundsEnabled
         && state.structureBoundsMesh && state.structureBoundsMesh->isValid()) {

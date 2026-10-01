@@ -300,7 +300,10 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     }
 
     auto const mask = buildNativeLiquidInternalFaceCullMask(
-        std::span<glm::vec3 const>{positions.data(), positions.size()}
+        std::span<glm::vec3 const>{positions.data(), positions.size()},
+        NativeLiquidFullFaceTolerance,
+        liquidKinds ? std::span<PraxisCompatLiquidKind const>{*liquidKinds}
+                    : std::span<PraxisCompatLiquidKind const>{}
     );
     if (!mask.valid) {
         outcome.skipReason = "geometry_contract_invalid";
@@ -408,13 +411,6 @@ void buildBlockEntityPlaceholderSectionMesh(
     std::span<std::size_t const>
 );
 
-void buildStructureBoundsMesh(
-    ProjectionState&,
-    Tessellator&,
-    Tessellator::UploadMode,
-    ProjectionSectionBuildSettings const&
-);
-
 void buildProjectionSection(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
@@ -450,8 +446,8 @@ void buildProjectionSection(
     }
 
     auto const blockCount = state.structure->renderBlocks.size();
-    if (state.correctionStates.size() < blockCount
-        || state.blockActorRendererAvailable.size() < blockCount) {
+    if (!state.sectionBlockSnapshot && (state.correctionStates.size() < blockCount
+        || state.blockActorRendererAvailable.size() < blockCount)) {
         logger().error(
             "Projection section build rejected per-block storage mismatch: blocks={} correction={} blockActor={}",
             blockCount,
@@ -461,7 +457,7 @@ void buildProjectionSection(
         return;
     }
     for (auto const index : state.sectionBlockIndices[section]) {
-        if (index >= blockCount) {
+        if (index >= blockCount || !state.hasBuildBlockState(index)) {
             logger().error(
                 "Projection section build rejected index {} >= {} in section {}",
                 index,
@@ -509,7 +505,7 @@ void buildProjectionSection(
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correctionState = state.correctionStates[index];
+        auto const correctionState = state.buildCorrectionState(index);
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
         // only their red/yellow outline below. This removes the
@@ -853,12 +849,13 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
 
     std::vector<std::size_t> succeeded;
     state.nativeLiquidSectionCellCounts[section] = 0;
+    std::vector<PraxisCompatLiquidKind> liquidKinds;
     if (candidates.empty()) {
         state.nativeLiquidSectionMeshes[section].reset();
         return succeeded;
@@ -953,6 +950,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
         );
 
         TessellatorSuffixCheckpoint const cellCheckpoint{tessellator};
+        auto const kindsBeforeCell = liquidKinds.size();
         bool cellPositive{};
         bool cellFailure{};
         bool cellUvFailure{};
@@ -989,8 +987,12 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                     true
                 );
             } catch (std::exception const& exception) {
-                if (positions.size() != positionsBefore || colors.size() != colorsBefore
-                    || uvs.size() != uvsBefore) throw;
+                // A later layer may fail after an earlier layer succeeded.
+                // Reject the entire cell, including every optional stream and
+                // scalar builder flag, before handing it to the proxy fallback.
+                cellCheckpoint.restore(tessellator);
+                liquidKinds.resize(kindsBeforeCell);
+                cellPositive = false;
                 cellFailure = true;
                 logger().warn(
                     "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception={}",
@@ -1003,8 +1005,9 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                 );
                 break;
             } catch (...) {
-                if (positions.size() != positionsBefore || colors.size() != colorsBefore
-                    || uvs.size() != uvsBefore) throw;
+                cellCheckpoint.restore(tessellator);
+                liquidKinds.resize(kindsBeforeCell);
+                cellPositive = false;
                 cellFailure = true;
                 logger().warn(
                     "NATIVE_LIQUID_TESSELLATION_FAILURE type={} layer={} pos=({}, {}, {}) exception=unknown",
@@ -1041,6 +1044,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                 );
             if (!uvRemapped) {
                 cellCheckpoint.restore(tessellator);
+                liquidKinds.resize(kindsBeforeCell);
                 cellPositive = false;
                 cellUvFailure = true;
                 if (!gNativeLiquidUvFailureLogged.exchange(true, std::memory_order_acq_rel)) {
@@ -1082,6 +1086,9 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
                 cellAlphaModifiedVertices += (before >> 24U) != (after >> 24U);
             }
             cellVertices += added;
+            liquidKinds.insert(liquidKinds.end(), added,
+                expectedLiquid->getBlockType().mMaterial.mSuperHot
+                    ? PraxisCompatLiquidKind::Lava : PraxisCompatLiquidKind::Water);
             cellUvVertices += addedUvs;
             cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
             cellPositive = true;
@@ -1148,7 +1155,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
         state.nativeLiquidSectionMeshes[section].reset();
         return succeeded;
     }
-    auto const cull = cullNativeLiquidInternalFaces(tessellator);
+    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
     state.nativeLiquidTelemetry.nativeLiquidVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.nativeLiquidVerticesAfterCull += cull.after;
     if (cull.processed) {
@@ -1216,7 +1223,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
         candidates.push_back(index);
     }
     std::vector<std::size_t> succeeded;
@@ -1276,10 +1283,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
 
         TessellatorSuffixCheckpoint const checkpoint{tessellator};
         auto& positions = tessellator.mMeshData->mPositions.get();
-        auto& colors = tessellator.mMeshData->mColors.get();
         auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
         auto const positionsBefore = positions.size();
-        auto const colorsBefore = colors.size();
         auto const uvsBefore = uvs.size();
         bool rendered{};
         try {
@@ -1290,10 +1295,9 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
                 false
             );
         } catch (std::exception const& exception) {
-            if (positions.size() != positionsBefore || colors.size() != colorsBefore
-                || uvs.size() != uvsBefore) {
-                checkpoint.restore(tessellator);
-            }
+            // Native code can change an optional stream or builder flags
+            // without changing positions/colors/UV0. Restore the full suffix.
+            checkpoint.restore(tessellator);
             ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
             logger().warn(
                 "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception={}",
@@ -1305,10 +1309,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             );
             continue;
         } catch (...) {
-            if (positions.size() != positionsBefore || colors.size() != colorsBefore
-                || uvs.size() != uvsBefore) {
-                checkpoint.restore(tessellator);
-            }
+            checkpoint.restore(tessellator);
             ++state.nativeLiquidTelemetry.praxisCompatTessellationFailure;
             logger().warn(
                 "PRAXIS_COMPAT_LIQUID_TESSELLATION_FAILURE type={} layer=3 pos=({}, {}, {}) exception=unknown",
@@ -1579,7 +1580,7 @@ void buildLiquidProxySectionMesh(
     std::vector<std::size_t> liquidProxyIndices;
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
+        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
         if (std::binary_search(
                 nativeLiquidSucceeded.begin(),
                 nativeLiquidSucceeded.end(),
@@ -1802,8 +1803,8 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.correctionStates[index] != CorrectionState::Missing) continue;
-        if (state.blockActorRendererAvailable[index]) continue;
+        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (state.buildActorRendererAvailable(index)) continue;
         blockEntityIndices.push_back(index);
     }
     if (!blockEntityIndices.empty()) {
@@ -1903,7 +1904,7 @@ void buildCorrectionSectionMeshes(
     std::size_t missingCount{};
     std::size_t wrongCount{};
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correction = state.correctionStates[index];
+        auto const correction = state.buildCorrectionState(index);
         if (isWrongState(correction)) ++wrongCount;
         else if (correction == CorrectionState::Missing) ++missingCount;
     }
@@ -1935,7 +1936,7 @@ void buildCorrectionSectionMeshes(
             false
         );
         for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.correctionStates[index];
+            auto const correction = state.buildCorrectionState(index);
             auto const priority = correctionPriority(correction);
             if (priority == 0) continue;
             if (isWrongState(correction) != wantWrong) continue;
@@ -2023,8 +2024,8 @@ void buildCorrectionSectionMeshes(
                 worldPosition.x, worldPosition.y, worldPosition.z
             });
             auto priority = expected == state.expectedWorldBlockIndices->end()
-                    || expected->second >= state.correctionStates.size()
-                ? 0 : correctionPriority(state.correctionStates[expected->second]);
+                    || !state.hasBuildBlockState(expected->second)
+                ? 0 : correctionPriority(state.buildCorrectionState(expected->second));
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
                 *state.structure,
@@ -2039,7 +2040,7 @@ void buildCorrectionSectionMeshes(
             return priority;
         };
         for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.correctionStates[index];
+            auto const correction = state.buildCorrectionState(index);
             auto const priority = correctionPriority(correction);
             if (priority == 0) continue;
             if (isWrongState(correction) != wantWrong) continue;

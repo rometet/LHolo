@@ -19,6 +19,9 @@
 #include "place/PlacementState.h"
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementDirectionRules.h"
+#include "place/VoxelRayAxis.h"
+#include "place/PlacementQuantization.h"
+#include "projection/core/ProjectionCoordinateBounds.h"
 #include "place/PlaceHelper.h"
 
 #include "block/BlockPlacementRules.h"
@@ -184,9 +187,9 @@ PlacementContext makePlacementContext(Vec3 const& eye, Vec3 const& view, float r
     return {
         eye,
         reach * reach,
-        quantize(eye.x, 4.0f),
-        quantize(eye.y, 4.0f),
-        quantize(eye.z, 4.0f),
+        detail::quantizePlacementEye(eye.x),
+        detail::quantizePlacementEye(eye.y),
+        detail::quantizePlacementEye(eye.z),
         quantize(view.x, 32.0f),
         quantize(view.y, 32.0f),
         quantize(view.z, 32.0f),
@@ -395,25 +398,25 @@ std::optional<ProjectionTarget> findProjectionTarget(
     Vec3 const&  dir,
     float        maxDist
 ) {
+    auto const rayOrigin = projection::detail::checkedVoxelRayOrigin(
+        {origin.x, origin.y, origin.z}, {dir.x, dir.y, dir.z}, maxDist);
+    if (!rayOrigin) return std::nullopt;
     auto& region = player.getDimensionBlockSource();
 
-    int const stepX = dir.x > 0.0f ? 1 : -1;
-    int const stepY = dir.y > 0.0f ? 1 : -1;
-    int const stepZ = dir.z > 0.0f ? 1 : -1;
-    float const tDeltaX = dir.x != 0.0f ? std::abs(1.0f / dir.x) : std::numeric_limits<float>::infinity();
-    float const tDeltaY = dir.y != 0.0f ? std::abs(1.0f / dir.y) : std::numeric_limits<float>::infinity();
-    float const tDeltaZ = dir.z != 0.0f ? std::abs(1.0f / dir.z) : std::numeric_limits<float>::infinity();
+    auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
+    auto const axisY = detail::voxelRayAxis(origin.y, (*rayOrigin)[1], dir.y);
+    auto const axisZ = detail::voxelRayAxis(origin.z, (*rayOrigin)[2], dir.z);
+    int const stepX = axisX.step, stepY = axisY.step, stepZ = axisZ.step;
+    auto const tDeltaX = axisX.delta, tDeltaY = axisY.delta, tDeltaZ = axisZ.delta;
 
-    int x = static_cast<int>(std::floor(origin.x));
-    int y = static_cast<int>(std::floor(origin.y));
-    int z = static_cast<int>(std::floor(origin.z));
+    int x = (*rayOrigin)[0];
+    int y = (*rayOrigin)[1];
+    int z = (*rayOrigin)[2];
     BlockPos const originCell{x, y, z};
-    float tMaxX = (stepX > 0 ? (static_cast<float>(x) + 1.0f - origin.x) : (origin.x - static_cast<float>(x))) * tDeltaX;
-    float tMaxY = (stepY > 0 ? (static_cast<float>(y) + 1.0f - origin.y) : (origin.y - static_cast<float>(y))) * tDeltaY;
-    float tMaxZ = (stepZ > 0 ? (static_cast<float>(z) + 1.0f - origin.z) : (origin.z - static_cast<float>(z))) * tDeltaZ;
+    auto tMaxX = axisX.nextBoundary, tMaxY = axisY.nextBoundary, tMaxZ = axisZ.nextBoundary;
 
     for (int step = 0; step < 512; ++step) {
-        float tEnter;
+        double tEnter;
         uchar entryFace;
         if (tMaxX < tMaxY && tMaxX < tMaxZ) {
             x += stepX;
@@ -598,65 +601,24 @@ bool sameFirstPresentSerializedState(
 }
 
 bool placementDirectionMatches(Block const& predicted, Block const& ghost) {
-    using detail::PlacementDirectionRule;
-    switch (detail::placementDirectionRule(ghost.getTypeName())) {
-    case PlacementDirectionRule::Facing:
-        return sameFirstPresentSerializedState(
-            predicted, ghost, "minecraft:facing_direction", "facing_direction"
-        );
-    case PlacementDirectionRule::Horizontal:
-        return sameFirstPresentSerializedState(
-            predicted, ghost, "minecraft:cardinal_direction", "direction"
-        );
-    case PlacementDirectionRule::Orientation:
-        return sameSerializedState(predicted, ghost, "orientation");
-    case PlacementDirectionRule::Lever:
-        return sameSerializedState(predicted, ghost, "lever_direction");
-    case PlacementDirectionRule::Bell:
-        return sameSerializedState(predicted, ghost, "direction")
-            && sameSerializedState(predicted, ghost, "attachment");
-    case PlacementDirectionRule::Trapdoor:
-        // open_bit is never chosen by the initial block placement. Vanilla
-        // places the trapdoor closed; opening happens through a later use or
-        // redstone update. Requiring projected open_bit here made every open
-        // trapdoor impossible in easy/range mode. Direction and half are the
-        // actual placement-controlled states and remain strict.
-        return sameSerializedState(predicted, ghost, "direction")
-            && sameSerializedState(predicted, ghost, "upside_down_bit");
-    case PlacementDirectionRule::None:
-        return false;
-    }
-    return false;
+    return detail::placementDirectionStatesMatch(
+        detail::placementDirectionRule(ghost.getTypeName()),
+        [&](char const* key) { return serializedState(predicted, key); },
+        [&](char const* key) { return serializedState(ghost, key); }
+    );
 }
 
 std::optional<uchar> deterministicSupportDirection(Block const& ghost) {
-    auto const& name = ghost.getTypeName();
-
-    // Hopper output direction is exactly the support block that vanilla is
-    // clicked against. Bedrock 1.26.51 still serializes hopper facing as the
-    // legacy numeric facing_direction state.
-    if (name == "minecraft:hopper") {
-        auto facing = serializedState(ghost, "facing_direction");
-        if (facing.empty()) facing = serializedState(ghost, "minecraft:facing_direction");
-        if (facing == "0" || facing == "down")  return static_cast<uchar>(Facing::Name::Down);
-        if (facing == "2" || facing == "north") return static_cast<uchar>(Facing::Name::North);
-        if (facing == "3" || facing == "south") return static_cast<uchar>(Facing::Name::South);
-        if (facing == "4" || facing == "west")  return static_cast<uchar>(Facing::Name::West);
-        if (facing == "5" || facing == "east")  return static_cast<uchar>(Facing::Name::East);
-        return std::nullopt;
-    }
-
-    // torch_facing_direction names the support relative to the torch. "top"
-    // means the torch stands on the block below; side values name that side.
-    auto const torchFacing = serializedState(ghost, "torch_facing_direction");
-    if (torchFacing == "top")   return static_cast<uchar>(Facing::Name::Down);
-    if (torchFacing == "north") return static_cast<uchar>(Facing::Name::North);
-    if (torchFacing == "south") return static_cast<uchar>(Facing::Name::South);
-    if (torchFacing == "west")  return static_cast<uchar>(Facing::Name::West);
-    if (torchFacing == "east")  return static_cast<uchar>(Facing::Name::East);
-    return std::nullopt;
+    static_assert(static_cast<uchar>(Facing::Name::Down) == 0
+        && static_cast<uchar>(Facing::Name::North) == 2
+        && static_cast<uchar>(Facing::Name::South) == 3
+        && static_cast<uchar>(Facing::Name::West) == 4
+        && static_cast<uchar>(Facing::Name::East) == 5);
+    auto facing = serializedState(ghost, "facing_direction");
+    if (facing.empty()) facing = serializedState(ghost, "minecraft:facing_direction");
+    return detail::deterministicSupportFace(ghost.getTypeName(), facing,
+        serializedState(ghost, "torch_facing_direction"));
 }
-
 bool isFastOpaquePlacementCandidate(Block const& ghost) {
     if (!ghost.getBlockType().mIsOpaqueFullBlock
         || detail::placementDirectionRule(ghost.getTypeName())
@@ -1056,14 +1018,14 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     }
 }
 
-void tickEasyPlaceImpl() {
+void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     auto client = ll::service::getClientInstance();
     if (!client) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
-    auto* player = client->getLocalPlayer();
-    if (!player) {
+    auto* player = &activePlayer;
+    if (client->getLocalPlayer() != player) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
@@ -1096,6 +1058,11 @@ void tickEasyPlaceImpl() {
     Vec3 const dir{rawDir.x / length, rawDir.y / length, rawDir.z / length};
 
     float const pickRange = player->getPickRange();
+    if (!projection::detail::checkedVoxelRayOrigin(
+            {origin.x, origin.y, origin.z}, {dir.x, dir.y, dir.z}, pickRange)) {
+        updateAimedProjectedBlockName(nullptr);
+        return;
+    }
     auto target = findProjectionTarget(*player, origin, dir, pickRange);
     updateAimedProjectedBlockName(
         showProjectedBlockName && target ? target->block : nullptr
@@ -1204,10 +1171,11 @@ void tickEasyPlaceImpl() {
 
 namespace detail {
 
-ManualTargetStatus manualTargetStatusUnderCrosshair() {
-    auto client = ll::service::getClientInstance();
-    auto* player = client ? client->getLocalPlayer() : nullptr;
-    if (!player) return ManualTargetStatus::None;
+ManualTargetStatus manualTargetStatusUnderCrosshair(Player& localPlayer) {
+    // Called only after isLocalManualBuild verifies the GameMode's receiver.
+    // Borrow that receiver for its own callback instead of looking up another
+    // player whose lifetime is unrelated to the current invocation.
+    auto* player = &static_cast<LocalPlayer&>(localPlayer);
     Vec3 const eye = player->getEyePos();
     Vec3 const rawDir = player->getViewVector(1.0f);
     float const length = std::sqrt(rawDir.x * rawDir.x + rawDir.y * rawDir.y + rawDir.z * rawDir.z);
@@ -1220,8 +1188,8 @@ ManualTargetStatus manualTargetStatusUnderCrosshair() {
         : ManualTargetStatus::MissingMaterial;
 }
 
-void tickEasyPlace() {
-    tickEasyPlaceImpl();
+void tickEasyPlace(LocalPlayer& player) {
+    tickEasyPlaceImpl(player);
 }
 
 } // namespace lholo::place::detail
