@@ -621,7 +621,7 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         return std::nullopt;
     }
     if (message == kMsgAcquireMenuCursor) {
-        acquireMenuCursor();
+        if (isForegroundGameWindow(window) && anyMenuVisible()) acquireMenuCursor();
         return 0;
     }
     if (message == kMsgMaintainGameMouse) {
@@ -638,6 +638,8 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
     }
     if (message == WM_KILLFOCUS || (message == WM_ACTIVATEAPP && wParam == FALSE)) {
         structure::resetHotkeyState();
+        companion::close();
+        if (structure::isGuiVisible()) structure::requestOpenGui();
         cancelMouseHandoff();
         releaseMenuCursor();
         ClipCursor(nullptr);
@@ -947,7 +949,7 @@ void render(IDXGISwapChain* swapChain) {
     auto const showHint = structure::actionHintActive();
     if (!showGui && !showHud && !showHint) return;
 
-    if (showGui) {
+    if (showGui && isForegroundGameWindow(gWindow)) {
         // Re-asserted every frame: a Minecraft screen transition, an alt-tab or
         // another overlay can hide the cursor again behind our back. The handler
         // is idempotent, so this never drifts the display counter.
