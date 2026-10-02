@@ -27,6 +27,9 @@ struct StructureTransformSnapshot {
     LayerDisplayMode layerDisplayMode{LayerDisplayMode::All};
     int displayLayer{};
     LayerAxis layerAxis{LayerAxis::Y};
+    bool visible{true};
+    bool countExtras{true};
+    bool operator==(StructureTransformSnapshot const&) const = default;
 };
 
 struct SavedProjectionSnapshot {
@@ -75,10 +78,16 @@ public:
     void clearLoaded(i18n::Message status);
 
     [[nodiscard]] StructureTransformSnapshot transform() const;
+    // Publish one domain placement value; readers cannot see mixed XYZ/layers.
+    bool applyTransform(StructureTransformSnapshot const& value);
     [[nodiscard]] bool layerDisplayEnabled() const;
     void resetTransform();
     bool setRotation(int value);
     bool setMirror(int value);
+    bool setVisible(bool value);
+    bool setCountExtras(bool value);
+    bool visible() const { return mVisible.load(std::memory_order_acquire); }
+    bool countExtras() const { return mCountExtras.load(std::memory_order_acquire); }
     bool setOffsetX(int value);
     bool setOffsetY(int value);
     bool setOffsetZ(int value);
@@ -106,6 +115,8 @@ private:
     std::string                      mLastPath;
     i18n::Message                    mStatus{i18n::TextKey::StatusNotLoaded};
 
+    std::atomic_bool mVisible{true}, mCountExtras{true};
+    std::atomic_bool mSavedVisible{true}, mSavedCountExtras{true};
     std::atomic_int mRotationQuarterTurns{0};
     std::atomic_int mMirrorMode{0};
     std::atomic_int mOffsetX{0};
@@ -129,6 +140,6 @@ private:
     std::atomic_int  mSavedLayerAxis{0};
 };
 
-int maxLayerFor(LoadedStructure const& structure, LayerAxis axis);
+int maxLayerFor(LoadedStructure const& structure, LayerAxis axis, int rotation = 0);
 
 } // namespace lholo::structure::detail

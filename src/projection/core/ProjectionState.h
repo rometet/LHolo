@@ -111,6 +111,7 @@ struct ProjectionState {
     std::uint64_t                   extraScanCell{};
     std::set<SubChunkKey>           pendingLoadedSubChunks;
     std::vector<BrokenProjectionCell> pendingBrokenCells;
+    bool                            cachedCountExtras{true};
     int                             cachedRotation{-1};
     int                             cachedMirror{-1};
     int                             cachedOffsetX{};
@@ -124,7 +125,7 @@ struct ProjectionState {
     float                           cachedCorrectionOutlineOpacity{-1.0f};
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
     // Extra blocks occupy cells that have no render-block index. The detected
-    // set covers the whole source region for HUD counting; the render set and
+    // set covers the visible source region for HUD counting; the render set and
     // per-section sets contain only the current visible range. All stay sparse.
     std::map<SubChunkKey, std::size_t>    localSectionIndices;
     std::vector<SubChunkKey>              localSectionKeys;

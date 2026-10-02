@@ -16,6 +16,7 @@ char const* pageName(MenuPage page);
 void renderNavigation(MenuModel& model, UiMetrics const& metrics);
 
 void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
+void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderCreateStructurePage(
     MenuModel& model, MenuActions const& actions, UiMetrics const& metrics
 );

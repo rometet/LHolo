@@ -216,8 +216,7 @@ void renderProjection(
             ? std::max(0, static_cast<int>(state.structure->materialCount) - 1)
             : std::max(
                 0,
-                (layerAxis == structure::LayerAxis::X
-                    ? state.structure->sizeX : state.structure->sizeY) - 1
+                (layerAxis == structure::LayerAxis::X ? state.structure->sizeX : structure::layerCount(structure::PlacementTransform{{state.structure->sizeX,state.structure->sizeY,state.structure->sizeZ},{},rotationTurns,mirrorMode}.placedSize(), layerAxis)) - 1
             );
         auto const displayLayer = std::clamp(
             transform.displayLayer, 0, maxLayer
@@ -293,6 +292,9 @@ void renderProjection(
     // incrementally constructing the initial placement snapshot. Do not render
     // or schedule against a partial virtual world.
     if (state.placementBuildActive || state.placementCoordinatesInvalid) return;
+    // Keep the authoritative update/worker pipeline converging while hidden;
+    // visibility gates submission, without retaining a backlog of world facts.
+    if (!structure::detail::StructureSession::getInstance().visible()) return;
 
     // Keep vanilla world queries at their real BlockPos, but do not upload large
     // absolute coordinates to the GPU. Render vertices relative to the projection
@@ -479,6 +481,7 @@ void renderProjection(
 
 bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
     if (projectionWorldEventsFailed()) return false;
+    if (!structure::detail::StructureSession::getInstance().visible()) return false;
     return ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe&) {
             if (state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive) {

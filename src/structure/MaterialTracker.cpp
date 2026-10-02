@@ -2,6 +2,11 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "structure/MaterialTracker.h"
+#include "structure/InventoryContents.h"
+#include "structure/SchematicRuntime.h"
+#include "structure/PlacementTransform.h"
+#include "structure/Verification.h"
+#include "mc/world/level/block/VanillaStates.h"
 #include "app/FutureResult.h"
 #include "app/NativeCallbackBoundary.h"
 
@@ -39,7 +44,6 @@
 namespace lholo::structure::detail {
 namespace {
 
-constexpr int kInventorySlots = 36;
 constexpr std::uint64_t kAvailabilityRefreshMs = 400;
 constexpr std::uint64_t kMaterialHudRecountIntervalMs = 400;
 std::atomic_bool gMaterialListInvalidated{};
@@ -129,6 +133,12 @@ std::vector<MaterialRequirement> resolveMaterials(
         if (!blockValue || blockCount == 0) return;
 
         std::string const typeName{blockValue->getTypeName()};
+        auto const rule = requiredItemRule(typeName,
+            blockValue->getState<bool>(VanillaStates::UpperBlockBit()).value_or(false),
+            blockValue->getState<bool>(VanillaStates::HeadPieceBit()).value_or(false));
+        if (!rule.quantity) return;
+        blockCount = blockCount > std::numeric_limits<std::uint64_t>::max()/rule.quantity
+            ? std::numeric_limits<std::uint64_t>::max() : blockCount * rule.quantity;
         auto const key = block::materialKey(typeName);
         if (key.empty()) return;
         MaterialRequirement requirement;
@@ -212,7 +222,8 @@ MaterialHudResult countMaterialHud(MaterialHudInput input) {
     for (std::size_t index = 0; index < blocks.size(); ++index) {
         if (input.progressCorrect[index] != 0) continue;
         auto const& entry = blocks[index];
-        auto const layer = input.key.layerAxis == LayerAxis::X ? entry.x : entry.y;
+        auto const layer = layerOf({{input.structure->sizeX,input.structure->sizeY,input.structure->sizeZ},{},input.key.rotation,input.key.mirror},
+            {entry.x,entry.y,entry.z}, input.key.layerAxis);
         if (!projection::isLayerVisible(
             layer, input.key.layerDisplayMode, input.key.displayLayer,
                 entry.materialIndex, entry.liquidMaterialIndex, input.key.layerAxis
@@ -231,12 +242,7 @@ std::vector<int> collectInventoryAvailability(
     LocalPlayer&                            player,
     std::vector<MaterialRequirement> const& requirements
 ) {
-    std::unordered_map<std::string, int> inventoryCounts;
-    auto& inventory = player.getInventory();
-    for (int slot = 0; slot < kInventorySlots; ++slot) {
-        auto const& item = inventory.getItem(slot);
-        if (!item.isNull()) inventoryCounts[item.getTypeName()] += static_cast<int>(item.mCount);
-    }
+    auto inventoryCounts = countInventoryItems(player.getInventory());
 
     std::vector<int> available(requirements.size(), 0);
     for (std::size_t index = 0; index < requirements.size(); ++index) {
@@ -358,6 +364,7 @@ void tickMaterialTracker(LocalPlayer& player) {
 }
 
 void shutdownMaterialTracker() {
+    schematic::shutdown();
     auto& worker = materialHudWorkerState();
     if (worker.inFlight) {
         auto inFlight = app::takePendingValue(worker.inFlight);

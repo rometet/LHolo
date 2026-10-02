@@ -267,11 +267,38 @@
     LHOLO_TEXT_KEY("hint.noAllowedItems", HintNoAllowedItems, "")                                    \
     LHOLO_TEXT_KEY("actionHint.manualModeBlocked", ActionHintManualModeBlocked, "")
 
+
+#define LHOLO_SCHEMATIC_TEXT_KEYS \
+    LHOLO_TEXT_KEY("page.schematics", PageSchematics, "") \
+    LHOLO_TEXT_KEY("schematic.files", SchematicFiles, "") \
+    LHOLO_TEXT_KEY("schematic.placements", SchematicPlacements, "") \
+    LHOLO_TEXT_KEY("schematic.refresh", SchematicRefresh, "") \
+    LHOLO_TEXT_KEY("schematic.import", SchematicImport, "") \
+    LHOLO_TEXT_KEY("schematic.place", SchematicPlace, "") \
+    LHOLO_TEXT_KEY("schematic.select", SchematicSelect, "") \
+    LHOLO_TEXT_KEY("schematic.deselect", SchematicDeselect, "") \
+    LHOLO_TEXT_KEY("schematic.delete", SchematicDelete, "") \
+    LHOLO_TEXT_KEY("schematic.move", SchematicMove, "") \
+    LHOLO_TEXT_KEY("schematic.visible", SchematicVisible, "") \
+    LHOLO_TEXT_KEY("schematic.extras", SchematicExtras, "") \
+    LHOLO_TEXT_KEY("schematic.verify", SchematicVerify, "") \
+    LHOLO_TEXT_KEY("schematic.summary", SchematicSummary, "") \
+    LHOLO_TEXT_KEY("schematic.pending", SchematicPending, "") \
+    LHOLO_TEXT_KEY("schematic.nearest", SchematicNearest, "") \
+    LHOLO_TEXT_KEY("schematic.truncated", SchematicTruncated, "") \
+    LHOLO_TEXT_KEY("schematic.materials", SchematicMaterials, "") \
+    LHOLO_TEXT_KEY("schematic.inventoryUnavailable", SchematicInventoryUnavailable, "") \
+    LHOLO_TEXT_KEY("schematic.filterAll", SchematicFilterAll, "") \
+    LHOLO_TEXT_KEY("schematic.filterWrong", SchematicFilterWrong, "") \
+    LHOLO_TEXT_KEY("schematic.filterState", SchematicFilterState, "") \
+    LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "")
+
 namespace lholo::i18n {
 
 enum class TextKey : std::uint16_t {
 #define LHOLO_TEXT_KEY(identifier, enumName, comment) enumName,
     LHOLO_TEXT_KEY_LIST
+    LHOLO_SCHEMATIC_TEXT_KEYS
 #undef LHOLO_TEXT_KEY
         Count,
 };
@@ -283,6 +310,7 @@ inline constexpr std::size_t kTextKeyCount = static_cast<std::size_t>(TextKey::C
 inline constexpr std::array<std::string_view, kTextKeyCount> kTextKeyIds{{
 #define LHOLO_TEXT_KEY(identifier, enumName, comment) identifier,
     LHOLO_TEXT_KEY_LIST
+    LHOLO_SCHEMATIC_TEXT_KEYS
 #undef LHOLO_TEXT_KEY
 }};
 

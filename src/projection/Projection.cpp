@@ -22,6 +22,7 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionQueries.h"
+#include "structure/StructureSession.h"
 
 #include <vector>
 
@@ -136,6 +137,7 @@ std::optional<MaterialProgressKey> getMaterialProgressKey() {
                 *state.cachedLayerDisplayMode,
                 state.cachedDisplayLayer,
                 *state.cachedLayerAxis,
+                state.cachedRotation, state.cachedMirror,
             };
         }
     );
@@ -154,7 +156,8 @@ std::optional<MaterialProgressSnapshot> captureMaterialProgress(
                 && state.progressRevision == expected.progressRevision
                 && state.cachedLayerDisplayMode == expected.layerDisplayMode
                 && state.cachedDisplayLayer == expected.displayLayer
-                && state.cachedLayerAxis == expected.layerAxis;
+                && state.cachedLayerAxis == expected.layerAxis
+                && state.cachedRotation == expected.rotation && state.cachedMirror == expected.mirror;
             if (!matches) return std::nullopt;
             return MaterialProgressSnapshot{expected, state.structure, state.progressCorrect};
         }
@@ -180,7 +183,8 @@ std::vector<BrokenProjectionCell> takeBrokenProjectionCells(LocalPlayer& player)
     detail::ProjectionSession::getInstance().withLockedState(
         [&](detail::ProjectionState& state, overlay::BoundsWireframe&) {
             std::lock_guard lifecycleLock(detail::projectionWorldLifecycleMutex());
-            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive) return;
+            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive
+                || !structure::detail::StructureSession::getInstance().visible()) return;
             if (!projectionWorldViewMatches(state, player)) return;
             result.swap(state.pendingBrokenCells);
         }
@@ -193,7 +197,8 @@ ProjectionQuery queryProjection(LocalPlayer& player, BlockPos const& worldPos) {
     detail::ProjectionSession::getInstance().withLockedState(
         [&](detail::ProjectionState& state, overlay::BoundsWireframe&) {
             std::lock_guard lifecycleLock(detail::projectionWorldLifecycleMutex());
-            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive) return;
+            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive
+                || !structure::detail::StructureSession::getInstance().visible()) return;
             if (!projectionWorldViewMatches(state, player)) return;
             result = detail::queryProjectionCell(state, worldPos);
         }
@@ -206,7 +211,8 @@ std::vector<RangeCandidate> queryMissingCellsInRange(LocalPlayer& player, Vec3 c
     detail::ProjectionSession::getInstance().withLockedState(
         [&](detail::ProjectionState& state, overlay::BoundsWireframe&) {
             std::lock_guard lifecycleLock(detail::projectionWorldLifecycleMutex());
-            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive) return;
+            if (!state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive
+                || !structure::detail::StructureSession::getInstance().visible()) return;
             if (!projectionWorldViewMatches(state, player)) return;
             result = detail::queryMissingProjectionCells(state, center, radius);
         }

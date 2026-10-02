@@ -14,6 +14,13 @@ enum class LayerAxis : int {
     Y        = 0,
     X        = 1,
     Material = 2,
+    // Appended; 0/1/2 retain their source-coordinate/Material meaning.
+    BottomToTop = 3,
+    TopToBottom = 4,
+    WestToEast = 5,
+    EastToWest = 6,
+    NorthToSouth = 7,
+    SouthToNorth = 8,
 };
 
 enum class LayerDisplayMode : int {
@@ -32,6 +39,7 @@ enum class LayerDisplayMode : int {
 }
 
 [[nodiscard]] constexpr LayerAxis layerAxisFromInt(int value) {
+    if (value >= 3 && value <= 8) return static_cast<LayerAxis>(value);
     return static_cast<LayerAxis>(std::clamp(value, 0, 2));
 }
 

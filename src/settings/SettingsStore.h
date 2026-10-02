@@ -79,6 +79,7 @@ struct Settings {
     int savedLayerDisplayMode{};
     int savedDisplayLayer{};
     int savedLayerAxis{};
+    bool savedVisible{true}, savedCountExtras{true};
     std::string savedStructurePath;
 };
 

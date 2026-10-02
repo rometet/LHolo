@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "structure/PlacementTransform.h"
+
 #include "structure/LayerDisplayTypes.h"
 #include "projection/runtime/WorldEventInterest.h"
 
@@ -24,6 +26,16 @@ class BlockSource;
 class LegacyStructureSettings;
 
 namespace lholo::projection::detail {
+
+inline int projectionLayer(structure::LoadedStructure const& loaded, BlockPos const& local,
+    structure::LayerAxis axis, int mirror, int rotation) {
+    return structure::layerOf({{loaded.sizeX,loaded.sizeY,loaded.sizeZ},{},rotation,mirror},
+        {local.x,local.y,local.z},axis);
+}
+inline int projectionLayer(structure::LoadedStructure const& loaded, structure::LoadedStructure::RenderBlock const& entry,
+    structure::LayerAxis axis, int mirror, int rotation) {
+    return projectionLayer(loaded,BlockPos{entry.x,entry.y,entry.z},axis,mirror,rotation);
+}
 WorldEventInterest makeProjectionWorldEventInterest(
     structure::LoadedStructure const& loaded, std::array<int, 3> const& origin,
     int mirrorMode, int rotation
@@ -48,6 +60,8 @@ Block const* transformExpectedBlock(
     LegacyStructureSettings const& settings,
     bool                           identityTransform
 );
+
+Block const* transformExpectedBlock(Block const* block, Rotation rotation, Mirror mirror, bool identityTransform);
 
 // Flattened connection blocks (fences, glass panes, iron bars, ...) keep
 // their arm directions in derived states that real worlds maintain on

@@ -46,6 +46,18 @@ public:
         if (mBoxes.empty() || !intersects(mEnvelope)) return false;
         return std::any_of(mBoxes.begin(), mBoxes.end(), intersects);
     }
+    bool intersectsChunkColumn(int x, int z, int minY, int maxY) const noexcept {
+        if (minY > maxY || mBoxes.empty()) return false;
+        Box column{{static_cast<std::int64_t>(x) * 16, minY, static_cast<std::int64_t>(z) * 16},
+                   {static_cast<std::int64_t>(x) * 16 + 16, static_cast<std::int64_t>(maxY) + 1,
+                    static_cast<std::int64_t>(z) * 16 + 16}};
+        auto intersects = [&](Box const& box) {
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                if (column.max[axis] <= box.min[axis] || column.min[axis] >= box.max[axis]) return false;
+            return true;
+        };
+        return intersects(mEnvelope) && std::any_of(mBoxes.begin(), mBoxes.end(), intersects);
+    }
 private:
     std::vector<Box> mBoxes;
     Box mEnvelope{};

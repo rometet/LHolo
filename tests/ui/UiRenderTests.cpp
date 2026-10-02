@@ -76,6 +76,22 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     model.maxLayerX = 63;
     model.maxLayerY = 255;
     model.materialCount = 32;
+    model.sizeX=64;model.sizeY=256;model.sizeZ=31;
+    model.schematic.worldAvailable=state!=0;
+    model.schematic.session.writable=state!=0;
+    model.schematic.library="schematics/???";
+    model.schematic.files={"a.mcstructure","folder/very-long-test-name.litematic"};
+    lholo::structure::SavedPlacement p;p.id=1;p.file="a.mcstructure";p.name="Placement with a long name";
+    model.schematic.session.document.placements={p};
+    model.schematic.session.document.selected=state?1:0;
+    if(state==2){
+        auto report=std::make_shared<lholo::structure::schematic::Report>();
+        report->tally.correct=12;report->tally.missing=4;report->tally.unknown=7;report->truncated=true;
+        report->mismatches={{lholo::structure::VerificationState::Missing,{-27,65,34},"expected stairs [weirdo state]","actual air",100}};
+        report->materials={{"minecraft:slab",{24,8},12},{"minecraft:unknown_item",{3,0},{}}};
+        model.schematic.report=report;model.schematic.target=report->mismatches[0];
+    }
+
     model.capture.first = {state != 0, -17, -64, -1};
     model.capture.second = {state != 0, 16, 319, 16};
     model.manualPlacementAllowedItems = {"minecraft:scaffolding", "minecraft:stone"};
@@ -93,7 +109,7 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     lholo::ui::MenuActions const actions{};
     for (std::size_t page = 0; page < lholo::ui::kMenuPageCount; ++page) {
         model.page = static_cast<lholo::ui::MenuPage>(page);
-        model.layerAxis = static_cast<int>(page % 3);
+        model.layerAxis = static_cast<int>(page % 9);
         model.layerDisplayMode = static_cast<int>(page % 4);
         for (int repeat = 0; repeat < 3; ++repeat) {
             model.materialPopupRequested = state == 2 && repeat == 0;

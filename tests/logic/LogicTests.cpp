@@ -54,6 +54,7 @@
 #include "ui/HotkeyFormat.h"
 
 #include <Windows.h>
+#include "SchematicChecks.h"
 #include "io/AtomicOutput.h"
 
 namespace {
@@ -2288,6 +2289,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
     testLiquidReplayRules();
     testProjectionCoordinateBounds();

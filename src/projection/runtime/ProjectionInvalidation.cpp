@@ -8,6 +8,7 @@
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "structure/StructureLoader.h"
+#include "structure/StructureSession.h"
 
 #include <algorithm>
 #include <cmath>
@@ -52,7 +53,8 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     result.placementMoved = state.cachedOffsetX != settings.offsetX
         || state.cachedOffsetY != settings.offsetY
         || state.cachedOffsetZ != settings.offsetZ;
-    result.layerChanged = state.cachedLayerDisplayMode != settings.layerDisplayMode
+    auto const countExtras = structure::detail::StructureSession::getInstance().countExtras();
+    result.layerChanged = state.cachedCountExtras != countExtras || state.cachedLayerDisplayMode != settings.layerDisplayMode
         || state.cachedDisplayLayer != settings.displayLayer
         || state.cachedLayerAxis != settings.layerAxis;
     bool const opacityChanged
@@ -83,7 +85,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
 
     auto const layerIsVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
         return isLayerVisible(
-            settings.layerAxis == structure::LayerAxis::X ? entry.x : entry.y,
+            projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
             settings.layerDisplayMode,
             settings.displayLayer,
             entry.materialIndex,
@@ -96,8 +98,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     if (result.layerChanged && !result.geometryTransformChanged) {
         auto const oldLayerVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
             if (!state.cachedLayerDisplayMode || !state.cachedLayerAxis) return false;
-            auto const layer = *state.cachedLayerAxis == structure::LayerAxis::X
-                ? entry.x : entry.y;
+            auto const layer = projectionLayer(*state.structure, entry, *state.cachedLayerAxis, state.cachedMirror, state.cachedRotation);
             return isLayerVisible(
                 layer, *state.cachedLayerDisplayMode, state.cachedDisplayLayer,
                 entry.materialIndex, entry.liquidMaterialIndex, *state.cachedLayerAxis
@@ -117,6 +118,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         }
     }
 
+    state.cachedCountExtras = countExtras;
     state.cachedRotation = settings.rotationTurns;
     state.cachedMirror = settings.mirrorMode;
     state.cachedOffsetX = settings.offsetX;
@@ -134,6 +136,9 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         state.extraBlockPositions.clear();
         for (auto& positions : state.sectionExtraBlockPositions) positions.clear();
         state.progressExtraCount = 0;
+        // Error HUD counts follow the same visible range as the meshes.
+        state.progressWrongTypeCount = state.progressWrongStateCount = 0;
+        std::fill(state.progressErrorKind.begin(), state.progressErrorKind.end(), 0);
         state.extraScanRegion = 0;
         state.extraScanCell = 0;
         markAllSectionsDirty(state, false);

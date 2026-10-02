@@ -90,6 +90,8 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     }
     model.layerAxis = structure::toInt(sessionSnapshot.transform.layerAxis);
     model.status = sessionSnapshot.status;
+    model.schematic = structure::schematic::snapshot();
+    if(sessionSnapshot.loaded) { model.sizeX=sessionSnapshot.loaded->sizeX;model.sizeY=sessionSnapshot.loaded->sizeY;model.sizeZ=sessionSnapshot.loaded->sizeZ; }
     model.hasLoadedStructure = static_cast<bool>(sessionSnapshot.loaded);
     model.hasSavedProjection = sessionSnapshot.saved.available;
     model.savedAnchorX = sessionSnapshot.saved.anchorX;
@@ -126,8 +128,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
         sessionSnapshot.transform.displayLayer, 0,
         model.layerAxis == structure::toInt(structure::LayerAxis::Material)
             ? std::max(0, model.materialCount - 1)
-            : (model.layerAxis == structure::toInt(structure::LayerAxis::X)
-                ? model.maxLayerX : model.maxLayerY)
+            : (sessionSnapshot.loaded ? structure::detail::maxLayerFor(*sessionSnapshot.loaded,sessionSnapshot.transform.layerAxis,sessionSnapshot.transform.rotation) : 0)
     );
     model.hudEnabled = hud.enabled;
     model.hudPosition = std::clamp(hud.position, 0, 3);
@@ -238,8 +239,7 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     auto const displayMax = layerAxis == structure::LayerAxis::Material
         ? std::max(0, static_cast<int>(sessionSnapshot.loaded
             ? sessionSnapshot.loaded->materialCount : 0) - 1)
-        : (layerAxis == structure::LayerAxis::X
-            ? sessionSnapshot.maxLayerX : sessionSnapshot.maxLayerY);
+        : (sessionSnapshot.loaded ? structure::detail::maxLayerFor(*sessionSnapshot.loaded,layerAxis,sessionSnapshot.transform.rotation) : 0);
     changed = session.setDisplayLayer(std::clamp(model.displayLayer, 0, displayMax)) || changed;
     auto hud = uiState().hud();
     hud.enabled = model.hudEnabled;
@@ -286,6 +286,15 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
 
 MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureRevision) {
     MenuActions actions;
+    actions.refreshSchematics = [&refreshModel] { structure::schematic::refreshFiles(); refreshModel=true; };
+    actions.importSavedSchematic = [&refreshModel] { structure::schematic::importSavedProjection(); refreshModel=true; };
+    actions.placeSchematic = [&refreshModel](auto const& file) { structure::schematic::place(file); refreshModel=true; };
+    actions.selectPlacement = [&refreshModel](auto id) { structure::schematic::select(id); refreshModel=true; };
+    actions.deletePlacement = [&refreshModel](auto id) { structure::schematic::erase(id); refreshModel=true; };
+    actions.movePlacementToFeet = [&refreshModel](auto id) { structure::schematic::moveToFeet(id); refreshModel=true; };
+    actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
+    actions.verifySchematic = [] { structure::schematic::verify(); };
+    actions.cycleMistake = [](auto filter) { structure::schematic::cycleMistake(filter); };
     actions.browseStructure = [](std::string_view current) -> std::optional<std::string> {
         auto const selected = openStructureFile(structure::detail::pathFromUtf8(current));
         return selected ? std::optional<std::string>{structure::detail::pathToUtf8(*selected)}

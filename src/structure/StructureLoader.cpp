@@ -24,6 +24,7 @@
 #include "structure/MaterialTracker.h"
 #include "structure/formats/StructureFormatLoaders.h"
 #include "structure/StructureSession.h"
+#include "structure/SchematicRuntime.h"
 #include "structure/LoadIntent.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
@@ -83,7 +84,8 @@ auto& logger() {
 }
 
 bool hudContextAvailable() {
-    return capture::getClientViewSnapshot().has_value() && !projection::isDimensionSuspended();
+    return capture::getClientViewSnapshot().has_value() && !projection::isDimensionSuspended()
+        && detail::StructureSession::getInstance().visible();
 }
 
 auto& uiState() {
@@ -155,6 +157,7 @@ void commitRestoredStructureLoad(
     session.setLayerDisplayMode(saved.transform.layerDisplayMode);
     session.setDisplayLayer(saved.transform.displayLayer);
     session.setLayerAxis(saved.transform.layerAxis);
+    session.setVisible(saved.transform.visible); session.setCountExtras(saved.transform.countExtras);
     projection::requestNextStructureAnchor(
         saved.anchorX, saved.anchorY, saved.anchorZ
     );
@@ -548,6 +551,7 @@ void processPendingActions() {
         return;
     }
 
+    schematic::processControl();
     processPreparedStructureLoad();
 
     auto& session = detail::StructureSession::getInstance();
@@ -737,7 +741,7 @@ void renderHud() {
     auto const layerMode = sessionSnapshot.transform.layerDisplayMode;
     auto const maxLayer = layerAxis == LayerAxis::Material
         ? std::max(0, static_cast<int>(sessionSnapshot.loaded->materialCount) - 1)
-        : (layerAxis == LayerAxis::X ? sessionSnapshot.maxLayerX : sessionSnapshot.maxLayerY);
+        : detail::maxLayerFor(*sessionSnapshot.loaded,layerAxis,sessionSnapshot.transform.rotation);
 
     auto const displaySize = ImGui::GetIO().DisplaySize;
     auto uiScale = hud.uiScale;
@@ -808,20 +812,20 @@ void renderHud() {
                 i18n::tr(i18n::TextKey::HudCurrentLayer),
                 currentLayer,
                 maxLayer,
-                layerAxis == LayerAxis::X ? "X" : "Y"
+                layerAxisLabel(layerAxis)
             );
         } else if (showLayer && layerMode == LayerDisplayMode::UpToCurrent) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeFromZero),
                 currentLayer,
-                layerAxis == LayerAxis::X ? "X" : "Y"
+                layerAxisLabel(layerAxis)
             );
         } else if (showLayer) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeBetween),
                 currentLayer,
                 maxLayer,
-                layerAxis == LayerAxis::X ? "X" : "Y"
+                layerAxisLabel(layerAxis)
             );
         }
         auto const showAnyProgress = showOverallProgress || showProgress || showWrongState
@@ -1111,7 +1115,8 @@ void loadSettings() {
                 settings.savedOffsetZ,
                 layerDisplayModeFromInt(settings.savedLayerDisplayMode),
                 settings.savedDisplayLayer,
-                layerAxisFromInt(settings.savedLayerAxis)
+                layerAxisFromInt(settings.savedLayerAxis),
+                settings.savedVisible, settings.savedCountExtras
             },
             settings.savedStructurePath
         });
@@ -1122,6 +1127,7 @@ void loadSettings() {
 }
 
 void saveSettings() {
+    schematic::rememberSelectedTransform();
     auto const path = settingsPath();
     try {
         auto& session = detail::StructureSession::getInstance();
@@ -1189,6 +1195,8 @@ void saveSettings() {
         settings.savedAnchorZ = sessionSnapshot.saved.anchorZ;
         settings.savedRotation = sessionSnapshot.saved.transform.rotation;
         settings.savedMirror = sessionSnapshot.saved.transform.mirror;
+        settings.savedVisible = sessionSnapshot.saved.transform.visible;
+        settings.savedCountExtras = sessionSnapshot.saved.transform.countExtras;
         settings.savedOffsetX = sessionSnapshot.saved.transform.offsetX;
         settings.savedOffsetY = sessionSnapshot.saved.transform.offsetY;
         settings.savedOffsetZ = sessionSnapshot.saved.transform.offsetZ;
@@ -1324,6 +1332,7 @@ void clearProjectionSession(i18n::Message status) {
 void resetWorldSession() {
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusWorldExited});
     uiState().resetWorldSession();
+    schematic::reset();
 }
 
 void shutdownPendingStructureLoad() {

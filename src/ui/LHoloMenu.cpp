@@ -76,6 +76,7 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 )) {
                 switch (model.page) {
                 case MenuPage::Projection: renderProjectionPage(model, actions, metrics); break;
+                case MenuPage::Schematics: renderSchematicsPage(model, actions, metrics); break;
                 case MenuPage::CreateStructure: renderCreateStructurePage(model, actions, metrics); break;
                 case MenuPage::Experimental:
                     renderExperimentalPage(model, actions, metrics);

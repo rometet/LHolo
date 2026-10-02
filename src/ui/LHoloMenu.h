@@ -4,6 +4,7 @@
 #include "i18n/Translator.h"
 #include "ui/FluentTheme.h"
 #include "input/HotkeyTypes.h"
+#include "structure/SchematicRuntime.h"
 
 #include <array>
 #include <cstddef>
@@ -27,6 +28,7 @@ enum class MenuPage : std::uint8_t {
     Hotkeys,
     Interface,
     Experimental,
+    Schematics,
     Count
 };
 
@@ -112,6 +114,7 @@ struct MenuModel {
     int displayLayer{};
     int maxLayerY{};
     int maxLayerX{};
+    int sizeX{}, sizeY{}, sizeZ{};
     int materialCount{};
 
     // Fixed-gesture input switch on the hotkeys page. Deliberately outside
@@ -134,6 +137,7 @@ struct MenuModel {
     bool materialHudEnabled{};
     int  materialHudPosition{3};
     bool closeRequested{};
+    structure::schematic::Snapshot schematic;
 };
 
 struct MenuActions {
@@ -151,6 +155,11 @@ struct MenuActions {
     std::function<void(CapturePointId)> usePlayerCapturePosition;
     std::function<void()> clearCapture;
     std::function<void(CaptureDraftModel const&)> exportCapture;
+    std::function<void()> refreshSchematics, importSavedSchematic, verifySchematic;
+    std::function<void(std::string const&)> placeSchematic;
+    std::function<void(std::uint64_t)> selectPlacement, deletePlacement, movePlacementToFeet;
+    std::function<void(structure::SavedPlacement const&,std::uint64_t)> editPlacement;
+    std::function<void(structure::MistakeFilter)> cycleMistake;
 };
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);

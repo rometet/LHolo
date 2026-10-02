@@ -97,16 +97,9 @@ BlockPos transformStructurePosition(
     int                               mirrorMode,
     int                               rotation
 ) {
-    std::int64_t x = position.x;
-    std::int64_t z = position.z;
-    if (mirrorMode == 1) x = loaded.sizeX - 1 - x;
-    if (mirrorMode == 2) z = loaded.sizeZ - 1 - z;
-    switch (rotation & 3) {
-    case 1: return BlockPos{representableCoordinate(loaded.sizeZ - 1LL - z), position.y, representableCoordinate(x)};
-    case 2: return BlockPos{representableCoordinate(loaded.sizeX - 1LL - x), position.y, representableCoordinate(loaded.sizeZ - 1LL - z)};
-    case 3: return BlockPos{representableCoordinate(z), position.y, representableCoordinate(loaded.sizeX - 1LL - x)};
-    default: return BlockPos{representableCoordinate(x), position.y, representableCoordinate(z)};
-    }
+    auto const cell = structure::PlacementTransform{{loaded.sizeX,loaded.sizeY,loaded.sizeZ},{},rotation,mirrorMode}
+        .toWorld({position.x,position.y,position.z});
+    return BlockPos{representableCoordinate(cell.x),position.y,representableCoordinate(cell.z)};
 }
 
 BlockPos inverseTransformStructurePosition(
@@ -117,29 +110,9 @@ BlockPos inverseTransformStructurePosition(
 ) {
     // Neighbor queries may be outside [0,size). Use wide arithmetic and retain
     // an out-of-volume sentinel at int limits when the exact result cannot fit.
-    std::int64_t x{};
-    std::int64_t z{};
-    switch (rotation & 3) {
-    case 1:
-        x = position.z;
-        z = loaded.sizeZ - 1LL - position.x;
-        break;
-    case 2:
-        x = loaded.sizeX - 1LL - position.x;
-        z = loaded.sizeZ - 1LL - position.z;
-        break;
-    case 3:
-        x = loaded.sizeX - 1LL - position.z;
-        z = position.x;
-        break;
-    default:
-        x = position.x;
-        z = position.z;
-        break;
-    }
-    if (mirrorMode == 1) x = loaded.sizeX - 1 - x;
-    if (mirrorMode == 2) z = loaded.sizeZ - 1 - z;
-    return BlockPos{representableCoordinate(x), position.y, representableCoordinate(z)};
+    auto const cell = structure::PlacementTransform{{loaded.sizeX,loaded.sizeY,loaded.sizeZ},{},rotation,mirrorMode}
+        .toLocal({position.x,position.y,position.z});
+    return BlockPos{representableCoordinate(cell.x),position.y,representableCoordinate(cell.z)};
 }
 
 bool isStructureCellCovered(

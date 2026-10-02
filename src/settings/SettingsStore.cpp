@@ -231,6 +231,8 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     parsed.savedAnchorZ = json.value("savedAnchorZ", parsed.savedAnchorZ);
     parsed.savedRotation = json.value("savedRotation", parsed.savedRotation);
     parsed.savedMirror = json.value("savedMirror", parsed.savedMirror);
+    parsed.savedVisible = json.value("savedVisible", true);
+    parsed.savedCountExtras = json.value("savedCountExtras", true);
     parsed.savedOffsetX = json.value("savedOffsetX", parsed.savedOffsetX);
     parsed.savedOffsetY = json.value("savedOffsetY", parsed.savedOffsetY);
     parsed.savedOffsetZ = json.value("savedOffsetZ", parsed.savedOffsetZ);
@@ -307,6 +309,7 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"savedStructurePath", settings.savedStructurePath},
         {"savedRotation", settings.savedRotation},
         {"savedMirror", settings.savedMirror},
+        {"savedVisible", settings.savedVisible}, {"savedCountExtras", settings.savedCountExtras},
         {"savedOffsetX", settings.savedOffsetX},
         {"savedOffsetY", settings.savedOffsetY},
         {"savedOffsetZ", settings.savedOffsetZ},

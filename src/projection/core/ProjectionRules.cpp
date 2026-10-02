@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/core/ProjectionRules.h"
+#include "structure/NativeBlockTransform.h"
 
 #include <string>
 #include <type_traits>
@@ -82,15 +83,18 @@ Block const* transformExpectedBlock(
     LegacyStructureSettings const& settings,
     bool                           identityTransform
 ) {
-    if (!block) return nullptr;
-    if (identityTransform) return block;
+    return transformExpectedBlock(block,settings.mRotation,settings.mMirror,identityTransform);
+}
+
+Block const* transformExpectedBlock(Block const* block, Rotation rotation, Mirror mirror, bool identityTransform) {
     // Use Bedrock's current generic state transformer. The legacy structure
     // aux-data mapper does not cover every modern state (notably
     // rail_direction), while this path owns the complete rotation/mirror
     // handling used by current blocks.
-    return VanillaBlockStateTransformUtils::transformBlock(
-        *block, settings.mRotation, settings.mMirror
-    );
+    return structure::nativeBlockTransform(block,identityTransform,rotation,mirror,
+        [](Block const& value, Rotation turn, Mirror flip) {
+            return VanillaBlockStateTransformUtils::transformBlock(value,turn,flip);
+        });
 }
 
 Block const& withFlattenedConnections(

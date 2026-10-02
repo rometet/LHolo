@@ -26,6 +26,8 @@
 
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/block/Block.h"
+#include "structure/Verification.h"
+#include "structure/StructureSession.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
 
 namespace lholo::projection::detail {
@@ -257,12 +259,13 @@ CorrectionProgressChanges updateCorrectionTracker(
     constexpr std::size_t kCorrectionChecksPerFrame = 4096;
     constexpr std::size_t kSubChunkEventsPerFrame    = 64;
     bool const identityTransform = mirrorMode == 0 && rotationTurns == 0;
+    bool const countExtras = structure::detail::StructureSession::getInstance().countExtras();
 
     auto const updateCorrection = [&](std::size_t index) {
         if (index >= totalBlocks) return;
         auto const& entry = state.structure->renderBlocks[index];
         auto const visible = isLayerVisible(
-            layerAxis == structure::LayerAxis::X ? entry.x : entry.y,
+            projectionLayer(*state.structure, entry, layerAxis, mirrorMode, rotationTurns),
             layerDisplayMode, displayLayer,
             entry.materialIndex, entry.liquidMaterialIndex, layerAxis
         );
@@ -294,8 +297,15 @@ CorrectionProgressChanges updateCorrectionTracker(
             && !actualLiquid.isAir() && actualLiquid.getTypeName() != expectedLiquid->getTypeName();
         auto const liquidCellOccupiedBySolid = !expected && expectedLiquid && !actual.isAir()
             && actual.getTypeName() != expectedLiquid->getTypeName();
+        bool const ready = region.areChunksFullyLoaded(position, 0)
+            && !structure::placeholderBlock(actual.getTypeName())
+            && (!expectedLiquid || !structure::placeholderBlock(actualLiquid.getTypeName()))
+            && (!expected || !structure::placeholderBlock(expected->getTypeName()))
+            && (!expectedLiquid || !structure::placeholderBlock(expectedLiquid->getTypeName()));
         auto nextState = CorrectionState::Correct;
-        if (bodyMissing || liquidMissing) {
+        if (!ready) {
+            nextState = CorrectionState::Unknown;
+        } else if (bodyMissing || liquidMissing) {
             nextState = CorrectionState::Missing;
         } else if (bodyTypeWrong || liquidTypeWrong || liquidCellOccupiedBySolid) {
             nextState = CorrectionState::WrongType;
@@ -330,7 +340,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                 changes.visible = true;
             }
         }
-        auto const nextErrorKind = nextState == CorrectionState::WrongType ? uchar{1}
+        auto const nextErrorKind = !visible ? uchar{0} : nextState == CorrectionState::WrongType ? uchar{1}
             : nextState == CorrectionState::WrongState ? uchar{2}
             : uchar{0};
         auto const previousErrorKind = state.progressErrorKind[index];
@@ -345,9 +355,8 @@ CorrectionProgressChanges updateCorrectionTracker(
             state.progressErrorKind[index] = nextErrorKind;
             changes.errors = true;
         }
-        // Progress always describes the whole structure. Hidden layers are
-        // still checked above, but their correction/model meshes remain
-        // suppressed by the layer renderer.
+        // Retain whole-structure correctness for legacy progress consumers;
+        // mistake counts and correction meshes follow the visible range.
         if (!visible) return;
         if (state.correctionStates[index] != nextState) {
             state.correctionStates[index] = nextState;
@@ -399,7 +408,10 @@ CorrectionProgressChanges updateCorrectionTracker(
         bool            visible
     ) {
         auto const key = SubChunkKey{localPosition.x, localPosition.y, localPosition.z};
-        bool const isExtra = !region.getBlock(worldPosition).isAir();
+        auto const& actual = region.getBlock(worldPosition);
+        bool const isExtra = countExtras && visible
+            && region.areChunksFullyLoaded(worldPosition, 0) && !actual.isAir()
+            && !structure::placeholderBlock(actual.getTypeName());
         auto const detected = state.detectedExtraBlockPositions.find(key);
         if (isExtra != (detected != state.detectedExtraBlockPositions.end())) {
             if (isExtra) {
@@ -485,7 +497,7 @@ CorrectionProgressChanges updateCorrectionTracker(
         if (isStructureCellCovered(*state.structure, local)
             && !hasExpectedLocalCell(local)) {
             auto const visible = isLayerVisible(
-                layerAxis == structure::LayerAxis::X ? local.x : local.y,
+                projectionLayer(*state.structure, local, layerAxis, mirrorMode, rotationTurns),
                 layerDisplayMode,
                 displayLayer,
                 -1,
@@ -541,7 +553,7 @@ CorrectionProgressChanges updateCorrectionTracker(
             box.z + static_cast<int>(z),
         };
         auto const visible = isLayerVisible(
-            layerAxis == structure::LayerAxis::X ? local.x : local.y,
+            projectionLayer(*state.structure, local, layerAxis, mirrorMode, rotationTurns),
             layerDisplayMode,
             displayLayer,
             -1,
@@ -594,7 +606,7 @@ CorrectionProgressChanges updateCorrectionTracker(
                         continue;
                     }
                     auto const visible = isLayerVisible(
-                        layerAxis == structure::LayerAxis::X ? local.x : local.y,
+                        projectionLayer(*state.structure, local, layerAxis, mirrorMode, rotationTurns),
                         layerDisplayMode,
                         displayLayer,
                         -1,

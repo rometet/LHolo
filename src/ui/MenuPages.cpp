@@ -31,7 +31,8 @@ char const* pageName(MenuPage page) {
         i18n::TextKey::PageHud,
         i18n::TextKey::PageHotkeys,
         i18n::TextKey::PageInterface,
-        i18n::TextKey::PageExperimental
+        i18n::TextKey::PageExperimental,
+        i18n::TextKey::PageSchematics
     };
     constexpr auto allPagesNamed
         = [](std::array<i18n::TextKey, kMenuPageCount> const& keys) constexpr {
@@ -97,8 +98,9 @@ int maxLayer(MenuModel const& model) {
     if (structure::layerAxisFromInt(model.layerAxis) == structure::LayerAxis::Material) {
         return std::max(0, model.materialCount - 1);
     }
-    return structure::layerAxisFromInt(model.layerAxis) == structure::LayerAxis::X
-        ? model.maxLayerX : model.maxLayerY;
+    auto const axis=structure::layerAxisFromInt(model.layerAxis);
+    auto const size=structure::PlacementTransform{{model.sizeX,model.sizeY,model.sizeZ},{},model.rotation,model.mirror}.placedSize();
+    return std::max(0,(axis==structure::LayerAxis::X ? model.maxLayerX+1 : structure::layerCount(size,axis))-1);
 }
 
 void renderPathRow(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
@@ -134,6 +136,97 @@ void renderPathRow(MenuModel& model, MenuActions const& actions, UiMetrics const
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(i18n::tr(i18n::TextKey::LabelStructurePath));
     }
+}
+
+void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    using namespace structure;
+    auto const& snap = model.schematic;
+    auto const& placements = snap.session.document;
+    auto const tr = [](i18n::TextKey key){return i18n::tr(key);};
+    if (!snap.status.empty()) ImGui::TextWrapped("%s",snap.status.c_str());
+    if (!snap.session.status.empty()) ImGui::TextWrapped("%s",snap.session.status.c_str());
+    renderSection("##SchematicFiles",tr(i18n::TextKey::SchematicFiles),metrics,[&] {
+        ImGui::TextWrapped("%s",snap.library.c_str());
+        if(ImGui::Button(tr(i18n::TextKey::SchematicRefresh)) && actions.refreshSchematics)actions.refreshSchematics();
+        ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
+        if(ImGui::Button(tr(i18n::TextKey::SchematicImport)) && actions.importSavedSchematic)actions.importSavedSchematic();
+        if(ImGui::BeginChild("##SchematicFileList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*5),ImGuiChildFlags_Borders)){
+            ImGuiListClipper clip;clip.Begin(static_cast<int>(snap.files.size()));
+            while(clip.Step())for(int i=clip.DisplayStart;i<clip.DisplayEnd;++i){
+                auto const& file=snap.files[static_cast<std::size_t>(i)];ImGui::PushID(i);
+                if(ImGui::SmallButton(tr(i18n::TextKey::SchematicPlace)) && actions.placeSchematic)actions.placeSchematic(file);
+                ImGui::SameLine();ImGui::TextUnformatted(file.c_str());ImGui::PopID();
+            }
+        }ImGui::EndChild();ImGui::EndDisabled();
+    });
+    renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {
+        ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
+        if(ImGui::Button(tr(i18n::TextKey::SchematicDeselect)) && actions.selectPlacement)actions.selectPlacement(0);
+        for(auto const& p:placements.placements){
+            ImGui::PushID(std::to_string(p.id).c_str());
+            if(ImGui::Selectable(p.name.c_str(),placements.selected==p.id) && actions.selectPlacement)actions.selectPlacement(p.id);
+            ImGui::PopID();
+        }
+        auto const selected = std::find_if(placements.placements.begin(),placements.placements.end(),[&](auto const& p){return p.id==placements.selected;});
+        if(selected!=placements.placements.end()){
+            auto p=*selected;
+            if(ImGui::Button(tr(i18n::TextKey::SchematicMove)) && actions.movePlacementToFeet)actions.movePlacementToFeet(p.id);
+            if(!metrics.compact)ImGui::SameLine();
+            if(ImGui::Button(tr(i18n::TextKey::SchematicDelete)) && actions.deletePlacement)actions.deletePlacement(p.id);
+            ImGui::SetNextItemWidth(fieldWidth(metrics));
+            char name[129]{};std::snprintf(name,sizeof(name),"%s",p.name.c_str());
+            if(ImGui::InputText("Name##PlacementName",name,sizeof(name)))p.name=name;
+            auto coordinate = [&](char const* label,std::int64_t& value){
+                ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::InputScalar(label,ImGuiDataType_S64,&value);
+            };
+            coordinate("X##PlacementX",p.origin.x);coordinate("Y##PlacementY",p.origin.y);coordinate("Z##PlacementZ",p.origin.z);
+            char const* rotations[]{"0","90","180","270"};char const* mirrors[]{"None","X","Z"};
+            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelRotation),&p.rotation,rotations,4);
+            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelMirror),&p.mirror,mirrors,3);
+            ImGui::Checkbox(tr(i18n::TextKey::SchematicVisible),&p.visible);
+            ImGui::Checkbox(tr(i18n::TextKey::SchematicExtras),&p.countExtras);
+            char const* axes[]{"Y (legacy)","X (legacy)","Material", "Bottom -> Top","Top -> Bottom","West -> East","East -> West","North -> South","South -> North"};
+            int axis=toInt(p.layerAxis),mode=toInt(p.layerMode);
+            char const* modes[]{tr(i18n::TextKey::ComboRangeAll),tr(i18n::TextKey::ComboRangeSingle),tr(i18n::TextKey::ComboRangeUpToCurrent),tr(i18n::TextKey::ComboRangeFromCurrent)};
+            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelLayerAxis),&axis,axes,9);p.layerAxis=layerAxisFromInt(axis);
+            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelDisplayRange),&mode,modes,4);p.layerMode=layerDisplayModeFromInt(mode);
+            auto const size=PlacementTransform{{model.sizeX,model.sizeY,model.sizeZ},{},p.rotation,p.mirror}.placedSize();
+            int const max=p.layerAxis==LayerAxis::Material?std::max(0,model.materialCount-1):std::max(0,(p.layerAxis==LayerAxis::X?model.sizeX:layerCount(size,p.layerAxis))-1);
+            renderSteppedInt("PlacementLayer",tr(i18n::TextKey::LabelCurrentLayer),p.layer,0,max,metrics);
+            if(p!=*selected && actions.editPlacement)actions.editPlacement(p,snap.session.revision);
+        }
+        ImGui::EndDisabled();
+    });
+    if(!placements.selected)return;
+    if(ImGui::Button(tr(i18n::TextKey::SchematicVerify)) && actions.verifySchematic)actions.verifySchematic();
+    auto const report=snap.report;
+    if(!report || report->running){
+        ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicPending));
+        if(report)ImGui::Text("%llu",static_cast<unsigned long long>(report->checked));
+        return;
+    }
+    auto const& t=report->tally;
+    ImGui::TextWrapped(tr(i18n::TextKey::SchematicSummary),static_cast<unsigned long long>(t.correct),static_cast<unsigned long long>(t.total()),
+        static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType+t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
+    static int filter{};
+    char const* filters[]{tr(i18n::TextKey::SchematicFilterAll),tr(i18n::TextKey::SchematicFilterWrong),tr(i18n::TextKey::SchematicFilterState),tr(i18n::TextKey::SchematicFilterMissing)};
+    ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo("##MistakeFilter",&filter,filters,4);
+    if(ImGui::Button(tr(i18n::TextKey::SchematicNearest)) && actions.cycleMistake)actions.cycleMistake(static_cast<MistakeFilter>(filter));
+    if(snap.target){auto const& m=*snap.target;ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));}
+    if(report->truncated)ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicTruncated));
+    if(ImGui::BeginChild("##MismatchList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*7),ImGuiChildFlags_Borders)){
+        for(auto const& m:report->mismatches){
+            if(!matchesFilter(m.kind,static_cast<MistakeFilter>(filter)))continue;
+            ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f\n%s -> %s",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared),m.expected.c_str(),m.actual.c_str());
+        }
+    }ImGui::EndChild();
+    ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));
+    if(ImGui::BeginChild("##SelectedMaterials",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*6),ImGuiChildFlags_Borders)){
+        for(auto const& row:report->materials){
+            ImGui::TextWrapped("%s  %llu / %llu / %llu / %s",row.item.c_str(),static_cast<unsigned long long>(row.count.total),static_cast<unsigned long long>(row.count.correct),static_cast<unsigned long long>(row.count.remaining()),
+                row.inventory?std::to_string(*row.inventory).c_str():tr(i18n::TextKey::SchematicInventoryUnavailable));
+        }
+    }ImGui::EndChild();
 }
 
 void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
@@ -560,7 +653,8 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
         char const* axisNames[]{
             i18n::tr(i18n::TextKey::ComboLayerAxisY),
             i18n::tr(i18n::TextKey::ComboLayerAxisX),
-            i18n::tr(i18n::TextKey::ComboLayerAxisMaterial)
+            i18n::tr(i18n::TextKey::ComboLayerAxisMaterial),
+            "Bottom -> Top", "Top -> Bottom", "West -> East", "East -> West", "North -> South", "South -> North"
         };
         char const* layerModeNames[]{
             i18n::tr(i18n::TextKey::ComboRangeAll),
@@ -575,8 +669,8 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             i18n::tr(i18n::TextKey::ComboMaterialFromCurrent)
         };
         renderValueRow(i18n::tr(i18n::TextKey::LabelLayerAxis), metrics, [&] {
-            ImGui::SetNextItemWidth(adaptiveComboWidth(axisNames, 3));
-            if (ImGui::Combo("##LayerAxis", &model.layerAxis, axisNames, 3)) {
+            ImGui::SetNextItemWidth(adaptiveComboWidth(axisNames, 9));
+            if (ImGui::Combo("##LayerAxis", &model.layerAxis, axisNames, 9)) {
                 model.displayLayer = std::clamp(model.displayLayer, 0, maxLayer(model));
             }
         });
@@ -610,7 +704,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             ImGui::TextDisabled(
                 i18n::tr(i18n::TextKey::HintLayerZeroBased),
                 maxLayer(model),
-                structure::layerAxisFromInt(model.layerAxis) == structure::LayerAxis::X ? "X" : "Y"
+                structure::layerAxisLabel(structure::layerAxisFromInt(model.layerAxis))
             );
         }
         ImGui::PopTextWrapPos();

@@ -24,6 +24,7 @@
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
+#include "structure/SchematicRuntime.h"
 #include "structure/capture/StructureCapture.h"
 #include "structure/StructureLoader.h"
 
@@ -88,6 +89,7 @@ LL_TYPE_INSTANCE_HOOK(
     app::invokeNativeCallback([&] { structure::capture::tick(*this); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("capture game tick", reason); });
     app::invokeNativeCallback([&] {
+        structure::schematic::tick(*this);
         structure::detail::tickMaterialTracker(*this);
         // Physical mouse state belongs to the game-input Hook boundary. The
         // executor consumes only the resulting logical press state.
