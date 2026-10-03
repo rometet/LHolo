@@ -423,6 +423,13 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes,std:
         uiState().setShiftHeld(true);
     }
 
+    // Praxis owns input while its menu is visible, including its shared HUD
+    // binding editor. Keep modifier tracking above and key-up release active.
+    if (overlay::companion::isVisible()) {
+        uiState().stopHotkeyCapture();
+        return false;
+    }
+
     auto const captureIndex = uiState().capturingHotkey();
     if (captureIndex) {
         // F11 belongs to Minecraft's fullscreen toggle. Never capture or
@@ -569,7 +576,7 @@ bool handleGuiHotkeyKeyUp(unsigned int virtualKey) {
 }
 
 bool handleProjectionOffsetWheel(short wheelDelta) {
-    if (isGuiVisible() || !uiState().altWheelOffsetEnabled() || !uiState().altHeld()
+    if (overlay::companion::isVisible() || isGuiVisible() || !uiState().altWheelOffsetEnabled() || !uiState().altHeld()
         || !detail::StructureSession::getInstance().hasLoaded()) {
         return false;
     }
