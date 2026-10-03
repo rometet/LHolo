@@ -58,7 +58,8 @@ template<class Check> void runDirectMenuChecks(Check check) {
     constexpr unsigned testKey=0x2d; // Win32 Insert key; no native input is sent.
     state.setHotkey(13,testKey,0);
     check(state.tryPressHotkey(13));check(!state.tryPressHotkey(13));
-    check(state.releaseHotkeysForKey(testKey,100));check(state.ignoreHotkeyUntil()>100);
+    check(state.releaseHotkeysForKey(testKey,100));
+    check(state.releaseHotkeysForKey(testKey,150));check(!state.releaseHotkeysForKey(testKey,201));
     state.resetHotkeyState();check(state.tryPressHotkey(13));state.releaseHotkey(13);
 
     auto queue=[&](MenuRoute route){return state.queueMenuRoute({route,state.menuRouteGeneration(),7,1});};
