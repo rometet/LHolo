@@ -28,6 +28,20 @@ template<class Check> void runSchematicChecks(Check check) {
     check(inventoryCountAfterStack(-1,64)==64);
     check(inventoryCountAfterStack(INT_MAX-1,64)==INT_MAX);
     check(inventoryCountAfterStack(INT_MAX,1)==INT_MAX);
+    check(isShulkerInventoryContainer("minecraft:shulker_box"));
+    check(isShulkerInventoryContainer("minecraft:white_shulker_box"));
+    check(isShulkerInventoryContainer("blue_shulker_box"));
+    check(!isShulkerInventoryContainer("minecraft:shulker_shell"));
+    check(!isShulkerInventoryContainer("minecraft:shulker"));
+    check(!isShulkerInventoryContainer("minecraft:not_a_shulker_box_item"));
+    ShulkerInventorySlotState shulkerSlots{};
+    check(claimShulkerInventorySlot(shulkerSlots,0,1));
+    check(claimShulkerInventorySlot(shulkerSlots,26,127));
+    check(!claimShulkerInventorySlot(shulkerSlots,0,1));
+    check(!claimShulkerInventorySlot(shulkerSlots,-1,1));
+    check(!claimShulkerInventorySlot(shulkerSlots,27,1));
+    check(!claimShulkerInventorySlot(shulkerSlots,1,0));
+    check(!claimShulkerInventorySlot(shulkerSlots,1,128));
     for(int y=-1024;y<=1024;++y) {
         auto const sub=ChunkAvailabilityQueue::subChunkY(y);
         check(sub*16<=y && (sub+1)*16>y);

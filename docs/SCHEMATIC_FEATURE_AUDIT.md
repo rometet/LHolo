@@ -39,13 +39,13 @@ No Lamium renderer was copied.
 | Migration | Existing single-placement config continues working. Explicit `Import saved projection` assigns it to the current world/dimension, preserves transform/legacy layers and copies external files into the schematic library without overwriting an existing file. The old config has no world identity, so it is not silently assigned to a world. |
 | Existing menu | Schematics file/placement lists, place/move at feet, select/deselect/delete, name/XYZ, rotate/mirror, visibility, layers, extras, verification and materials. Existing Render/HUD layer controls accept the appended directions. |
 | Verification presentation | Visible-layer totals and kind filters, world positions, expected/actual serialization and distance; deterministic nearest cycle over a bounded result cache. Nearest 512 each for missing, wrong-state and wrong+extra are retained; full counts are not truncated. |
-| Materials | Selected placement/visible layers: total, correctly placed, remaining and existing inventory ID counts. Native block-to-item resolution plus pure torch/slab/door/bed quantity rules. Both visible halves must match for a paired item to count correctly; a visible orphan half still requires one item. Unresolved mappings remain visible with inventory unavailable. |
+| Materials | Selected placement/visible layers: total, correctly placed, remaining and inventory ID counts, including valid contents of carried shulker boxes. Native block-to-item resolution plus pure torch/slab/door/bed quantity rules. Both visible halves must match for a paired item to count correctly; a visible orphan half still requires one item. Unresolved mappings remain visible with inventory unavailable. |
 
 The selected verifier/material job consumes at most 256 scan operations per game
 tick. Region traversal and overlap comparisons also consume that budget; material
 row finalization is incremental. Nearest sorting is capped at 1,536 entries and
-inventory reads at 36 existing slots. Counting does not run in mesh/render/upload
-code. Reports describe a completed incremental pass, not an atomic world snapshot;
+inventory reads at 36 existing slots; each carried shulker contributes at most 27
+validated NBT entries. Counting does not run in mesh/render/upload code. Reports describe a completed incremental pass, not an atomic world snapshot;
 while the menu is open they refresh after a two-second interval, or explicitly on
 Verify/placement edits. Existing renderer direct-update convergence is retained.
 Hiding a placement gates drawing while the existing update pipeline continues.
@@ -61,10 +61,11 @@ Hiding a placement gates drawing while the existing update pipeline continues.
   is single-state. This would require additional renderer/VirtualWorld/worker
   ownership and is outside the requested renderer boundary. Saved records and
   selected-placement actions are implemented without that redesign.
-- **Shulker/container contents and entity-placement flag:** existing inventory
-  counting safely reads ordinary slots; validated shulker-content decoding and
-  entity projection APIs are absent. No new native hooks or NBT item decoding
-  were added. Existing capture entity export and BlockActor rendering are retained.
+- **Container contents and entity-placement flag:** inventory counting now includes
+  the contents of carried shulker boxes through the existing game-tick ItemStack
+  NBT path (27 entries maximum, slot/count validation, duplicate rejection, and
+  whole-box fail-closed decoding). Other container item types and entity projection
+  remain outside this change. Existing capture entity export and BlockActor rendering are retained.
 - Native stairs/hopper/trapdoor/redstone orientation results, chunk event timing,
   world/dimension switching, actual cursor/F10 interaction, capture roundtrip,
   large-structure frame time and GPU visuals have not been exercised in Minecraft.
@@ -78,13 +79,13 @@ existing multilingual/viewport/scale UI matrix.
 
 | Target | Result |
 |---|---|
-| LHoloLogicTests (including manual placement/projection rules) | 1,181,012 checks / 0 failures |
+| LHoloLogicTests (including manual placement/projection rules) | 1,181,025 checks / 0 failures |
 | LHoloNbtTests | 3,091 checks / 0 failures |
 | LHoloLanguageStoreTests | 16 checks / 0 failures / 0 tracked allocations left |
 | LHoloUiTests | 29,349 checks / 4,860 frames / ImGui errors 0 |
 | LHoloGraphicsTests | 1,638 checks / 0 failures; cross-device 10, removal 12 |
 | LHoloTranslucencyTests | 573 checks / PASS |
-| LHolo | Windows x64 Release client DLL full rebuild passed (35.484 s) with the existing cached toolchain/dependencies |
+| LHolo | Windows x64 Release client DLL full rebuild passed (35.594 s) with the existing cached toolchain/dependencies |
 
 Commands: `xmake -P . -b <test target>`, then the executable under
 `build/integrated-clean/windows/x64/release/`; `xmake -P . -r LHolo`.
