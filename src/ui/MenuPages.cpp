@@ -208,17 +208,35 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
     }
     auto const& t=report->tally;
     ImGui::TextWrapped(tr(i18n::TextKey::SchematicSummary),static_cast<unsigned long long>(t.correct),static_cast<unsigned long long>(t.total()),
-        static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType+t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
-    static int filter{};
-    char const* filters[]{tr(i18n::TextKey::SchematicFilterAll),tr(i18n::TextKey::SchematicFilterWrong),tr(i18n::TextKey::SchematicFilterState),tr(i18n::TextKey::SchematicFilterMissing)};
-    ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo("##MistakeFilter",&filter,filters,4);
+        static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType),static_cast<unsigned long long>(t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
+    auto filter = std::clamp(static_cast<int>(snap.filter), 0, 5);
+    char const* filters[]{tr(i18n::TextKey::SchematicFilterAll),tr(i18n::TextKey::SchematicFilterWrong),tr(i18n::TextKey::SchematicFilterState),tr(i18n::TextKey::SchematicFilterMissing),tr(i18n::TextKey::SchematicFilterWrongType),tr(i18n::TextKey::SchematicFilterExtra)};
+    ImGui::SetNextItemWidth(fieldWidth(metrics));
+    auto const filterChanged=ImGui::Combo("##MistakeFilter",&filter,filters,6);
+    if (filterChanged && actions.setMistakeFilter) {
+        actions.setMistakeFilter(static_cast<MistakeFilter>(filter));
+    }
     if(ImGui::Button(tr(i18n::TextKey::SchematicNearest)) && actions.cycleMistake)actions.cycleMistake(static_cast<MistakeFilter>(filter));
-    if(snap.target){auto const& m=*snap.target;ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));}
+    if(!filterChanged && snap.target && matchesFilter(snap.target->kind,static_cast<MistakeFilter>(filter))){auto const& m=*snap.target;ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));}
     if(report->truncated)ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicTruncated));
+    ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicHighlightHint));
     if(ImGui::BeginChild("##MismatchList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*7),ImGuiChildFlags_Borders)){
-        for(auto const& m:report->mismatches){
+        for(std::size_t index=0;index<report->mismatches.size();++index){
+            auto const& m=report->mismatches[index];
             if(!matchesFilter(m.kind,static_cast<MistakeFilter>(filter)))continue;
-            ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f\n%s -> %s",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared),m.expected.c_str(),m.actual.c_str());
+            ImGui::PushID(static_cast<int>(index));
+            char label[160]{};
+            std::snprintf(label,sizeof(label),"%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));
+            auto const text=std::string{label}+"\n"+m.expected+" -> "+m.actual;
+            auto const padding=ImGui::GetStyle().FramePadding;
+            auto const wrap=std::max(1.f,ImGui::GetContentRegionAvail().x-padding.x*2.f);
+            auto const height=ImGui::CalcTextSize(text.c_str(),nullptr,false,wrap).y+padding.y*2.f;
+            bool const selected=!filterChanged && snap.target && snap.target->kind==m.kind && snap.target->world==m.world;
+            if(ImGui::Selectable("##MismatchRow",selected,0,ImVec2{0,height}) && actions.selectMistake) actions.selectMistake(report->stamp,index);
+            auto const min=ImGui::GetItemRectMin();
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(),ImGui::GetFontSize(),
+                {min.x+padding.x,min.y+padding.y},ImGui::GetColorU32(ImGuiCol_Text),text.c_str(),nullptr,wrap);
+            ImGui::PopID();
         }
     }ImGui::EndChild();
     ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));

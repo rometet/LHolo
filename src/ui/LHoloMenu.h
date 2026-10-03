@@ -162,6 +162,8 @@ struct MenuActions {
     std::function<void(std::uint64_t)> selectPlacement, deletePlacement, movePlacementToFeet;
     std::function<void(structure::SavedPlacement const&,std::uint64_t)> editPlacement;
     std::function<void(structure::MistakeFilter)> cycleMistake;
+    std::function<void(structure::MistakeFilter)> setMistakeFilter;
+    std::function<void(structure::schematic::ReportStamp const&, std::size_t)> selectMistake;
 };
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);

@@ -117,6 +117,76 @@ void testComparisonControls() {
     resetFluentTheme(); ImGui::DestroyContext(context);
 }
 
+void testVerifierControls() {
+    using namespace lholo::ui;
+    using namespace lholo::structure;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={1400,3600};io.DeltaTime=1.f/60.f;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;io.Fonts->AddFontDefault();io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    MenuModel model;model.schematic.worldAvailable=true;model.schematic.session.writable=true;
+    SavedPlacement placement;placement.id=1;placement.file="test.mcstructure";placement.name="Test";
+    model.schematic.session.document.placements={placement};model.schematic.session.document.selected=1;
+    auto report=std::make_shared<schematic::Report>();
+    report->stamp.worldEpoch=11;report->stamp.placementId=1;report->stamp.loadedGeneration=2;report->stamp.reportRevision=3;
+    report->mismatches={{VerificationState::Missing,{1,2,3},"expected","actual",1},
+        {VerificationState::WrongType,{4,5,6},"minecraft:stone","minecraft:dirt",2},
+        {VerificationState::WrongState,{7,8,9},"facing south","facing north",3},
+        {VerificationState::Extra,{10,11,12},"minecraft:air","minecraft:stone",4}};
+    report->tally.missing=21;report->tally.wrongType=22;report->tally.wrongState=23;report->tally.extra=24;
+    model.schematic.report=report;
+    schematic::MistakeSelection selection;
+    std::size_t rowCalls{},filterCalls{};
+    MenuActions actions;
+    actions.selectMistake=[&](schematic::ReportStamp const& stamp,std::size_t index){
+        ++rowCalls;
+        check(stamp==report->stamp,"UI forwards exact immutable report stamp");
+        check(selection.select(stamp,report->stamp,false,report->mismatches,index),"UI forwards selectable row index");
+        model.schematic.target=selection.target(report->stamp)->mismatch;
+    };
+    actions.setMistakeFilter=[&](MistakeFilter filter){
+        ++filterCalls;check(selection.setFilter(filter),"UI forwards a valid category filter");
+        model.schematic.filter=filter;model.schematic.target.reset();
+        auto next=std::make_shared<schematic::Report>(*report);++next->stamp.filterRevision;
+        report=std::move(next);model.schematic.report=report;
+    };
+    auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
+    auto frame=[&]{
+        ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({1200,3400});
+        ImGui::Begin("VerifierControlTest");renderSchematicsPage(model,actions,metrics);ImGui::End();ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"Verifier UI scopes");
+    };
+    auto windowContaining=[&](char const* name){
+        for(auto* window:context->Windows)if(std::string_view{window->Name}.find(name)!=std::string_view::npos)return window;
+        return static_cast<ImGuiWindow*>(nullptr);
+    };
+    frame();frame();
+    auto* rows=windowContaining("##MismatchList");check(rows!=nullptr,"Verifier list exists");
+    auto selectRow=[&](int index){
+        context->NavNextActivateId=ImHashStr("##MismatchRow",0,rows->GetID(index));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+    };
+    selectRow(1);
+    check(rowCalls==1 && model.schematic.target && model.schematic.target->world==Cell{4,5,6},"WrongType row selection");
+    selectRow(3);
+    check(rowCalls==2 && model.schematic.target && model.schematic.target->kind==VerificationState::Extra,"Extra row reselection");
+    auto chooseFilter=[&](lholo::i18n::TextKey key,int index){
+        auto* window=ImGui::FindWindowByName("VerifierControlTest");
+        context->NavNextActivateId=window->GetID("##MistakeFilter");context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+        auto* popup=windowContaining("##Combo_");check(popup!=nullptr,"Verifier filter popup exists");
+        context->NavNextActivateId=ImHashStr(lholo::i18n::tr(key),0,popup->GetID(index));frame();
+    };
+    chooseFilter(lholo::i18n::TextKey::SchematicFilterWrongType,4);
+    check(filterCalls==1 && model.schematic.filter==MistakeFilter::WrongType && !model.schematic.target,"WrongType filter clears target");
+    selectRow(3);check(rowCalls==2,"Hidden Extra row cannot select under WrongType filter");
+    selectRow(1);check(rowCalls==3 && model.schematic.target,"Filtered WrongType row selects");
+    chooseFilter(lholo::i18n::TextKey::SchematicFilterExtra,5);
+    check(filterCalls==2 && model.schematic.filter==MistakeFilter::Extra && !model.schematic.target,"Extra filter clears target");
+    selectRow(3);check(rowCalls==4 && model.schematic.target->kind==VerificationState::Extra,"Filtered Extra row selects");
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
 void renderPages(ImVec2 viewport, float scale, int state, int language) {
     auto* context = ImGui::CreateContext();
     context->ErrorCallback = errorCallback;
@@ -167,8 +237,13 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     model.schematic.session.document.selected=state?1:0;
     if(state==2){
         auto report=std::make_shared<lholo::structure::schematic::Report>();
-        report->tally.correct=12;report->tally.missing=4;report->tally.unknown=7;report->truncated=true;
-        report->mismatches={{lholo::structure::VerificationState::Missing,{-27,65,34},"expected stairs [weirdo state]","actual air",100}};
+        report->tally.correct=12;report->tally.missing=4;report->tally.wrongType=3;report->tally.wrongState=1;report->tally.extra=2;report->tally.unknown=7;report->truncated=true;
+        report->stamp.worldEpoch=1;report->stamp.placementId=1;report->stamp.loadedGeneration=2;report->stamp.reportRevision=3;
+        report->mismatches={
+            {lholo::structure::VerificationState::Missing,{-27,65,34},"expected stairs [weirdo state]","actual air",100},
+            {lholo::structure::VerificationState::WrongType,{-28,65,34},"minecraft:stone","minecraft:dirt",121},
+            {lholo::structure::VerificationState::WrongState,{-29,65,34},"expected long asymmetric stair state south up","actual long asymmetric stair state north down",144},
+            {lholo::structure::VerificationState::Extra,{-30,65,34},"minecraft:air","minecraft:stone",169}};
         report->materials={{"minecraft:slab",{24,8},12},{"minecraft:unknown_item",{3,0},{}}};
         model.schematic.report=report;model.schematic.target=report->mismatches[0];
     }
@@ -190,6 +265,7 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     lholo::ui::MenuActions const actions{};
     for (std::size_t page = 0; page < lholo::ui::kMenuPageCount; ++page) {
         model.page = static_cast<lholo::ui::MenuPage>(page);
+        model.schematic.filter=static_cast<lholo::structure::MistakeFilter>((page+static_cast<std::size_t>(state))%6);
         model.layerAxis = static_cast<int>(page % 9);
         model.layerDisplayMode = static_cast<int>(page % 4);
         for (int repeat = 0; repeat < 3; ++repeat) {
@@ -235,6 +311,7 @@ int main() {
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
         testComparisonControls();
+        testVerifierControls();
         for (std::size_t language = 0; language < lholo::i18n::languages().size(); ++language) {
             check(lholo::i18n::setLanguageByCode(lholo::i18n::languageCode(language)), "language selection");
             for (auto const viewport : {ImVec2{1920, 1080}, ImVec2{3840, 2160},

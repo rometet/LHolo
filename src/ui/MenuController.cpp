@@ -308,6 +308,8 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
     actions.verifySchematic = [] { structure::schematic::verify(); };
     actions.cycleMistake = [](auto filter) { structure::schematic::cycleMistake(filter); };
+    actions.setMistakeFilter = [](auto filter) { structure::schematic::setMistakeFilter(filter); };
+    actions.selectMistake = [](auto const& stamp, auto index) { (void)structure::schematic::selectMistake(stamp, index); };
     actions.browseStructure = [](std::string_view current) -> std::optional<std::string> {
         auto const selected = openStructureFile(structure::detail::pathFromUtf8(current));
         return selected ? std::optional<std::string>{structure::detail::pathToUtf8(*selected)}

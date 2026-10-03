@@ -43,14 +43,21 @@ struct VerificationTally {
         }
     }
 };
-enum class MistakeFilter : int { Mistakes, WrongAndExtra, WrongState, Missing };
+// Preserve the existing filter values; separate categories are additive.
+enum class MistakeFilter : int { Mistakes, WrongAndExtra, WrongState, Missing, WrongType, Extra };
+inline bool validMistakeFilter(MistakeFilter filter) {
+    return static_cast<int>(filter)>=0 && static_cast<int>(filter)<=static_cast<int>(MistakeFilter::Extra);
+}
 inline bool matchesFilter(VerificationState state, MistakeFilter filter) {
     switch (filter) {
     case MistakeFilter::WrongAndExtra: return state == VerificationState::WrongType || state == VerificationState::Extra;
     case MistakeFilter::WrongState: return state == VerificationState::WrongState;
     case MistakeFilter::Missing: return state == VerificationState::Missing;
-    default: return state == VerificationState::Missing || state == VerificationState::WrongType
+    case MistakeFilter::WrongType: return state == VerificationState::WrongType;
+    case MistakeFilter::Extra: return state == VerificationState::Extra;
+    case MistakeFilter::Mistakes: return state == VerificationState::Missing || state == VerificationState::WrongType
         || state == VerificationState::WrongState || state == VerificationState::Extra;
+    default: return false;
     }
 }
 inline char const* verificationStateName(VerificationState state) {
@@ -62,6 +69,9 @@ struct Mismatch {
     Cell world;
     std::string expected, actual;
     double distanceSquared{};
+    // Preserve the native layer which produced this actual-state snapshot.
+    // Bubble columns use the extra layer rather than the ordinary liquid one.
+    bool actualLiquid{}, actualExtra{};
 };
 inline bool nearerMismatch(Mismatch const& a, Mismatch const& b) {
     if (a.distanceSquared != b.distanceSquared) return a.distanceSquared < b.distanceSquared;

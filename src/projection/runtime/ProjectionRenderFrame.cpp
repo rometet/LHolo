@@ -23,6 +23,7 @@
 #include "projection/runtime/ProjectionLifecycle.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
+#include "projection/runtime/VerifierHighlightRules.h"
 #include "projection/world/ProjectionPlacement.h"
 
 #include "overlay/BoundsWireframe.h"
@@ -31,6 +32,7 @@
 #include "structure/capture/StructureCapture.h"
 #include "structure/StructureLoader.h"
 #include "structure/StructureSession.h"
+#include "structure/SchematicRuntime.h"
 
 #include <algorithm>
 #include <cmath>
@@ -634,6 +636,33 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
             if (contextStatus == ProjectionContextStatus::DimensionChanged) {
                 suspendProjectionDimension(state);
                 return;
+            }
+            // The selected report row is a value snapshot. Validate it against
+            // the active renderer's world, structure and full placement before
+            // reusing the existing single-cell wireframe rendering path.
+            std::optional<std::array<int,3>> highlighted;
+            auto const view=structure::capture::getClientViewSnapshot();
+            auto const loaded=structure::getLoaded();
+            if(view && loaded && loaded==state.structure && loaded->generation==state.structureGeneration) {
+                auto const transform=structure::detail::StructureSession::getInstance().transform();
+                if(auto const target=structure::schematic::highlightTarget(
+                    view->worldEpoch,state.dimensionId,state.structureGeneration)) {
+                    highlighted=verifierHighlightPosition(*target,{
+                        view->worldEpoch,state.dimensionId,state.structureGeneration,
+                        {static_cast<std::int64_t>(state.anchor.x)+transform.offsetX,
+                         static_cast<std::int64_t>(state.anchor.y)+transform.offsetY,
+                         static_cast<std::int64_t>(state.anchor.z)+transform.offsetZ},
+                        transform.rotation,transform.mirror,transform.layerAxis,
+                        transform.layerDisplayMode,transform.displayLayer,transform.visible,transform.countExtras});
+                }
+            }
+            if(highlighted) {
+                if(!state.verifierTargetBounds)state.verifierTargetBounds=std::make_unique<overlay::BoundsWireframe>();
+                BlockPos const position{(*highlighted)[0],(*highlighted)[1],(*highlighted)[2]};
+                state.verifierTargetBounds->setBounds(position,position,0xFF33FFFFU);
+                state.verifierTargetBounds->render(renderContext,renderAlphaLayer);
+            } else if(state.verifierTargetBounds) {
+                state.verifierTargetBounds->clear();
             }
             renderProjection(state, renderContext, renderAlphaLayer);
         }

@@ -42,16 +42,50 @@ bool gAvailable{}, gActivate{}, gApply{}, gVerify{};
 std::uint64_t gWorldEpoch{};
 std::uint64_t gActiveId{};
 std::shared_ptr<Report const> gReport;
-std::optional<std::size_t> gTarget;
-std::optional<Mismatch> gLastTarget;
+MistakeSelection gSelection;
+std::uint64_t gReportRevision{};
+std::uint64_t gFilterRevision{};
 std::filesystem::path gActivePath;
 
 bool contextValid() { auto const view=capture::getClientViewSnapshot();return gAvailable && view && view->worldEpoch==gWorldEpoch; }
 std::filesystem::path library() { return LHolo::getInstance().getSelf().getModDir() / "schematics"; }
+void retireReport() { gReport.reset();gSelection.clear(); }
+ReportStamp stampFor(SavedPlacement const& p,std::uint64_t revision,std::uint64_t generation,
+    std::uint64_t reportRevision) {
+    return {gWorldEpoch,gDimension,revision,p.id,generation,reportRevision,p.origin,p.rotation,p.mirror,
+        p.layerAxis,p.layerMode,p.layer,p.visible,p.countExtras,gFilterRevision};
+}
+bool setFilter(MistakeFilter filter) {
+    auto const previous=gSelection.filter();
+    if(!gSelection.setFilter(filter))return false;
+    if(previous!=filter){
+        if(++gFilterRevision==0)++gFilterRevision;
+        if(gReport){auto next=std::make_shared<Report>(*gReport);next->stamp.filterRevision=gFilterRevision;gReport=std::move(next);}
+    }
+    return true;
+}
+bool placementCurrent(ReportStamp const& stamp,detail::StructureSessionSnapshot const& structure) {
+    if(!structure.loaded || !structure.saved.available || structure.loaded->generation!=stamp.loadedGeneration)return false;
+    auto const& t=structure.transform;
+    Cell const origin{static_cast<std::int64_t>(structure.saved.anchorX)+t.offsetX,
+        static_cast<std::int64_t>(structure.saved.anchorY)+t.offsetY,
+        static_cast<std::int64_t>(structure.saved.anchorZ)+t.offsetZ};
+    return stamp.placementOrigin==origin && stamp.placementRotation==t.rotation && stamp.placementMirror==t.mirror
+        && stamp.layerAxis==t.layerAxis && stamp.layerMode==t.layerDisplayMode && stamp.layer==t.displayLayer
+        && stamp.visible==t.visible && stamp.countExtras==t.countExtras;
+}
+bool reportCurrent(detail::StructureSessionSnapshot const& structure) {
+    auto const& loaded=structure.loaded;
+    if(!contextValid() || !loaded || !gReport || !gReport->stamp.valid() || loaded->sourcePath!=gActivePath)return false;
+    auto const session=gSession.snapshot();auto const p=selectedPlacement(session.document);
+    return p && p->id==gActiveId && p->dimension==gDimension
+        && gReport->stamp.sameContext(stampFor(*p,session.revision,loaded->generation,gReport->stamp.reportRevision))
+        && placementCurrent(gReport->stamp,structure);
+}
 
 bool change(PlacementSessionSnapshot const& snap, PlacementDocument document) {
     if (!gSession.replace(std::move(document),snap.revision)) return false;
-    gReport.reset(); gTarget.reset(); gLastTarget.reset(); gVerify = true; return true;
+    retireReport();gVerify = true; return true;
 }
 struct Job {
     std::shared_ptr<LoadedStructure const> loaded;
@@ -92,11 +126,12 @@ void retainMismatch(Job& job, Mismatch row) {
     auto const group = row.kind == VerificationState::Missing ? 0u : row.kind == VerificationState::WrongState ? 1u : 2u;
     if(retainNearest(job.nearest[group],std::move(row),cap))job.result.truncated=true;
 }
-void record(Job& job, Cell world, VerificationState state, Block const* expected, Block const* actual, bool expects) {
+void record(Job& job, Cell world, VerificationState state, Block const* expected, Block const* actual,
+    bool expects,bool actualLiquid=false,bool actualExtra=false) {
     job.result.tally.add(state,expects);
     if (matchesFilter(state,MistakeFilter::Mistakes)) {
         auto const dx = static_cast<double>(world.x - job.observer.x), dy = static_cast<double>(world.y - job.observer.y), dz = static_cast<double>(world.z - job.observer.z);
-        retainMismatch(job,{state,world,describe(expected),describe(actual),dx*dx+dy*dy+dz*dz});
+        retainMismatch(job,{state,world,describe(expected),describe(actual),dx*dx+dy*dy+dz*dz,actualLiquid,actualExtra});
     }
 }
 LoadedStructure::RenderBlock const* entryAt(Job const& job,Cell local) {
@@ -167,10 +202,16 @@ void scanBlock(Job& job, LocalPlayer& player) {
     auto const bodyState=expected?match(expected,actual):VerificationState::Ignored;
     auto const liquidState=liquid?match(liquid,actualLiquid):VerificationState::Ignored;
     auto state=combineExpectedStates(bodyState,liquidState);
+    bool solidInLiquidCell{};
     if(!expected && liquid && state!=VerificationState::Unknown && state!=VerificationState::Missing
-        && !actual.isAir() && actual.getTypeName()!=liquid->getTypeName())
+        && !actual.isAir() && actual.getTypeName()!=liquid->getTypeName()){
         state=ready(source,pos,actual)?VerificationState::WrongType:VerificationState::Unknown;
-    record(job,world,state,expected ? expected : liquid,expected ? &actual : &actualLiquid,true);
+        solidInLiquidCell=true;
+    }
+    bool const rowLiquid=!solidInLiquidCell && (!expected || (liquid && liquidState==state && bodyState!=state));
+    auto const* rowExpected=rowLiquid?liquid:(expected?expected:liquid);
+    auto const* rowActual=rowLiquid?&actualLiquid:&actual;
+    record(job,world,state,rowExpected,rowActual,true,rowLiquid,rowLiquid && bubble);
     addMaterial(job,entry.block,bodyState,local,source); addMaterial(job,entry.liquid,liquidState,local,source);
 
 }
@@ -190,10 +231,14 @@ void scanAir(Job& job, LocalPlayer& player,std::size_t& budget) {
 }
 }
 Snapshot snapshot() {
+    // StructureSession is sampled before the schematic mutex, never beneath
+    // it. The render getter below avoids this session lock entirely.
+    auto const structure=detail::StructureSession::getInstance().snapshot();
     std::lock_guard lock(gMutex);
-    Snapshot s{gSession.snapshot(),gFiles,gReport,{},contextValid(),gDimension,gFeet,detail::pathToUtf8(library()),gStatus};
+    if(gReport && !reportCurrent(structure))retireReport();
+    Snapshot s{gSession.snapshot(),gFiles,gReport,{},contextValid(),gDimension,gFeet,detail::pathToUtf8(library()),gStatus,gSelection.filter()};
     if(!s.worldAvailable){s.report.reset();s.session.writable=false;}
-    if (s.worldAvailable && gReport && gTarget && *gTarget < gReport->mismatches.size()) s.target = gReport->mismatches[*gTarget];
+    if(s.worldAvailable && gReport)if(auto target=gSelection.target(gReport->stamp))s.target=std::move(target->mismatch);
     return s;
 }
 void refreshFiles() {
@@ -274,9 +319,32 @@ bool moveToFeet(std::uint64_t id) {
     auto s=snapshot(); if(!s.worldAvailable)return false;
     for(auto p:s.session.document.placements)if(p.id==id){p.origin=s.feet;return edit(p,s.session.revision);} return false;
 }
-void verify(){std::lock_guard lock(gMutex);gVerify=true;gReport.reset();gTarget.reset();gLastTarget.reset();}
-void cycleMistake(MistakeFilter filter){std::lock_guard lock(gMutex);if(gReport){gTarget=nextMistake(gReport->mismatches,filter,gTarget);if(gTarget)gLastTarget=gReport->mismatches[*gTarget];else gLastTarget.reset();}}
-void reset(){std::lock_guard lock(gMutex);gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gVerify=true;gActiveId=0;gActivePath.clear();gReport.reset();gTarget.reset();gLastTarget.reset();}
+void verify(){std::lock_guard lock(gMutex);gVerify=true;retireReport();}
+bool selectMistake(ReportStamp const& stamp,std::size_t index) {
+    auto const structure=detail::StructureSession::getInstance().snapshot();
+    std::lock_guard lock(gMutex);
+    if(!reportCurrent(structure)){retireReport();return false;}
+    return gSelection.select(stamp,gReport->stamp,gReport->running,gReport->mismatches,index);
+}
+void setMistakeFilter(MistakeFilter filter){std::lock_guard lock(gMutex);setFilter(filter);}
+void clearMistakeTarget(){std::lock_guard lock(gMutex);gSelection.clear();}
+void cycleMistake(MistakeFilter filter) {
+    auto const structure=detail::StructureSession::getInstance().snapshot();
+    std::lock_guard lock(gMutex);
+    if(!setFilter(filter))return;
+    if(!reportCurrent(structure)){retireReport();return;}
+    gSelection.cycle(gReport->stamp,gReport->running,gReport->mismatches,filter);
+}
+std::optional<SelectedMistake> highlightTarget(std::uint64_t worldEpoch,int dimension,
+    std::uint64_t loadedGeneration) noexcept {
+    try {
+        std::lock_guard lock(gMutex);
+        if(!gAvailable || worldEpoch!=gWorldEpoch || dimension!=gDimension || !gReport
+            || loadedGeneration!=gReport->stamp.loadedGeneration)return {};
+        return gSelection.target(gReport->stamp);
+    }catch(...){return {};}
+}
+void reset(){std::lock_guard lock(gMutex);gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gVerify=true;gActiveId=0;gActivePath.clear();retireReport();}
 void shutdown(){gJob.reset();reset();}
 void processControl() {
     std::optional<SavedPlacement> activation;
@@ -320,7 +388,8 @@ void rememberSelectedTransform() {
     if(d!=snap.document)(void)change(snap,std::move(d));
 }
 void tick(LocalPlayer& player) {
-    auto const view=capture::getClientViewSnapshot(); if(!view){gJob.reset();return;}
+    auto const view=capture::getClientViewSnapshot();
+    if(!view){gJob.reset();std::lock_guard lock(gMutex);gAvailable=false;retireReport();return;}
     auto const feet=player.getFeetPos(); auto const checked=projection::detail::checkedBlockCell({feet.x,feet.y,feet.z},1);
     auto const dim=static_cast<int>(player.getDimensionId());
     std::string key;
@@ -339,7 +408,7 @@ void tick(LocalPlayer& player) {
         if(key!=gWorldKey || dim!=gDimension || view->worldEpoch!=gWorldEpoch){
             if(key!=gWorldKey || (dim==gDimension && view->worldEpoch!=gWorldEpoch))gTransientDimensions.clear();
             else if(!stable)gTransientDimensions.remember(gDimension,gSession.snapshot().document);
-            gSession.clear();gWorldKey=key;gWorldEpoch=view->worldEpoch;gDimension=dim;gReport.reset();gTarget.reset();gLastTarget.reset();gActivePath.clear();gActiveId=0;gVerify=true;
+            gSession.clear();gWorldKey=key;gWorldEpoch=view->worldEpoch;gDimension=dim;retireReport();gActivePath.clear();gActiveId=0;gVerify=true;
             if(stable)gSession.bind(LHolo::getInstance().getSelf().getConfigDir()/"placements"/key/("dimension-"+std::to_string(dim)+".json"));
             else {
                 gSession.bindTransient();
@@ -352,9 +421,32 @@ void tick(LocalPlayer& player) {
         gAvailable=checked.has_value(); if(checked)gFeet={(*checked)[0],(*checked)[1],(*checked)[2]};
         snap=gSession.snapshot();force=gVerify;gVerify=false;
     }
-    auto const p=selectedPlacement(snap.document);auto loaded=detail::StructureSession::getInstance().loaded();
-    if(!p || p->dimension!=dim || !loaded || !checked){gJob.reset();return;}
-    {std::lock_guard lock(gMutex);if(loaded->sourcePath!=gActivePath){gJob.reset();return;}}
+    auto const p=selectedPlacement(snap.document);auto const structure=detail::StructureSession::getInstance().snapshot();auto const loaded=structure.loaded;
+    if(!p || p->dimension!=dim || !loaded || !checked){gJob.reset();std::lock_guard lock(gMutex);retireReport();return;}
+    std::optional<SelectedMistake> selected;
+    {std::lock_guard lock(gMutex);
+        if(loaded->sourcePath!=gActivePath){gJob.reset();retireReport();return;}
+        if(!placementCurrent(stampFor(*p,snap.revision,loaded->generation,1),structure)){gJob.reset();retireReport();return;}
+        if(gReport && !reportCurrent(structure))retireReport();
+        if(gReport)selected=gSelection.target(gReport->stamp);
+    }
+    // Keep a selected marker fresh while the menu is closed. One bounded
+    // native cell check uses an existing tick-budget slot, never a UI/render
+    // callback or a new scan. Native reads happen outside all owner locks.
+    bool const selectedRead=selected.has_value();
+    if(selected){
+        bool changed=true;
+        try {
+            auto const& row=selected->mismatch;
+            BlockPos const pos{static_cast<int>(row.world.x),static_cast<int>(row.world.y),static_cast<int>(row.world.z)};
+            auto& source=player.getDimensionBlockSource();
+            if(source.areChunksFullyLoaded(pos,0)){
+                auto const& actual=row.actualExtra?source.getExtraBlock(pos):row.actualLiquid?source.getLiquidBlock(pos):source.getBlock(pos);
+                changed=placeholderBlock(actual.getTypeName()) || describe(&actual)!=row.actual;
+            }
+        }catch(...){changed=true;}
+        if(changed){std::lock_guard lock(gMutex);gSelection.clearIfCurrent(*selected);}
+    }
     auto const now=GetTickCount64();
     if(force || (gJob && (gJob->revision!=snap.revision || gJob->loaded!=loaded)))gJob.reset();
     if(!gJob && (force || (isGuiVisible() && now>=gNextScan))){
@@ -364,14 +456,20 @@ void tick(LocalPlayer& player) {
         if(!projection::detail::checkedProjectionOrigin({static_cast<int>(p->origin.x),static_cast<int>(p->origin.y),static_cast<int>(p->origin.z)},{0,0,0},{static_cast<int>(size.x),static_cast<int>(size.y),static_cast<int>(size.z)},0))return;
         j.rotation=projection::detail::getProjectionRotation(p->rotation);
         j.mirror=projection::detail::getProjectionMirror(p->mirror);
-        j.result.running=true;gJob.emplace(std::move(j));
-        {std::lock_guard lock(gMutex);if(gSession.snapshot().revision==snap.revision)gReport=std::make_shared<Report const>(gJob->result);}
+        {
+            std::lock_guard lock(gMutex);
+            if(gSession.snapshot().revision!=snap.revision || gWorldEpoch!=view->worldEpoch)return;
+            if(++gReportRevision==0)++gReportRevision;
+            j.result.stamp=stampFor(*p,snap.revision,loaded->generation,gReportRevision);
+            j.result.running=true;gJob.emplace(std::move(j));
+            gReport=std::make_shared<Report const>(gJob->result);
+        }
     }
     if(!gJob)return;
     auto& job=*gJob;
     // Finite game-tick work, completely outside mesh/render/upload paths.
     constexpr std::size_t budget=256;
-    std::size_t remaining=budget;
+    std::size_t remaining=budget-static_cast<std::size_t>(selectedRead);
     while(remaining){
         if(job.block<loaded->renderBlocks.size()){--remaining;scanBlock(job,player);}
         else if(job.air.region<loaded->regions.size())scanAir(job,player,remaining);
@@ -379,8 +477,8 @@ void tick(LocalPlayer& player) {
         ++job.result.checked;
     }
     {
-        auto progress=std::make_shared<Report>();progress->running=true;progress->checked=job.result.checked;
-        std::lock_guard lock(gMutex);if(gSession.snapshot().revision==job.revision)gReport=std::move(progress);
+        auto progress=std::make_shared<Report>();progress->running=true;progress->checked=job.result.checked;progress->stamp=job.result.stamp;
+        std::lock_guard lock(gMutex);if(gSession.snapshot().revision==job.revision){progress->stamp.filterRevision=gFilterRevision;gReport=std::move(progress);}
     }
     if(job.block==loaded->renderBlocks.size() && job.air.region==loaded->regions.size()){
         if(!job.finalizing){
@@ -397,9 +495,8 @@ void tick(LocalPlayer& player) {
         job.result.running=false;
         std::lock_guard lock(gMutex);
         if(gSession.snapshot().revision==job.revision){
-            auto const previous=gLastTarget;
-            gTarget.reset();
-            if(previous)for(std::size_t i=0;i<job.result.mismatches.size();++i){auto const& row=job.result.mismatches[i];if(row.kind==previous->kind && row.world==previous->world){gTarget=i;break;}}
+            job.result.stamp.filterRevision=gFilterRevision;
+            gSelection.reconcile(job.result.stamp,job.result.mismatches);
             gReport=std::make_shared<Report const>(std::move(job.result));
         }
         gJob.reset();gNextScan=now+2000;

@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include "structure/PlacementSession.h"
 #include "structure/Verification.h"
+#include "structure/VerificationSelection.h"
 #include "structure/NativeBlockTransform.h"
 #include "structure/PlacementMigration.h"
 #include "structure/InventoryCountRules.h"
@@ -163,13 +164,108 @@ template<class Check> void runSchematicChecks(Check check) {
         auto v=static_cast<V>(kind);check(matchesFilter(v,MistakeFilter::Missing)==(v==V::Missing));
         check(matchesFilter(v,MistakeFilter::WrongState)==(v==V::WrongState));
         check(matchesFilter(v,MistakeFilter::WrongAndExtra)==(v==V::WrongType || v==V::Extra));
+        check(matchesFilter(v,MistakeFilter::WrongType)==(v==V::WrongType));
+        check(matchesFilter(v,MistakeFilter::Extra)==(v==V::Extra));
     }
+    check(static_cast<int>(MistakeFilter::Missing)==3 && static_cast<int>(MistakeFilter::WrongType)==4 && static_cast<int>(MistakeFilter::Extra)==5);
+    check(tally.wrongType==1 && tally.extra==1); // Full tallies are not capped list sizes.
+    check(!matchesFilter(V::Missing,static_cast<MistakeFilter>(99)));
     std::vector<Mismatch> rows;
     for(int i=1000;i>=0;--i)retainNearest(rows,{V::Missing,{i,0,0},{},{},static_cast<double>(i*i)},8);
     check(rows.size()==8);std::sort(rows.begin(),rows.end(),nearerMismatch);
     for(int i=0;i<8;++i)check(rows[static_cast<std::size_t>(i)].world.x==i);
     check(nextMistake(rows,MistakeFilter::Missing,{})==0);check(nextMistake(rows,MistakeFilter::Missing,7)==0);
     check(!nextMistake(rows,MistakeFilter::WrongAndExtra,{}));check(!nextMistake(std::vector<Mismatch>{},MistakeFilter::Mistakes,{}));
+    {
+        using namespace structure::schematic;
+        ReportStamp stamp{12,0,7,3,42,100,{10,64,-8},1,2,LayerAxis::Y,LayerDisplayMode::All,0,true,true,0};
+        std::vector<Mismatch> errors{
+            {V::Missing,{11,65,-7},"stairs[facing=west]","minecraft:air",1},
+            {V::WrongType,{12,65,-7},"minecraft:stone","minecraft:dirt",4},
+            {V::WrongState,{13,65,-7},"stairs[facing=west]","stairs[facing=east]",9},
+            {V::Extra,{14,65,-7},"minecraft:air","minecraft:stone",16}
+        };
+        MistakeSelection selection;
+        check(selection.select(stamp,stamp,false,errors,2));
+        auto target=selection.target(stamp);check(target && target->index==2 && target->mismatch.expected==errors[2].expected);
+        auto stale=stamp;--stale.reportRevision;
+        check(!selection.select(stale,stamp,false,errors,0));
+        check(!selection.select(stamp,stamp,true,errors,0));
+        check(!selection.select(stamp,stamp,false,errors,errors.size()));
+        check(selection.target(stamp)->index==2); // Rejected events cannot alter the valid target.
+        check(selection.setFilter(MistakeFilter::WrongType));check(!selection.target(stamp));
+        check(!selection.select(stamp,stamp,false,errors,0));
+        check(selection.select(stamp,stamp,false,errors,1));
+        check(!selection.select(stamp,stamp,false,errors,3));
+        check(!selection.setFilter(static_cast<MistakeFilter>(99)));check(selection.filter()==MistakeFilter::WrongType);
+        check(selection.setFilter(MistakeFilter::Extra));check(!selection.target(stamp));
+        check(selection.cycle(stamp,false,errors,MistakeFilter::Extra));check(selection.target(stamp)->index==3);
+        check(selection.cycle(stamp,false,errors,MistakeFilter::Missing));check(selection.target(stamp)->index==0);
+        check(selection.cycle(stamp,false,errors,MistakeFilter::Mistakes));check(selection.target(stamp)->index==0);
+        check(selection.cycle(stamp,false,errors,MistakeFilter::Mistakes));check(selection.target(stamp)->index==1);
+        selection.clear();check(!selection.target(stamp));
+
+        // Every context field participates in selection retirement, even if a
+        // new load/job reused the same list length and matching coordinates.
+        auto contextChange=[&](auto change){
+            auto changed=stamp;change(changed);
+            check(selection.select(stamp,stamp,false,errors,0));
+            check(!selection.target(changed));
+            check(!selection.select(stamp,changed,false,errors,0));
+            selection.reconcile(changed,errors);check(!selection.target(changed));
+        };
+        contextChange([](auto& s){++s.worldEpoch;});
+        contextChange([](auto& s){++s.dimension;});
+        contextChange([](auto& s){++s.sessionRevision;});
+        contextChange([](auto& s){++s.placementId;});
+        contextChange([](auto& s){++s.loadedGeneration;});
+        contextChange([](auto& s){++s.placementOrigin.x;});
+        contextChange([](auto& s){++s.placementOrigin.y;});
+        contextChange([](auto& s){++s.placementOrigin.z;});
+        contextChange([](auto& s){++s.placementRotation;});
+        contextChange([](auto& s){++s.placementMirror;});
+        contextChange([](auto& s){s.layerAxis=LayerAxis::X;});
+        contextChange([](auto& s){s.layerMode=LayerDisplayMode::Single;});
+        contextChange([](auto& s){++s.layer;});
+        contextChange([](auto& s){s.visible=false;});
+        contextChange([](auto& s){s.countExtras=false;});
+        contextChange([](auto& s){++s.filterRevision;});
+
+        check(selection.select(stamp,stamp,false,errors,2));
+        auto next=stamp;++next.reportRevision;
+        auto reordered=errors;std::reverse(reordered.begin(),reordered.end());reordered[1].distanceSquared=100;
+        selection.reconcile(next,reordered);
+        target=selection.target(next);check(target && target->index==1 && target->stamp==next && target->mismatch.distanceSquared==100);
+        check(!selection.select(stamp,next,false,reordered,2)); // Old UI row event after refresh.
+        auto changedRow=[&](auto change){
+            check(selection.select(stamp,stamp,false,errors,2));
+            auto changed=errors;change(changed[2]);selection.reconcile(next,changed);check(!selection.target(next));
+        };
+        changedRow([](auto& m){m.kind=V::WrongType;});
+        changedRow([](auto& m){++m.world.x;});
+        changedRow([](auto& m){m.expected="stairs[facing=south]";});
+        changedRow([](auto& m){m.actual="stairs[facing=west]";});
+        changedRow([](auto& m){m.actualLiquid=true;});
+        changedRow([](auto& m){m.actualExtra=true;});
+        // A native check begun before a UI selection/report refresh must not
+        // clear the replacement selection, even at the same coordinates.
+        check(selection.select(stamp,stamp,false,errors,2));
+        auto const checkedTarget=*selection.target(stamp);
+        check(selection.select(stamp,stamp,false,errors,1));
+        check(!selection.clearIfCurrent(checkedTarget));check(selection.target(stamp)->index==1);
+        check(selection.select(next,next,false,errors,2));
+        check(!selection.clearIfCurrent(checkedTarget));check(selection.target(next)->stamp==next);
+        auto checked=*selection.target(next);checked.mismatch.actualLiquid=true;
+        check(!selection.clearIfCurrent(checked));
+        checked=*selection.target(next);checked.mismatch.actualExtra=true;
+        check(!selection.clearIfCurrent(checked));
+        check(selection.clearIfCurrent(*selection.target(next)));check(!selection.target(next));
+        check(selection.select(stamp,stamp,false,errors,2));
+        selection.reconcile(next,{});check(!selection.target(next)); // Resolved or out of retained result.
+        auto invalid=stamp;invalid.loadedGeneration=0;
+        check(!selection.select(invalid,invalid,false,errors,0));
+        check(!selection.cycle(stamp,true,errors,MistakeFilter::Mistakes));
+    }
     std::vector<Mismatch> equal{{V::WrongType,{1,2,3},{},{},9},{V::Missing,{-1,2,3},{},{},9},{V::WrongState,{-1,1,3},{},{},9}};
     std::sort(equal.begin(),equal.end(),nearerMismatch);check(equal[0].world==Cell{-1,1,3});check(equal[1].world==Cell{-1,2,3});
     check(requiredItemRule("minecraft:wall_torch").alias=="minecraft:torch");

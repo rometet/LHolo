@@ -11,6 +11,7 @@
 #include "projection/ProjectionTypes.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
+#include "overlay/BoundsWireframe.h"
 
 #include <array>
 #include <cstddef>
@@ -153,6 +154,8 @@ struct ProjectionState {
     std::vector<std::size_t>                liquidProxySectionCellCounts;
     std::vector<std::unique_ptr<mce::Mesh>> blockEntityPlaceholderSectionMeshes;
     std::unique_ptr<mce::Mesh>              structureBoundsMesh;
+    // Released together with dimension/world meshes by the existing owner.
+    std::unique_ptr<overlay::BoundsWireframe> verifierTargetBounds;
     std::vector<SectionState>               sections;
     std::vector<std::size_t>                blockToSection;
     std::size_t                             dirtySectionCursor{};

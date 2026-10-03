@@ -295,6 +295,9 @@
     LHOLO_TEXT_KEY("schematic.inventoryUnavailable", SchematicInventoryUnavailable, "") \
     LHOLO_TEXT_KEY("schematic.filterAll", SchematicFilterAll, "") \
     LHOLO_TEXT_KEY("schematic.filterWrong", SchematicFilterWrong, "") \
+    LHOLO_TEXT_KEY("schematic.filterWrongType", SchematicFilterWrongType, "") \
+    LHOLO_TEXT_KEY("schematic.filterExtra", SchematicFilterExtra, "") \
+    LHOLO_TEXT_KEY("schematic.highlightHint", SchematicHighlightHint, "") \
     LHOLO_TEXT_KEY("schematic.filterState", SchematicFilterState, "") \
     LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "")
 
