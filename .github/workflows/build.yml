@@ -21,10 +21,25 @@ jobs:
           restore-keys: |
             xmake-
 
-      - name: Setup LLVM
-        uses: ZhongRuoyu/setup-llvm@v0
-        with:
-          llvm-version: 22.1.8
+      - name: Install verified LLVM 22.1.8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'LLVM-22.1.8-win64.exe'
+          $llvmRoot = Join-Path $env:RUNNER_TEMP 'llvm-22.1.8'
+          Invoke-WebRequest 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' -OutFile $installer
+          $expected = '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'LLVM installer checksum mismatch'
+          }
+          $install = Start-Process -FilePath $installer -ArgumentList "/S /D=$llvmRoot" -WindowStyle Hidden -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "LLVM installer failed: $($install.ExitCode)" }
+          $llvmBin = Join-Path $llvmRoot 'bin'
+          $version = (& (Join-Path $llvmBin 'clang-cl.exe') --version) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch 'clang version 22\.1\.8(?:\s|$)') {
+            throw "Unexpected LLVM compiler: $version"
+          }
+          $llvmBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - run: |
           xmake repo -u
@@ -66,6 +81,12 @@ jobs:
           xmake -v -y LHoloGraphicsTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake run LHoloGraphicsTests
+
+      - name: Build and run translucency tests
+        run: |
+          xmake -v -y LHoloTranslucencyTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloTranslucencyTests
 
       - uses: actions/upload-artifact@v7
         with:

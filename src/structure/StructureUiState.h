@@ -11,6 +11,7 @@
 #include "input/MenuRoute.h"
 #include "input/NativeTextInputState.h"
 #include <functional>
+#include "ui/HudLayout.h"
 
 #include <array>
 #include <atomic>
@@ -109,6 +110,8 @@ public:
     void setBlockGameInputUntil(std::uint64_t deadline);
 
     [[nodiscard]] HudStateSnapshot hud() const;
+    [[nodiscard]] ui::HudLayout hudLayout(unsigned id) const;
+    bool setHudLayout(unsigned id,ui::HudLayout const&);
     bool setUiScale(float scale);
     bool applyHud(HudStateSnapshot const& snapshot);
 
@@ -239,6 +242,8 @@ private:
     input::NativeTextInputState mNativeTextInput;
     std::atomic_bool mNativeTextInputHooksReady{};
 
+    mutable std::mutex mHudLayoutMutex;
+    std::array<ui::HudLayout,2> mHudLayouts{};
     std::atomic_bool  mHudEnabled{true};
     std::atomic_bool  mHudShowFileName{true};
     std::atomic_bool  mHudShowLayer{true};

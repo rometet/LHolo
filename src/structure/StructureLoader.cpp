@@ -30,6 +30,7 @@
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
 #include "overlay/CompanionBridge.h"
+#include "ui/HudSummaryPolicy.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/MenuController.h"
 #include "structure/capture/StructureCapture.h"
@@ -803,8 +804,13 @@ void renderHud() {
             5.0f
         );
     }
-    auto const hudMetrics = lholo::ui::calculateMetrics(displaySize, uiScale);
+    auto const customLayout=uiState().hudLayout(0);
+    auto hudMetrics = lholo::ui::calculateMetrics(displaySize, uiScale);
     lholo::ui::applyFluentTheme(hudMetrics);
+    // Per-window scaling retains the existing theme and shared font atlas.
+    float const panelScale=lholo::ui::hudScaleMultiplier(hudMetrics.scale,customLayout);
+    hudMetrics.scale*=panelScale;hudMetrics.gap*=panelScale;hudMetrics.outerPadding*=panelScale;
+    hudMetrics.sectionPadding*=panelScale;hudMetrics.rounding*=panelScale;
     auto const currentLayer = std::clamp(
         sessionSnapshot.transform.displayLayer,
         0,
@@ -816,9 +822,9 @@ void renderHud() {
     auto const bottom = (hudPosition & 1) != 0;
     auto const margin = hudMetrics.outerPadding;
     ImGui::SetNextWindowPos(
-        ImVec2(right ? displaySize.x - margin : margin, bottom ? displaySize.y - margin : margin),
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f*displaySize.x+customLayout.x,(customLayout.anchor/3)*.5f*displaySize.y+customLayout.y):ImVec2(right ? displaySize.x - margin : margin, bottom ? displaySize.y - margin : margin),
         ImGuiCond_Always,
-        ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f,(customLayout.anchor/3)*.5f):ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
     );
     ImGui::SetNextWindowBgAlpha(kOverlayWindowBgAlpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, hudMetrics.rounding * 0.7f);
@@ -834,7 +840,14 @@ void renderHud() {
         | ImGuiWindowFlags_NoNavInputs
         | ImGuiWindowFlags_NoNavFocus
         | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(ImGui::GetStyle().ItemSpacing.x*panelScale,ImGui::GetStyle().ItemSpacing.y*panelScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(ImGui::GetStyle().FramePadding.x*panelScale,ImGui::GetStyle().FramePadding.y*panelScale));
     if (ImGui::Begin("##LHoloHud", nullptr, flags)) {
+        ImGui::SetWindowFontScale(panelScale);
+        if(customLayout.custom) {
+            auto p=ImGui::GetWindowPos(),s=ImGui::GetWindowSize();
+            ImGui::SetWindowPos({std::clamp(p.x,0.f,std::max(0.f,displaySize.x-s.x)),std::clamp(p.y,0.f,std::max(0.f,displaySize.y-s.y))});
+        }
         if (showFileName) ImGui::Text(i18n::tr(i18n::TextKey::HudFileName), fileName.c_str());
         if (showLayer && layerAxis == LayerAxis::Material) {
             if (layerMode == LayerDisplayMode::All) {
@@ -879,6 +892,11 @@ void renderHud() {
                 layerAxisLabel(layerAxis)
             );
         }
+        if(showLayer) {
+            auto const& t=sessionSnapshot.transform;
+            ImGui::Text(i18n::tr(i18n::TextKey::HudTransform),t.offsetX,t.offsetY,t.offsetZ,(t.rotation&3)*90,
+                t.mirror==1?"X":t.mirror==2?"Z":"-");
+        }
         auto const showAnyProgress = showOverallProgress || showProgress || showWrongState
             || showWrongType || showExtraBlocks;
         projection::BuildProgress progress{};
@@ -896,6 +914,12 @@ void renderHud() {
                 static_cast<unsigned long long>(progress.visiblePlaced),
                 static_cast<unsigned long long>(progress.visibleTotal)
             );
+            auto const summary=lholo::ui::hudProgress(progress.visiblePlaced,progress.visibleTotal);
+            if(summary.ratio) {
+                char label[32]{};std::snprintf(label,sizeof(label),"%.1f%%",*summary.ratio*100.f);
+                ImGui::ProgressBar(*summary.ratio,ImVec2(240*hudMetrics.scale,0),label);
+                ImGui::Text(i18n::tr(i18n::TextKey::HudRemaining),static_cast<unsigned long long>(summary.remaining));
+            } else ImGui::TextDisabled("%s",i18n::tr(i18n::TextKey::HudProgressUnknown));
         }
         if (showWrongState && progress.wrongState != 0) {
             ImGui::TextColored(
@@ -940,12 +964,12 @@ void renderHud() {
         // Record our rect + corner so the material HUD (drawn right after) can
         // stack clear of us when it shares this corner, instead of overlapping.
         gProjectionHudLayout.frame = ImGui::GetFrameCount();
-        gProjectionHudLayout.position = hudPosition;
+        gProjectionHudLayout.position = customLayout.custom?-1:hudPosition;
         gProjectionHudLayout.topY = ImGui::GetWindowPos().y;
         gProjectionHudLayout.bottomY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(4);
 }
 
 void renderMaterialHud() {
@@ -971,7 +995,7 @@ void renderMaterialHud() {
     std::vector<Row> missing;
     for (std::size_t index = 0; index < materials.size(); ++index) {
         auto const need = materials[index].count;
-        auto const have = index < available.size() ? available[index] : 0;
+        auto const have = index < available.size() ? std::max(0,available[index]) : 0;
         auto const miss = static_cast<std::uint64_t>(have) >= need
             ? 0ULL : need - static_cast<std::uint64_t>(have);
         if (miss > 0) {
@@ -993,8 +1017,13 @@ void renderMaterialHud() {
     if (uiScale <= 0.0f) {
         uiScale = std::clamp(std::min(displaySize.x / 1920.0f, displaySize.y / 1080.0f), 1.0f, 5.0f);
     }
-    auto const metrics = lholo::ui::calculateMetrics(displaySize, uiScale);
+    auto const customLayout=uiState().hudLayout(1);
+    auto metrics = lholo::ui::calculateMetrics(displaySize, uiScale);
     lholo::ui::applyFluentTheme(metrics);
+    // Per-window scaling retains the existing theme and shared font atlas.
+    float const panelScale=lholo::ui::hudScaleMultiplier(metrics.scale,customLayout);
+    metrics.scale*=panelScale;metrics.gap*=panelScale;metrics.outerPadding*=panelScale;
+    metrics.sectionPadding*=panelScale;metrics.rounding*=panelScale;
     auto const margin = metrics.outerPadding;
     auto const position = std::clamp(materialHudPosition(), 0, 3);
     bool const right = position >= 2;
@@ -1012,7 +1041,7 @@ void renderMaterialHud() {
         }
     }
     ImGui::SetNextWindowPos(
-        ImVec2(anchorX, anchorY), ImGuiCond_Always, ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f*displaySize.x+customLayout.x,(customLayout.anchor/3)*.5f*displaySize.y+customLayout.y):ImVec2(anchorX, anchorY), ImGuiCond_Always, customLayout.custom?ImVec2((customLayout.anchor%3)*.5f,(customLayout.anchor/3)*.5f):ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
     );
     ImGui::SetNextWindowBgAlpha(kOverlayWindowBgAlpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, metrics.rounding * 0.7f);
@@ -1025,7 +1054,14 @@ void renderMaterialHud() {
         | ImGuiWindowFlags_NoNavInputs
         | ImGuiWindowFlags_NoNavFocus
         | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(ImGui::GetStyle().ItemSpacing.x*panelScale,ImGui::GetStyle().ItemSpacing.y*panelScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(ImGui::GetStyle().FramePadding.x*panelScale,ImGui::GetStyle().FramePadding.y*panelScale));
     if (ImGui::Begin("##LHoloMaterialHud", nullptr, flags)) {
+        ImGui::SetWindowFontScale(panelScale);
+        if(customLayout.custom) {
+            auto p=ImGui::GetWindowPos(),s=ImGui::GetWindowSize();
+            ImGui::SetWindowPos({std::clamp(p.x,0.f,std::max(0.f,displaySize.x-s.x)),std::clamp(p.y,0.f,std::max(0.f,displaySize.y-s.y))});
+        }
         ImGui::TextUnformatted(i18n::tr(i18n::TextKey::MaterialHudTitle));
         ImGui::Separator();
         if (!snapshot.ready) {
@@ -1037,6 +1073,9 @@ void renderMaterialHud() {
                 i18n::tr(i18n::TextKey::MaterialHudComplete)
             );
         } else {
+            lholo::ui::MissingTotal total;for(auto const& row:missing)total.add(row.missing);
+            if(total.exact)ImGui::Text(i18n::tr(i18n::TextKey::MaterialHudSummary),missing.size(),static_cast<unsigned long long>(total.value));
+            else ImGui::Text(i18n::tr(i18n::TextKey::MaterialHudTypes),missing.size());
             constexpr std::size_t kMaxRows = 14;
             for (std::size_t index = 0; index < missing.size() && index < kMaxRows; ++index) {
                 auto const& row = missing[index];
@@ -1056,7 +1095,7 @@ void renderMaterialHud() {
         }
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(4);
 }
 
 void renderGui() {
@@ -1123,6 +1162,7 @@ void loadSettings() {
             std::clamp(settings.guiHotkeyModifiers, 0, 7)
         );
         uiState().setAltWheelOffsetEnabled(settings.altWheelOffsetEnabled);
+        for(unsigned i=0;i<2;++i)uiState().setHudLayout(i,settings.hudLayouts[i]);
         uiState().setHotkey(
             kLayerIncreaseHotkeyIndex,
             std::clamp(settings.layerIncreaseHotkey, 0, 255),
@@ -1224,6 +1264,7 @@ void saveSettings() {
         settings.hudShowExtraBlocks = hud.showExtraBlocks;
         settings.hudShowProjectedBlockName = hud.showProjectedBlockName;
         settings.hudPosition = hud.position;
+        for(unsigned i=0;i<2;++i)settings.hudLayouts[i]=uiState().hudLayout(i);
         auto const guiHotkey = uiState().hotkey(kGuiHotkeyIndex);
         auto const layerIncreaseHotkey = uiState().hotkey(kLayerIncreaseHotkeyIndex);
         auto const layerDecreaseHotkey = uiState().hotkey(kLayerDecreaseHotkeyIndex);
