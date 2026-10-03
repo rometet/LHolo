@@ -457,8 +457,12 @@ bool edit(SavedPlacement const& placement,std::uint64_t revision) {
     std::lock_guard lock(gMutex);if(!contextValid())return false; auto snap=gSession.snapshot(); if(snap.revision!=revision)return false;
     auto d=snap.document; auto it=std::find_if(d.placements.begin(),d.placements.end(),[&](auto const& p){return p.id==placement.id;});
     if(it==d.placements.end())return false; if(*it==placement)return true;
+    bool const fileChanged=it->file!=placement.file;
     *it=placement; if(!change(snap,std::move(d)))return false;
-    if(snap.document.selected==placement.id){gProjection.invalidate(true,true);gApply=true;}return true;
+    if(snap.document.selected==placement.id){
+        gProjection.invalidate(true,!fileChanged);
+        if(fileChanged){gActivate=true;gApply=false;}else gApply=true;
+    }return true;
 }
 bool moveToFeet(std::uint64_t id) {
     auto s=snapshot(); if(!s.worldAvailable)return false;
