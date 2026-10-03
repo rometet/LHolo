@@ -243,7 +243,7 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         ImGui::TextWrapped("%s",tr(snap.phase==VerificationPhase::Cancelled?i18n::TextKey::VerifierCancelled:i18n::TextKey::VerifierNotVerified));
         return;
     }
-    ImGui::TextUnformatted(tr(i18n::TextKey::VerifierCompleted));
+    ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierCompleted));
     auto const& t=report->tally;
     ImGui::TextWrapped(tr(i18n::TextKey::SchematicSummary),static_cast<unsigned long long>(t.correct),static_cast<unsigned long long>(t.total()),
         static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType),static_cast<unsigned long long>(t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
@@ -1222,11 +1222,18 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
 void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
     ImVec2 indicatorMin{};
     ImVec2 indicatorMax{};
+    // Display frequent schematic routes together; enum values and widget IDs
+    // remain stable for saved state and future direct hotkey routing.
+    constexpr std::array navigation{
+        MenuPage::Projection,MenuPage::Verification,MenuPage::Schematics,
+        MenuPage::CreateStructure,MenuPage::Transform,MenuPage::Render,
+        MenuPage::Hud,MenuPage::Hotkeys,MenuPage::Interface,MenuPage::Experimental};
+    static_assert(navigation.size()==kMenuPageCount);
     for (std::size_t index = 0; index < kMenuPageCount; ++index) {
-        auto const page = static_cast<MenuPage>(index);
+        auto const page = navigation[index];
         auto const* name = pageName(page);
         auto const selected = model.page == page;
-        ImGui::PushID(static_cast<int>(index));
+        ImGui::PushID(static_cast<int>(page));
         auto const min = ImGui::GetCursorScreenPos();
         auto const height = std::max(
             ImGui::GetFrameHeight() * 1.08f,

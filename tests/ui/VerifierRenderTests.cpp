@@ -42,7 +42,7 @@ void saveRender(std::filesystem::path const& path,int width,int height) {
     context->Unmap(readback.Get(),0);ImGui_ImplDX11_Shutdown();
     require(output.good(),"render artifact write");
 }
-void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running) {
+void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running,bool scroll=false) {
     using namespace lholo::ui;using namespace lholo::structure;
     auto* context=ImGui::CreateContext();auto& io=ImGui::GetIO();
     io.IniFilename=nullptr;io.LogFilename=nullptr;io.DisplaySize={static_cast<float>(width),static_cast<float>(height)};io.DeltaTime=1.f/60.f;
@@ -67,6 +67,14 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     report->running=running;report->checked=17200;report->progress=.42f;
     auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
     for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");}
+    if(scroll){
+        ImGuiWindow* page{};
+        for(auto* window:context->Windows)if(std::string_view(window->Name).find("##PageScroll")!=std::string_view::npos)page=window;
+        require(page && page->ScrollMax.y>0,"compact verifier has page scroll");
+        ImGui::SetScrollY(page,page->ScrollMax.y);
+        for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();}
+        require(page->Scroll.y>0,"compact verifier scroll reaches lower content");
+    }
     saveRender(output,width,height);
     std::printf("Verifier render: %dx%d scale=%.1f running=%d PASS\n",width,height,scale,running);
     resetFluentTheme();ImGui::DestroyContext(context);
@@ -79,6 +87,7 @@ int main(int argc,char** argv) {
         renderCase(dir/"verifier-1920.ppm",1920,1080,1,false);
         renderCase(dir/"verifier-3840.ppm",3840,2160,2,false);
         renderCase(dir/"verifier-640.ppm",640,480,1,false);
+        renderCase(dir/"verifier-640-scrolled.ppm",640,480,1,false,true);
         renderCase(dir/"verifier-progress.ppm",1920,1080,1,true);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
