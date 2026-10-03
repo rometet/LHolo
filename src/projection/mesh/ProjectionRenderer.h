@@ -21,6 +21,7 @@ void submitProjectedBlockActorPass(
     BaseActorRenderContext& renderContext,
     BlockSource&            region,
     Vec3 const&             camera,
+    float                   structureOpacity,
     bool                    renderAlphaLayer
 );
 

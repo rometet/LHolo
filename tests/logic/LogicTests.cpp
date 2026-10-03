@@ -29,6 +29,7 @@
 #include "CompanionCallbackChecks.h"
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
+#include "ProjectedPistonChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
@@ -2367,6 +2368,7 @@ int main() {
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runVerifierHighlightChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runProjectedPistonChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualVerificationChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
