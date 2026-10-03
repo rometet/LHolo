@@ -10,6 +10,8 @@
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/core/ProjectedPistonAppearance.h"
+#include "projection/mesh/ProjectedPistonRenderScope.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
 
@@ -38,6 +40,7 @@
 #include "mc/client/renderer/BaseActorRenderContext.h"
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
+#include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
 #include "mc/client/renderer/game/ItemInHandRenderer.h"
 #include "mc/common/client/renderer/helpers/MeshHelpers.h"
 #include "mc/common/Brightness.h"
@@ -637,6 +640,7 @@ void submitProjectedBlockActorPass(
     BaseActorRenderContext& renderContext,
     BlockSource&            region,
     Vec3 const&             camera,
+    float                   structureOpacity,
     bool                    renderAlphaLayer
 ) {
     if (state.projectedBlockActors.empty()
@@ -677,12 +681,34 @@ void submitProjectedBlockActorPass(
                 || !renderComponent->isWithinRenderDistance(camera)) {
                 continue;
             }
+            auto const isPiston = rendererId == BlockActorRendererId::PistonArm;
+            auto const pistonPass = isPiston
+                ? projectedPistonPass(structureOpacity, renderAlphaLayer)
+                : ProjectedPistonPass::Native;
+            if (pistonPass == ProjectedPistonPass::Skip) continue;
+            // PistonArmModel uses its own default material, not the terrain
+            // mesh vertex-alpha path. Apply appearance at renderArm entry,
+            // after the native renderer has prepared its lighting/texture.
+            auto const& pistonBlend = renderContext.mItemInHandRenderer.mMatBlendBlockNoColor.get();
+            auto* pistonRenderer = isPiston
+                ? static_cast<PistonBlockActorRenderer*>(dispatcher.mRenderers.get()[rendererId].get())
+                : nullptr;
+            ProjectedPistonRender const pistonRender{
+                pistonRenderer ? &pistonRenderer->mPistonArm.get() : nullptr,
+                &pistonBlend,
+                structureOpacity
+            };
+            ScopedProjectedPistonRender pistonScope{
+                pistonPass == ProjectedPistonPass::Ghost ? &pistonRender : nullptr
+            };
             dispatcher.render(
                 renderContext,
                 region,
                 *renderComponent,
                 *projected.block,
-                renderAlphaLayer,
+                // Keep the native opaque dispatcher selection while moving
+                // this single projected model to LHolo's alpha callback.
+                pistonPass == ProjectedPistonPass::Ghost ? false : renderAlphaLayer,
                 noForcedMaterial,
                 nullptr,
                 -1,

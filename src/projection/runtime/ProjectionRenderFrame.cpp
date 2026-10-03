@@ -319,6 +319,7 @@ void renderProjection(
         renderContext,
         player->getDimensionBlockSource(),
         camera,
+        structureOpacity,
         renderAlphaLayer
     );
 
