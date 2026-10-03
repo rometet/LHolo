@@ -49,6 +49,26 @@ void runCompanionCallbackChecks(Check check) {
     check(fonts.needsPreparation(&context, &nextOwner, fontGeneration));
     fonts.reset();
     check(fonts.needsPreparation(&context, &owner, fontGeneration));
+    auto const beforeFrame = +[](void*, void*) noexcept {};
+    auto const resetGraphics = +[]() noexcept {};
+    check(!store.setSharedGraphics(&nextOwner, beforeFrame, resetGraphics));
+    check(!store.setSharedGraphics(&owner, nullptr, resetGraphics));
+    check(!store.setSharedGraphics(&owner, beforeFrame, nullptr));
+    check(store.setSharedGraphics(&owner, beforeFrame, resetGraphics));
+    check(store.setSharedGraphics(&owner, beforeFrame, resetGraphics));
+    check(store.publish(first));
+    {
+        SharedFrameLease frame;
+        check(frame.begin(store));
+        check(frame.registration()->beforeSharedFrame == beforeFrame);
+        check(!frame.begin(store));
+        { auto callback = store.acquire(); check(callback.active()); }
+        // DrawGui/DrawHud already returned, but queued ImGui callbacks still
+        // refer to provider code/SRVs until the host submits RenderDrawData.
+        check(!store.beginRetirement(&owner));
+        frame.end();
+        check(!frame.registration());
+    }
     {
         auto lease = store.acquire();
         check(lease.active());
@@ -64,8 +84,9 @@ void runCompanionCallbackChecks(Check check) {
     std::atomic_bool entered{}, release{};
     bool leaseAcquired{};
     std::thread reader([&] {
-        auto lease = store.acquire();
-        leaseAcquired = lease.active();
+        SharedFrameLease frame;
+        leaseAcquired = frame.begin(store);
+        { auto callback = store.acquire(); }
         entered.store(true, std::memory_order_release);
         entered.notify_all();
         release.wait(false, std::memory_order_acquire);
@@ -75,6 +96,7 @@ void runCompanionCallbackChecks(Check check) {
     check(retiring && retiring->registration.owner == &owner && retiring->wasVisible);
     check(!store.acquire().active());
     check(!store.setFontInitializer(&owner, initializeFonts));
+    check(!store.setSharedGraphics(&owner, beforeFrame, resetGraphics));
     check(!store.publish(next));
     check(!store.publish(first));
     check(!store.beginRetirement(&owner));

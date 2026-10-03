@@ -17,6 +17,7 @@ namespace {
 using detail::Registration;
 detail::CallbackStore gCallbacks;
 detail::SharedFontPreparation gSharedFonts;
+thread_local detail::SharedFrameLease gSharedFrame;
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
@@ -114,6 +115,7 @@ bool retireProvider(void* owner, bool shutdown) noexcept {
     auto const& registration = retirement->registration;
     if (retirement->wasVisible && registration.stateChanged) registration.stateChanged(false);
     if (registration.resetGraphicsV3) registration.resetGraphicsV3();
+    if (registration.resetSharedGraphics) registration.resetSharedGraphics();
     gCallbacks.finishRetirement();
     return true;
 }
@@ -130,6 +132,9 @@ bool registeredFor(void* owner) noexcept {
 }
 bool setFontInitializer(void* owner, FontInitializerFn initializer) noexcept {
     return gCallbacks.setFontInitializer(owner, initializer);
+}
+bool setSharedGraphics(void* owner, SharedGraphicsV2Fn beforeFrame, GraphicsResetV3Fn reset) noexcept {
+    return gCallbacks.setSharedGraphics(owner, beforeFrame, reset);
 }
 } // namespace
 
@@ -185,6 +190,14 @@ void drawHud(void* imguiContext) noexcept {
     lease.registration.drawHud(imguiContext);
 }
 
+bool beginSharedFrame(void* device, void* deviceContext) noexcept {
+    if (!gSharedFrame.begin(gCallbacks)) return false;
+    auto const registration = gSharedFrame.registration();
+    if (registration->beforeSharedFrame) registration->beforeSharedFrame(device, deviceContext);
+    return true;
+}
+void endSharedFrame() noexcept { gSharedFrame.end(); }
+
 bool prepareSharedFonts(void* imguiContext) noexcept {
     auto lease = acquireCallbacks();
     auto const& registration = lease.registration;
@@ -227,6 +240,10 @@ void forwardWindowMessage(
 
 void resetGraphics() noexcept {
     auto lease = acquireCallbacks();
+    if (lease.active() && !lease.registration.independentRenderer) {
+        if (lease.registration.resetSharedGraphics) lease.registration.resetSharedGraphics();
+        return;
+    }
     if (!lease.active() || !lease.registration.independentRenderer
         || !lease.registration.resetGraphicsV3) return;
     lease.registration.resetGraphicsV3();
@@ -273,6 +290,13 @@ extern "C" __declspec(dllexport) bool __cdecl lholo_set_companion_gui_font_initi
     lholo::overlay::companion::FontInitializerFn initializer
 ) noexcept {
     return lholo::overlay::companion::setFontInitializer(owner, initializer);
+}
+extern "C" __declspec(dllexport) bool __cdecl lholo_set_companion_gui_graphics_callbacks_v2(
+    void* owner,
+    lholo::overlay::companion::SharedGraphicsV2Fn beforeFrame,
+    lholo::overlay::companion::GraphicsResetV3Fn reset
+) noexcept {
+    return lholo::overlay::companion::setSharedGraphics(owner, beforeFrame, reset);
 }
 
 extern "C" __declspec(dllexport) bool __cdecl lholo_unregister_companion_gui_v2(void* owner) noexcept {

@@ -21,6 +21,8 @@ struct Registration {
     GraphicsResetV3Fn resetGraphicsV3{};
     FontInitializerFn fontInitializer{};
     std::uint64_t fontGeneration{};
+    SharedGraphicsV2Fn beforeSharedFrame{};
+    GraphicsResetV3Fn resetSharedGraphics{};
     bool independentRenderer{};
     bool operator==(Registration const&) const = default;
 };
@@ -78,6 +80,8 @@ public:
             // The optional font extension must not break repeated v2 registration.
             registration.fontInitializer = mRegistration.fontInitializer;
             registration.fontGeneration = mRegistration.fontGeneration;
+            registration.beforeSharedFrame = mRegistration.beforeSharedFrame;
+            registration.resetSharedGraphics = mRegistration.resetSharedGraphics;
             return mRegistration == registration;
         }
         registration.fontGeneration = ++mFontGeneration;
@@ -100,6 +104,17 @@ public:
             mRegistration.fontInitializer = initializer;
             mRegistration.fontGeneration = ++mFontGeneration;
         }
+        return true;
+    }
+
+    bool setSharedGraphics(void* owner, SharedGraphicsV2Fn beforeFrame, GraphicsResetV3Fn reset) {
+        std::lock_guard lock(mMutex);
+        if (!owner || !beforeFrame || !reset || !mRegistered || mRetiring
+            || mRegistration.owner != owner || mRegistration.independentRenderer) return false;
+        if (mRegistration.beforeSharedFrame)
+            return mRegistration.beforeSharedFrame == beforeFrame && mRegistration.resetSharedGraphics == reset;
+        mRegistration.beforeSharedFrame = beforeFrame;
+        mRegistration.resetSharedGraphics = reset;
         return true;
     }
 
@@ -158,6 +173,22 @@ private:
     bool mVisible{};
     bool mRetiring{};
     bool mAccepting{true};
+};
+
+class SharedFrameLease final {
+    std::optional<CallbackStore::Lease> mLease;
+public:
+    bool begin(CallbackStore& store) {
+        if (mLease) return false;
+        auto lease = store.acquire();
+        if (!lease.active() || lease.registration.independentRenderer) return false;
+        mLease.emplace(std::move(lease));
+        return true;
+    }
+    Registration const* registration() const noexcept {
+        return mLease ? &mLease->registration : nullptr;
+    }
+    void end() noexcept { mLease.reset(); }
 };
 
 } // namespace lholo::overlay::companion::detail

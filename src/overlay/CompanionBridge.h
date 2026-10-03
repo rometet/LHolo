@@ -7,6 +7,7 @@ namespace lholo::overlay::companion {
 
 using DrawFn = void (*)(void*) noexcept;
 using FontInitializerFn = void (*)(void* imguiContext) noexcept;
+using SharedGraphicsV2Fn = void (*)(void* device, void* deviceContext) noexcept;
 using StateFn = void (*)(bool) noexcept;
 using HudNeededFn = bool (*)() noexcept;
 using RenderV3Fn = void (*)(void* device, void* deviceContext, void* window, bool guiVisible) noexcept;
@@ -25,6 +26,10 @@ void close() noexcept;
 
 void drawGui(void* imguiContext) noexcept;
 void drawHud(void* imguiContext) noexcept;
+// Keep provider draw-callback code and borrowed texture resources resident until
+// the host has submitted all ImGui commands from this shared frame.
+bool beginSharedFrame(void* device, void* deviceContext) noexcept;
+void endSharedFrame() noexcept;
 // Called by the host with its graphics/context lock held, before NewFrame.
 // Providers append atlas-owned font data and preserve the host's default font.
 bool prepareSharedFonts(void* imguiContext) noexcept;

@@ -974,6 +974,10 @@ void render(IDXGISwapChain* swapChain) {
             // and D3D11 device/context for this frame.
             companion::renderIndependent(gDevice, gDeviceContext, gWindow, true);
         } else {
+            auto const companionFrame = companion::beginSharedFrame(gDevice, gDeviceContext);
+            app::ScopeExit endCompanionFrame([companionFrame]() noexcept {
+                if (companionFrame) companion::endSharedFrame();
+            });
             if (companion::prepareSharedFonts(ImGui::GetCurrentContext()))
                 ImGui_ImplDX11_InvalidateDeviceObjects();
             ImGui_ImplDX11_NewFrame();
