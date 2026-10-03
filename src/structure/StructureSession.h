@@ -61,6 +61,15 @@ public:
     StructureSession& operator=(StructureSession&&)      = delete;
 
     [[nodiscard]] StructureSessionSnapshot snapshot() const;
+    // Verification publishes value-only results while this generation and
+    // placement are still current. Lock order is StructureSession -> schematic;
+    // the callback must not re-enter this owner or perform native work.
+    template<class Publish>
+    bool publishVerificationIfCurrent(StructureSessionSnapshot const& expected,Publish&& publish) const {
+        std::lock_guard lock(mMutex);
+        if(!verificationContextCurrentLocked(expected))return false;
+        return publish();
+    }
     [[nodiscard]] std::shared_ptr<LoadedStructure const> loaded() const;
     [[nodiscard]] bool hasLoaded() const;
     [[nodiscard]] std::string lastPath() const;
@@ -108,6 +117,7 @@ private:
     [[nodiscard]] StructureTransformSnapshot transformRelaxed() const;
     [[nodiscard]] SavedProjectionSnapshot savedProjectionLocked() const;
     void refreshSavedTransformLocked();
+    [[nodiscard]] bool verificationContextCurrentLocked(StructureSessionSnapshot const& expected) const;
 
     mutable std::mutex              mMutex;
     std::shared_ptr<LoadedStructure> mLoaded;

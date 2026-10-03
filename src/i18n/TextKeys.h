@@ -299,7 +299,21 @@
     LHOLO_TEXT_KEY("schematic.filterExtra", SchematicFilterExtra, "") \
     LHOLO_TEXT_KEY("schematic.highlightHint", SchematicHighlightHint, "") \
     LHOLO_TEXT_KEY("schematic.filterState", SchematicFilterState, "") \
-    LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "")
+    LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "") \
+    LHOLO_TEXT_KEY("page.verification", PageVerification, "") \
+    LHOLO_TEXT_KEY("verifier.cancel", VerifierCancel, "") \
+    LHOLO_TEXT_KEY("verifier.manualHint", VerifierManualHint, "") \
+    LHOLO_TEXT_KEY("verifier.queued", VerifierQueued, "") \
+    LHOLO_TEXT_KEY("verifier.checked", VerifierChecked, "") \
+    LHOLO_TEXT_KEY("verifier.cancelled", VerifierCancelled, "") \
+    LHOLO_TEXT_KEY("verifier.notVerified", VerifierNotVerified, "") \
+    LHOLO_TEXT_KEY("verifier.completed", VerifierCompleted, "") \
+    LHOLO_TEXT_KEY("verifier.noPlacement", VerifierNoPlacement, "") \
+    LHOLO_TEXT_KEY("verifier.expected", VerifierExpected, "") \
+    LHOLO_TEXT_KEY("verifier.actual", VerifierActual, "") \
+    LHOLO_TEXT_KEY("verifier.shownCount", VerifierShownCount, "") \
+    LHOLO_TEXT_KEY("verifier.coordinates", VerifierCoordinates, "") \
+    LHOLO_TEXT_KEY("verifier.noRows", VerifierNoRows, "")
 
 namespace lholo::i18n {
 

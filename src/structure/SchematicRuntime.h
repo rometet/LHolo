@@ -2,6 +2,7 @@
 #include "structure/PlacementSession.h"
 #include "structure/Verification.h"
 #include "structure/VerificationSelection.h"
+#include "structure/ManualVerificationControl.h"
 #include <map>
 #include <memory>
 #include <optional>
@@ -19,6 +20,7 @@ struct Report {
     std::vector<MaterialRow> materials;
     bool running{}, truncated{};
     std::uint64_t checked{};
+    float progress{};
     ReportStamp stamp;
 };
 struct Snapshot {
@@ -31,6 +33,7 @@ struct Snapshot {
     Cell feet;
     std::string library, status;
     MistakeFilter filter{MistakeFilter::Mistakes};
+    VerificationPhase phase{VerificationPhase::NotVerified};
 };
 Snapshot snapshot();
 void refreshFiles();
@@ -41,6 +44,7 @@ bool erase(std::uint64_t id);
 bool edit(SavedPlacement const& placement, std::uint64_t revision);
 bool moveToFeet(std::uint64_t id);
 void verify();
+void cancelVerification();
 void cycleMistake(MistakeFilter filter);
 bool selectMistake(ReportStamp const& stamp,std::size_t index);
 void setMistakeFilter(MistakeFilter filter);

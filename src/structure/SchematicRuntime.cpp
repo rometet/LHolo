@@ -38,7 +38,8 @@ std::vector<std::string> gFiles;
 std::string gWorldKey, gStatus;
 int gDimension{};
 Cell gFeet;
-bool gAvailable{}, gActivate{}, gApply{}, gVerify{};
+bool gAvailable{}, gActivate{}, gApply{};
+ManualVerificationControl gVerification;
 std::uint64_t gWorldEpoch{};
 std::uint64_t gActiveId{};
 std::shared_ptr<Report const> gReport;
@@ -50,6 +51,7 @@ std::filesystem::path gActivePath;
 bool contextValid() { auto const view=capture::getClientViewSnapshot();return gAvailable && view && view->worldEpoch==gWorldEpoch; }
 std::filesystem::path library() { return LHolo::getInstance().getSelf().getModDir() / "schematics"; }
 void retireReport() { gReport.reset();gSelection.clear(); }
+void invalidateVerification() { gVerification.invalidate();retireReport(); }
 ReportStamp stampFor(SavedPlacement const& p,std::uint64_t revision,std::uint64_t generation,
     std::uint64_t reportRevision) {
     return {gWorldEpoch,gDimension,revision,p.id,generation,reportRevision,p.origin,p.rotation,p.mirror,
@@ -85,18 +87,21 @@ bool reportCurrent(detail::StructureSessionSnapshot const& structure) {
 
 bool change(PlacementSessionSnapshot const& snap, PlacementDocument document) {
     if (!gSession.replace(std::move(document),snap.revision)) return false;
-    retireReport();gVerify = true; return true;
+    invalidateVerification(); return true;
 }
 struct Job {
     std::shared_ptr<LoadedStructure const> loaded;
     SavedPlacement placement;
     std::uint64_t revision{};
+    std::uint64_t requestSerial{};
     PlacementTransform transform;
     Rotation rotation{Rotation::None};
     Mirror mirror{Mirror::None};
     Cell observer;
     std::size_t block{};
     RegionScanCursor air;
+    std::vector<double> regionWork;
+    double totalWork{};
     Report result;
     std::array<std::vector<Mismatch>,3> nearest;
     std::map<std::string,MaterialCount> materials;
@@ -108,7 +113,6 @@ struct Job {
 // Accessed exclusively by the existing game tick. Reset requests cross via
 // values/revision; reset() never touches a native job on the Present thread.
 std::optional<Job> gJob;
-std::uint64_t gNextScan{};
 bool visible(Job const& job, Cell local, int material = -1, int liquidMaterial = -1) {
     return projection::detail::isLayerVisible(layerOf(job.transform,local,job.placement.layerAxis),
         job.placement.layerMode,job.placement.layer,material,liquidMaterial,job.placement.layerAxis);
@@ -129,6 +133,7 @@ void retainMismatch(Job& job, Mismatch row) {
 void record(Job& job, Cell world, VerificationState state, Block const* expected, Block const* actual,
     bool expects,bool actualLiquid=false,bool actualExtra=false) {
     job.result.tally.add(state,expects);
+    ++job.result.checked;
     if (matchesFilter(state,MistakeFilter::Mistakes)) {
         auto const dx = static_cast<double>(world.x - job.observer.x), dy = static_cast<double>(world.y - job.observer.y), dz = static_cast<double>(world.z - job.observer.z);
         retainMismatch(job,{state,world,describe(expected),describe(actual),dx*dx+dy*dy+dz*dz,actualLiquid,actualExtra});
@@ -235,10 +240,11 @@ Snapshot snapshot() {
     // it. The render getter below avoids this session lock entirely.
     auto const structure=detail::StructureSession::getInstance().snapshot();
     std::lock_guard lock(gMutex);
-    if(gReport && !reportCurrent(structure))retireReport();
+    if(gReport && !reportCurrent(structure))invalidateVerification();
     Snapshot s{gSession.snapshot(),gFiles,gReport,{},contextValid(),gDimension,gFeet,detail::pathToUtf8(library()),gStatus,gSelection.filter()};
     if(!s.worldAvailable){s.report.reset();s.session.writable=false;}
     if(s.worldAvailable && gReport)if(auto target=gSelection.target(gReport->stamp))s.target=std::move(target->mismatch);
+    s.phase=s.worldAvailable?gVerification.phase():VerificationPhase::NotVerified;
     return s;
 }
 void refreshFiles() {
@@ -319,7 +325,21 @@ bool moveToFeet(std::uint64_t id) {
     auto s=snapshot(); if(!s.worldAvailable)return false;
     for(auto p:s.session.document.placements)if(p.id==id){p.origin=s.feet;return edit(p,s.session.revision);} return false;
 }
-void verify(){std::lock_guard lock(gMutex);gVerify=true;retireReport();}
+void verify(){
+    auto const structure=detail::StructureSession::getInstance().snapshot();
+    std::lock_guard lock(gMutex);
+    auto const snap=gSession.snapshot();auto const p=selectedPlacement(snap.document);
+    if(!contextValid() || !p || p->dimension!=gDimension || !snap.writable)return;
+    auto const generation=!gActivate && !gApply && p->id==gActiveId
+        && structure.loaded && structure.loaded->sourcePath==gActivePath
+        && placementCurrent(stampFor(*p,snap.revision,structure.loaded->generation,1),structure)
+        ?structure.loaded->generation:0;
+    if(gVerification.request(stampFor(*p,snap.revision,generation,0))){retireReport();gStatus.clear();}
+}
+void cancelVerification(){
+    std::lock_guard lock(gMutex);
+    if(gVerification.busy()){gVerification.cancel();retireReport();}
+}
 bool selectMistake(ReportStamp const& stamp,std::size_t index) {
     auto const structure=detail::StructureSession::getInstance().snapshot();
     std::lock_guard lock(gMutex);
@@ -344,7 +364,7 @@ std::optional<SelectedMistake> highlightTarget(std::uint64_t worldEpoch,int dime
         return gSelection.target(gReport->stamp);
     }catch(...){return {};}
 }
-void reset(){std::lock_guard lock(gMutex);gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gVerify=true;gActiveId=0;gActivePath.clear();retireReport();}
+void reset(){std::lock_guard lock(gMutex);gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gActiveId=0;gActivePath.clear();invalidateVerification();}
 void shutdown(){gJob.reset();reset();}
 void processControl() {
     std::optional<SavedPlacement> activation;
@@ -389,7 +409,7 @@ void rememberSelectedTransform() {
 }
 void tick(LocalPlayer& player) {
     auto const view=capture::getClientViewSnapshot();
-    if(!view){gJob.reset();std::lock_guard lock(gMutex);gAvailable=false;retireReport();return;}
+    if(!view){gJob.reset();std::lock_guard lock(gMutex);gAvailable=false;invalidateVerification();return;}
     auto const feet=player.getFeetPos(); auto const checked=projection::detail::checkedBlockCell({feet.x,feet.y,feet.z},1);
     auto const dim=static_cast<int>(player.getDimensionId());
     std::string key;
@@ -402,13 +422,12 @@ void tick(LocalPlayer& player) {
     // It is compared as a value only and is never persisted or dereferenced.
     if(key.empty())key="session-"+std::to_string(reinterpret_cast<std::uintptr_t>(&player.getLevel()));
     PlacementSessionSnapshot snap;
-    bool force{};
     {
         std::lock_guard lock(gMutex);
         if(key!=gWorldKey || dim!=gDimension || view->worldEpoch!=gWorldEpoch){
             if(key!=gWorldKey || (dim==gDimension && view->worldEpoch!=gWorldEpoch))gTransientDimensions.clear();
             else if(!stable)gTransientDimensions.remember(gDimension,gSession.snapshot().document);
-            gSession.clear();gWorldKey=key;gWorldEpoch=view->worldEpoch;gDimension=dim;retireReport();gActivePath.clear();gActiveId=0;gVerify=true;
+            gSession.clear();gWorldKey=key;gWorldEpoch=view->worldEpoch;gDimension=dim;invalidateVerification();gActivePath.clear();gActiveId=0;
             if(stable)gSession.bind(LHolo::getInstance().getSelf().getConfigDir()/"placements"/key/("dimension-"+std::to_string(dim)+".json"));
             else {
                 gSession.bindTransient();
@@ -419,15 +438,31 @@ void tick(LocalPlayer& player) {
             gApply=false; // retire any old-world/dimension edit intent
         }
         gAvailable=checked.has_value(); if(checked)gFeet={(*checked)[0],(*checked)[1],(*checked)[2]};
-        snap=gSession.snapshot();force=gVerify;gVerify=false;
+        snap=gSession.snapshot();
     }
     auto const p=selectedPlacement(snap.document);auto const structure=detail::StructureSession::getInstance().snapshot();auto const loaded=structure.loaded;
-    if(!p || p->dimension!=dim || !loaded || !checked){gJob.reset();std::lock_guard lock(gMutex);retireReport();return;}
+    if(!p || p->dimension!=dim || !checked){gJob.reset();std::lock_guard lock(gMutex);invalidateVerification();return;}
+    if(!loaded){
+        gJob.reset();std::lock_guard lock(gMutex);
+        if(gVerification.phase()==VerificationPhase::Running ||
+            (gVerification.busy() && !gVerification.belongsTo(stampFor(*p,snap.revision,0,0))))invalidateVerification();
+        return;
+    }
     std::optional<SelectedMistake> selected;
     {std::lock_guard lock(gMutex);
-        if(loaded->sourcePath!=gActivePath){gJob.reset();retireReport();return;}
-        if(!placementCurrent(stampFor(*p,snap.revision,loaded->generation,1),structure)){gJob.reset();retireReport();return;}
-        if(gReport && !reportCurrent(structure))retireReport();
+        if(gActivate || gApply || p->id!=gActiveId){
+            gJob.reset();
+            if(gVerification.phase()!=VerificationPhase::Queued)invalidateVerification();
+            return;
+        }
+        if(loaded->sourcePath!=gActivePath || !placementCurrent(stampFor(*p,snap.revision,loaded->generation,1),structure)){
+            gJob.reset();
+            if(gVerification.phase()!=VerificationPhase::Queued ||
+                !gVerification.belongsTo(stampFor(*p,snap.revision,loaded->generation,0)))invalidateVerification();
+            return;
+        }
+        if(gVerification.busy() && !gVerification.belongsTo(stampFor(*p,snap.revision,loaded->generation,0)))invalidateVerification();
+        if(gReport && !reportCurrent(structure))invalidateVerification();
         if(gReport)selected=gSelection.target(gReport->stamp);
     }
     // Keep a selected marker fresh while the menu is closed. One bounded
@@ -447,23 +482,41 @@ void tick(LocalPlayer& player) {
         }catch(...){changed=true;}
         if(changed){std::lock_guard lock(gMutex);gSelection.clearIfCurrent(*selected);}
     }
-    auto const now=GetTickCount64();
-    if(force || (gJob && (gJob->revision!=snap.revision || gJob->loaded!=loaded)))gJob.reset();
-    if(!gJob && (force || (isGuiVisible() && now>=gNextScan))){
+    {
+        std::lock_guard lock(gMutex);
+        if(gJob && (!gVerification.current(gJob->requestSerial,stampFor(*p,snap.revision,loaded->generation,0))
+            || gJob->loaded!=loaded))gJob.reset();
+    }
+    if(!gJob){
+        std::lock_guard lock(gMutex);
+        if(gVerification.phase()!=VerificationPhase::Queued)return;
+    }
+    if(!gJob){
         Job j;j.loaded=loaded;j.placement=*p;j.revision=snap.revision;j.observer=checked ? Cell{(*checked)[0],(*checked)[1],(*checked)[2]} : p->origin;
+        j.regionWork.push_back(0);
+        for(auto const& region:loaded->regions){
+            auto const volume=static_cast<double>(std::max(0,region.sizeX))*std::max(0,region.sizeY)*std::max(0,region.sizeZ);
+            j.regionWork.push_back(j.regionWork.back()+volume);
+        }
+        j.totalWork=static_cast<double>(loaded->renderBlocks.size())+j.regionWork.back();
         j.transform={{loaded->sizeX,loaded->sizeY,loaded->sizeZ},p->origin,p->rotation,p->mirror};
         auto const size=j.transform.placedSize();
-        if(!projection::detail::checkedProjectionOrigin({static_cast<int>(p->origin.x),static_cast<int>(p->origin.y),static_cast<int>(p->origin.z)},{0,0,0},{static_cast<int>(size.x),static_cast<int>(size.y),static_cast<int>(size.z)},0))return;
+        if(!projection::detail::checkedProjectionOrigin({static_cast<int>(p->origin.x),static_cast<int>(p->origin.y),static_cast<int>(p->origin.z)},{0,0,0},{static_cast<int>(size.x),static_cast<int>(size.y),static_cast<int>(size.z)},0)){
+            std::lock_guard lock(gMutex);invalidateVerification();gStatus="Verification placement is outside world bounds.";return;
+        }
         j.rotation=projection::detail::getProjectionRotation(p->rotation);
         j.mirror=projection::detail::getProjectionMirror(p->mirror);
-        {
+        detail::StructureSession::getInstance().publishVerificationIfCurrent(structure,[&]{
             std::lock_guard lock(gMutex);
-            if(gSession.snapshot().revision!=snap.revision || gWorldEpoch!=view->worldEpoch)return;
+            if(gSession.snapshot().revision!=snap.revision || gWorldEpoch!=view->worldEpoch || !contextValid())return false;
             if(++gReportRevision==0)++gReportRevision;
             j.result.stamp=stampFor(*p,snap.revision,loaded->generation,gReportRevision);
+            j.requestSerial=gVerification.start(j.result.stamp);
+            if(!j.requestSerial)return false;
             j.result.running=true;gJob.emplace(std::move(j));
             gReport=std::make_shared<Report const>(gJob->result);
-        }
+            return true;
+        });
     }
     if(!gJob)return;
     auto& job=*gJob;
@@ -474,11 +527,21 @@ void tick(LocalPlayer& player) {
         if(job.block<loaded->renderBlocks.size()){--remaining;scanBlock(job,player);}
         else if(job.air.region<loaded->regions.size())scanAir(job,player,remaining);
         else break;
-        ++job.result.checked;
     }
     {
         auto progress=std::make_shared<Report>();progress->running=true;progress->checked=job.result.checked;progress->stamp=job.result.stamp;
-        std::lock_guard lock(gMutex);if(gSession.snapshot().revision==job.revision){progress->stamp.filterRevision=gFilterRevision;gReport=std::move(progress);}
+        auto const done=static_cast<double>(job.block)+job.regionWork[std::min(job.air.region,loaded->regions.size())]+job.air.index;
+        progress->progress=job.totalWork>0?static_cast<float>(std::clamp(done/job.totalWork,0.,1.)):1.f;
+        auto const published=detail::StructureSession::getInstance().publishVerificationIfCurrent(structure,[&]{
+            std::lock_guard lock(gMutex);
+            if(!contextValid() || !gVerification.current(job.requestSerial,job.result.stamp))return false;
+            progress->stamp.filterRevision=gFilterRevision;gReport=std::move(progress);return true;
+        });
+        if(!published){
+            std::lock_guard lock(gMutex);
+            if(gVerification.current(job.requestSerial,job.result.stamp))invalidateVerification();
+            gJob.reset();return;
+        }
     }
     if(job.block==loaded->renderBlocks.size() && job.air.region==loaded->regions.size()){
         if(!job.finalizing){
@@ -493,13 +556,16 @@ void tick(LocalPlayer& player) {
         }
         if(job.materialCursor!=job.materials.end())return;
         job.result.running=false;
-        std::lock_guard lock(gMutex);
-        if(gSession.snapshot().revision==job.revision){
+        job.result.progress=1.f;
+        auto const published=detail::StructureSession::getInstance().publishVerificationIfCurrent(structure,[&]{
+            std::lock_guard lock(gMutex);
+            if(!contextValid() || !gVerification.finish(job.requestSerial,job.result.stamp))return false;
             job.result.stamp.filterRevision=gFilterRevision;
             gSelection.reconcile(job.result.stamp,job.result.mismatches);
-            gReport=std::make_shared<Report const>(std::move(job.result));
-        }
-        gJob.reset();gNextScan=now+2000;
+            gReport=std::make_shared<Report const>(std::move(job.result));return true;
+        });
+        if(!published){std::lock_guard lock(gMutex);if(gVerification.current(job.requestSerial,job.result.stamp))invalidateVerification();}
+        gJob.reset();
     }
 }
 } // namespace lholo::structure::schematic

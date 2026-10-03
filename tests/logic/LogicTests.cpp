@@ -24,6 +24,7 @@
 #include "overlay/ImGuiFrameRecovery.h"
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
+#include "ManualVerificationChecks.h"
 #include "CompanionCallbackChecks.h"
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
@@ -2360,6 +2361,7 @@ int main() {
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runVerifierHighlightChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runManualVerificationChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();

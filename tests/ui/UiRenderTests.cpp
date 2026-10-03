@@ -136,6 +136,7 @@ void testVerifierControls() {
         {VerificationState::Extra,{10,11,12},"minecraft:air","minecraft:stone",4}};
     report->tally.missing=21;report->tally.wrongType=22;report->tally.wrongState=23;report->tally.extra=24;
     model.schematic.report=report;
+    model.schematic.phase=schematic::VerificationPhase::Completed;
     schematic::MistakeSelection selection;
     std::size_t rowCalls{},filterCalls{};
     MenuActions actions;
@@ -154,7 +155,7 @@ void testVerifierControls() {
     auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
     auto frame=[&]{
         ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({1200,3400});
-        ImGui::Begin("VerifierControlTest");renderSchematicsPage(model,actions,metrics);ImGui::End();ImGui::Render();
+        ImGui::Begin("VerifierControlTest");renderVerificationPage(model,actions,metrics);ImGui::End();ImGui::Render();
         check(context->ErrorCountCurrentFrame==0,"Verifier UI scopes");
     };
     auto windowContaining=[&](char const* name){
@@ -164,7 +165,10 @@ void testVerifierControls() {
     frame();frame();
     auto* rows=windowContaining("##MismatchList");check(rows!=nullptr,"Verifier list exists");
     auto selectRow=[&](int index){
-        context->NavNextActivateId=ImHashStr("##MismatchRow",0,rows->GetID(index));
+        auto* table=context->Tables.GetByKey(rows->GetID("##VerifierPairs"));
+        check(table!=nullptr,"Verifier expected/actual table exists");
+        auto const seed=ImHashData(&index,sizeof(index),ImGui::TableGetInstanceID(table,0));
+        context->NavNextActivateId=ImHashStr("##MismatchRow",0,seed);
         context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
     };
     selectRow(1);
@@ -173,9 +177,10 @@ void testVerifierControls() {
     check(rowCalls==2 && model.schematic.target && model.schematic.target->kind==VerificationState::Extra,"Extra row reselection");
     auto chooseFilter=[&](lholo::i18n::TextKey key,int index){
         auto* window=ImGui::FindWindowByName("VerifierControlTest");
-        context->NavNextActivateId=window->GetID("##MistakeFilter");context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
-        auto* popup=windowContaining("##Combo_");check(popup!=nullptr,"Verifier filter popup exists");
-        context->NavNextActivateId=ImHashStr(lholo::i18n::tr(key),0,popup->GetID(index));frame();
+        auto const count=index==4?report->tally.wrongType:report->tally.extra;
+        auto label=std::string{lholo::i18n::tr(key)}+" ("+std::to_string(count)+")";
+        context->NavNextActivateId=ImHashStr(label.c_str(),0,window->GetID(index));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
     };
     chooseFilter(lholo::i18n::TextKey::SchematicFilterWrongType,4);
     check(filterCalls==1 && model.schematic.filter==MistakeFilter::WrongType && !model.schematic.target,"WrongType filter clears target");
@@ -184,6 +189,24 @@ void testVerifierControls() {
     chooseFilter(lholo::i18n::TextKey::SchematicFilterExtra,5);
     check(filterCalls==2 && model.schematic.filter==MistakeFilter::Extra && !model.schematic.target,"Extra filter clears target");
     selectRow(3);check(rowCalls==4 && model.schematic.target->kind==VerificationState::Extra,"Filtered Extra row selects");
+    std::size_t verifyCalls{},cancelCalls{};
+    actions.verifySchematic=[&]{++verifyCalls;};
+    actions.cancelVerification=[&]{++cancelCalls;};
+    auto activateButton=[&](lholo::i18n::TextKey key){
+        context->NavNextActivateId=ImGui::FindWindowByName("VerifierControlTest")->GetID(lholo::i18n::tr(key));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+    };
+    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"manual update action");
+    report->running=true;report->checked=256;report->progress=.25f;
+    model.schematic.phase=schematic::VerificationPhase::Running;frame();
+    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"update disabled while running");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==1,"running scan can cancel");
+    model.schematic.report.reset();model.schematic.phase=schematic::VerificationPhase::Queued;frame();
+    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"update disabled while queued");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"queued scan can cancel");
+    model.schematic.phase=schematic::VerificationPhase::Cancelled;frame();
+    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==2,"cancelled scan allows new manual update");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"cancel disabled while idle");
     resetFluentTheme();ImGui::DestroyContext(context);
 }
 
@@ -235,7 +258,7 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     lholo::structure::SavedPlacement p;p.id=1;p.file="a.mcstructure";p.name="Placement with a long name";
     model.schematic.session.document.placements={p};
     model.schematic.session.document.selected=state?1:0;
-    if(state==2){
+    if(state==2 || state==3){
         auto report=std::make_shared<lholo::structure::schematic::Report>();
         report->tally.correct=12;report->tally.missing=4;report->tally.wrongType=3;report->tally.wrongState=1;report->tally.extra=2;report->tally.unknown=7;report->truncated=true;
         report->stamp.worldEpoch=1;report->stamp.placementId=1;report->stamp.loadedGeneration=2;report->stamp.reportRevision=3;
@@ -246,7 +269,11 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
             {lholo::structure::VerificationState::Extra,{-30,65,34},"minecraft:air","minecraft:stone",169}};
         report->materials={{"minecraft:slab",{24,8},12},{"minecraft:unknown_item",{3,0},{}}};
         model.schematic.report=report;model.schematic.target=report->mismatches[0];
+        model.schematic.phase=state==3?lholo::structure::schematic::VerificationPhase::Running:lholo::structure::schematic::VerificationPhase::Completed;
+        report->running=state==3;report->checked=123;report->progress=.4f;
     }
+    if(state==4)model.schematic.phase=lholo::structure::schematic::VerificationPhase::Queued;
+    if(state==5)model.schematic.phase=lholo::structure::schematic::VerificationPhase::Cancelled;
 
     model.capture.first = {state != 0, -17, -64, -1};
     model.capture.second = {state != 0, 16, 319, 16};
@@ -317,7 +344,7 @@ int main() {
             for (auto const viewport : {ImVec2{1920, 1080}, ImVec2{3840, 2160},
                     ImVec2{640, 480}, ImVec2{480, 800}}) {
                 for (float scale : {1.f, 2.f, 5.f}) {
-                    for (int state = 0; state < 3; ++state) renderPages(viewport, scale, state, static_cast<int>(language));
+                    for (int state = 0; state < 6; ++state) renderPages(viewport, scale, state, static_cast<int>(language));
                 }
             }
         }

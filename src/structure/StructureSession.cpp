@@ -85,6 +85,15 @@ std::shared_ptr<LoadedStructure const> StructureSession::loaded() const {
     return mLoaded;
 }
 
+bool StructureSession::verificationContextCurrentLocked(StructureSessionSnapshot const& expected) const {
+    return mLoaded && mLoaded==expected.loaded && transformRelaxed()==expected.transform
+        && mHasSavedProjection.load(std::memory_order_relaxed)==expected.saved.available
+        && mSavedAnchorX.load(std::memory_order_relaxed)==expected.saved.anchorX
+        && mSavedAnchorY.load(std::memory_order_relaxed)==expected.saved.anchorY
+        && mSavedAnchorZ.load(std::memory_order_relaxed)==expected.saved.anchorZ
+        && mSavedStructurePath==expected.saved.structurePath;
+}
+
 bool StructureSession::hasLoaded() const {
     std::lock_guard lock(mMutex);
     return static_cast<bool>(mLoaded);

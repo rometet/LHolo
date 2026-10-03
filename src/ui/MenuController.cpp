@@ -307,6 +307,7 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.movePlacementToFeet = [&refreshModel](auto id) { structure::schematic::moveToFeet(id); refreshModel=true; };
     actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
     actions.verifySchematic = [] { structure::schematic::verify(); };
+    actions.cancelVerification = [] { structure::schematic::cancelVerification(); };
     actions.cycleMistake = [](auto filter) { structure::schematic::cycleMistake(filter); };
     actions.setMistakeFilter = [](auto filter) { structure::schematic::setMistakeFilter(filter); };
     actions.selectMistake = [](auto const& stamp, auto index) { (void)structure::schematic::selectMistake(stamp, index); };
