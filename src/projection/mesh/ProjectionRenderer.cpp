@@ -3,6 +3,7 @@
 
 #include "projection/mesh/ProjectionRenderer.h"
 #include "app/NativeCallbackBoundary.h"
+#include "app/ScopeExit.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
@@ -1198,12 +1199,23 @@ void submitProjectionMeshPass(
     auto renderOverlayMeshes = [&] (
         std::vector<std::unique_ptr<mce::Mesh>> const& meshes,
         mce::MaterialPtr const& material,
-        bool seeThroughMeshes
+        bool seeThroughMeshes,
+        bool matchMeshPrimitive = false
     ) {
         if (!materialExists(material)) return;
         ScopedNoDepthTest seeThrough(material, seeThroughMeshes);
         for (auto const& overlay : meshes) {
             if (!overlay || !overlay->isValid()) continue;
+            // The async upload may still contain the preceding width setting.
+            // Select topology from each uploaded mesh, never from live settings.
+            auto* renderMaterial = matchMeshPrimitive ? tryRenderMaterial(material) : nullptr;
+            if (matchMeshPrimitive && !renderMaterial
+                && overlay->mPrimitiveMode != mce::PrimitiveMode::LineList) continue;
+            auto const previousPrimitive = renderMaterial ? renderMaterial->mPrimitiveMode : mce::PrimitiveMode{};
+            app::ScopeExit restorePrimitive{[&]() noexcept {
+                if (renderMaterial) renderMaterial->mPrimitiveMode = previousPrimitive;
+            }};
+            if (renderMaterial) renderMaterial->mPrimitiveMode = overlay->mPrimitiveMode;
             overlay->renderMesh(
                 renderContext.mScreenContext,
                 material,
@@ -1273,8 +1285,8 @@ void submitProjectionMeshPass(
         renderOverlayMeshes(state.wrongFillSectionMeshes, warningMaterial, correctionSeeThrough);
     }
     if (materialExists(outlineMaterial)) {
-        renderOverlayMeshes(state.correctionOutlineSectionMeshes, outlineMaterial, missingSeeThrough);
-        renderOverlayMeshes(state.wrongOutlineSectionMeshes, outlineMaterial, correctionSeeThrough);
+        renderOverlayMeshes(state.correctionOutlineSectionMeshes, outlineMaterial, missingSeeThrough, true);
+        renderOverlayMeshes(state.wrongOutlineSectionMeshes, outlineMaterial, correctionSeeThrough, true);
     }
 }
 

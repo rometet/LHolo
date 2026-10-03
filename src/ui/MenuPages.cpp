@@ -1,6 +1,7 @@
 // LHolo - Fluent-style menu pages
 
 #include "ui/MenuPages.h"
+#include "projection/core/ComparisonStyle.h"
 
 #include "structure/LayerDisplayTypes.h"
 #include "structure/capture/CaptureBounds.h"
@@ -712,6 +713,41 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
 
     renderSection(
         "##CorrectionStyle", i18n::tr(i18n::TextKey::SectionCorrectionStyle), metrics, [&] {
+        using namespace projection::detail;
+        model.comparisonStrength = normalizeComparisonStrength(model.comparisonStrength);
+        model.correctionOutlineWidth = normalizeCorrectionOutlineWidth(model.correctionOutlineWidth);
+        auto strength = static_cast<int>(std::lround(model.comparisonStrength * 100.0f));
+        renderValueRow(i18n::tr(i18n::TextKey::LabelComparisonStrength), metrics, [&] {
+            if (ImGui::SliderInt("##ComparisonStrengthSlider", &strength, 0, 200, "%d%%")) {
+                model.comparisonStrength = static_cast<float>(strength) / 100.0f;
+            }
+        });
+        renderNumericValueRow(i18n::tr(i18n::TextKey::LabelComparisonStrength), metrics, [&] {
+            if (ImGui::InputInt("##ComparisonStrengthValue", &strength, 0, 0)) {
+                model.comparisonStrength = static_cast<float>(std::clamp(strength, 0, 200)) / 100.0f;
+            }
+        });
+        ImGui::PushID("ComparisonStrength");
+        if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonResetComparisonStrength))) {
+            model.comparisonStrength = DefaultComparisonStrength;
+        }
+        ImGui::PopID();
+        renderValueRow(i18n::tr(i18n::TextKey::LabelCorrectionOutlineWidth), metrics, [&] {
+            ImGui::SliderFloat("##CorrectionOutlineWidthSlider", &model.correctionOutlineWidth, 1.0f, 8.0f, "%.1f");
+        });
+        renderNumericValueRow(i18n::tr(i18n::TextKey::LabelCorrectionOutlineWidth), metrics, [&] {
+            if (ImGui::InputFloat("##CorrectionOutlineWidthValue", &model.correctionOutlineWidth, 0.0f, 0.0f, "%.1f")) {
+                model.correctionOutlineWidth = normalizeCorrectionOutlineWidth(model.correctionOutlineWidth);
+            }
+        });
+        ImGui::PushID("CorrectionOutlineWidth");
+        if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonResetCorrectionOutlineWidth))) {
+            model.correctionOutlineWidth = DefaultCorrectionOutlineWidth;
+        }
+        ImGui::PopID();
+        ImGui::PushTextWrapPos(-1.0f);
+        ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HintCorrectionOutlineWidth));
+        ImGui::PopTextWrapPos();
         auto fill = static_cast<int>(std::lround(model.correctionFillOpacity * 100.0f));
         renderNumericValueRow(i18n::tr(i18n::TextKey::LabelCorrectionFill), metrics, [&] {
             if (ImGui::InputInt("##CorrectionFill", &fill, 0, 0)) {
@@ -728,6 +764,8 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             if (actions.resetCorrectionStyle) actions.resetCorrectionStyle();
             model.correctionFillOpacity = 0.15f;
             model.correctionOutlineOpacity = 1.0f;
+            model.comparisonStrength = DefaultComparisonStrength;
+            model.correctionOutlineWidth = DefaultCorrectionOutlineWidth;
         }
     });
 

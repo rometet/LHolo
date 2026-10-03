@@ -24,6 +24,8 @@ struct Settings {
     float opacity{1.0f};
     float correctionFillOpacity{0.15f};
     float correctionOutlineOpacity{1.0f};
+    float comparisonStrength{1.0f};
+    float correctionOutlineWidth{1.0f};
     bool structureBoundsEnabled{true};
     bool correctionSeeThrough{false};
     bool missingSeeThrough{false};

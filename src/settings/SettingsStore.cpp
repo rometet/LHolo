@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "settings/SettingsStore.h"
+#include "projection/core/ComparisonStyle.h"
 #include "place/ManualPlacementRules.h"
 
 #include <fstream>
@@ -17,6 +18,12 @@
 
 namespace lholo::settings {
 namespace {
+
+float comparisonNumber(nlohmann::json const& json, char const* key, float fallback) {
+    auto const value = json.find(key);
+    // A malformed new preference does not discard the remaining settings.
+    return value != json.end() && value->is_number() ? value->get<float>() : fallback;
+}
 
 template <class T>
 T valueWithLegacyKey(nlohmann::json const& json, char const* currentKey, char const* legacyKey, T fallback) {
@@ -98,6 +105,10 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     parsed.opacity = json.value("opacity", parsed.opacity);
     parsed.correctionFillOpacity = json.value("correctionFillOpacity", parsed.correctionFillOpacity);
     parsed.correctionOutlineOpacity = json.value("correctionOutlineOpacity", parsed.correctionOutlineOpacity);
+    parsed.comparisonStrength = projection::detail::normalizeComparisonStrength(
+        comparisonNumber(json, "comparisonStrength", parsed.comparisonStrength));
+    parsed.correctionOutlineWidth = projection::detail::normalizeCorrectionOutlineWidth(
+        comparisonNumber(json, "correctionOutlineWidth", parsed.correctionOutlineWidth));
     parsed.structureBoundsEnabled = json.value("structureBoundsEnabled", parsed.structureBoundsEnabled);
     parsed.correctionSeeThrough = json.value("correctionSeeThrough", parsed.correctionSeeThrough);
     parsed.missingSeeThrough = json.value("missingSeeThrough", parsed.missingSeeThrough);
@@ -257,6 +268,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"opacity", settings.opacity},
         {"correctionFillOpacity", settings.correctionFillOpacity},
         {"correctionOutlineOpacity", settings.correctionOutlineOpacity},
+        {"comparisonStrength", projection::detail::normalizeComparisonStrength(settings.comparisonStrength)},
+        {"correctionOutlineWidth", projection::detail::normalizeCorrectionOutlineWidth(settings.correctionOutlineWidth)},
         {"structureBoundsEnabled", settings.structureBoundsEnabled},
         {"correctionSeeThrough", settings.correctionSeeThrough},
         {"missingSeeThrough", settings.missingSeeThrough},

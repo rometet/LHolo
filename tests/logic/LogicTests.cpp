@@ -25,6 +25,7 @@
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
 #include "CompanionCallbackChecks.h"
+#include "ComparisonStyleChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
@@ -1221,6 +1222,44 @@ void testAtomicOutput() {
     LHOLO_CHECK(read() == "complete" && !std::filesystem::exists(staging.parent_path()));
 }
 
+void testComparisonSettings() {
+    wchar_t owned[MAX_PATH]{};
+    LHOLO_CHECK(GetTempFileNameW(std::filesystem::temp_directory_path().c_str(), L"LHC", 0, owned) != 0);
+    if (!owned[0]) return;
+    std::filesystem::path const path{owned};
+    lholo::settings::Settings settings;
+    auto const inf = std::numeric_limits<float>::infinity();
+    for (float bad : {std::numeric_limits<float>::quiet_NaN(), inf, -inf}) {
+        settings.comparisonStrength = bad;
+        settings.correctionOutlineWidth = bad;
+        lholo::settings::saveSettingsFile(path, settings);
+        lholo::settings::Settings loaded;
+        LHOLO_CHECK(lholo::settings::loadSettingsFile(path, loaded));
+        LHOLO_CHECK(loaded.comparisonStrength == 1.f && loaded.correctionOutlineWidth == 1.f);
+    }
+    for (auto const& values : {std::pair{-10.f,-10.f}, std::pair{10.f,10.f}, std::pair{1.7f,6.25f}}) {
+        settings.comparisonStrength = values.first;
+        settings.correctionOutlineWidth = values.second;
+        lholo::settings::saveSettingsFile(path, settings);
+        lholo::settings::Settings loaded;
+        LHOLO_CHECK(lholo::settings::loadSettingsFile(path, loaded));
+        LHOLO_CHECK(loaded.comparisonStrength == normalizeComparisonStrength(values.first));
+        LHOLO_CHECK(loaded.correctionOutlineWidth == normalizeCorrectionOutlineWidth(values.second));
+    }
+    for (auto const json : {
+        R"({"version":13,"comparisonStrength":null,"correctionOutlineWidth":"invalid","lastStructurePath":"preserved"})",
+        R"({"version":13,"comparisonStrength":1e100,"correctionOutlineWidth":-1e100,"lastStructurePath":"preserved"})",
+        R"({"version":13,"lastStructurePath":"preserved"})"}) {
+        { std::ofstream output(path, std::ios::trunc); output << json; }
+        lholo::settings::Settings loaded;
+        LHOLO_CHECK(lholo::settings::loadSettingsFile(path, loaded));
+        LHOLO_CHECK(loaded.comparisonStrength == 1.f && loaded.correctionOutlineWidth == 1.f);
+        LHOLO_CHECK(loaded.lastStructurePath == "preserved");
+    }
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
 void testSettingsStore() {
     wchar_t uniquePath[MAX_PATH]{};
     auto const tempDirectory = std::filesystem::temp_directory_path();
@@ -1239,6 +1278,9 @@ void testSettingsStore() {
     LHOLO_CHECK(settings.toggleManualHotkeyModifiers == 0);
     settings.language = "en_US";
     settings.uiScale = 1.25f;
+    LHOLO_CHECK(settings.comparisonStrength == 1.f && settings.correctionOutlineWidth == 1.f);
+    settings.comparisonStrength = 1.6f;
+    settings.correctionOutlineWidth = 4.5f;
     settings.guiHotkey = 'L';
     settings.guiHotkeyModifiers = 1;
     settings.toggleManualHotkey = 'R';
@@ -1279,6 +1321,7 @@ void testSettingsStore() {
     LHOLO_CHECK(lholo::settings::loadSettingsFile(path, loaded));
     LHOLO_CHECK(loaded.language == "en_US");
     LHOLO_CHECK(loaded.uiScale == 1.25f);
+    LHOLO_CHECK(loaded.comparisonStrength == 1.6f && loaded.correctionOutlineWidth == 4.5f);
     LHOLO_CHECK(loaded.guiHotkey == 'L');
     LHOLO_CHECK(loaded.guiHotkeyModifiers == 1);
     LHOLO_CHECK(loaded.toggleManualHotkey == 'R');
@@ -2313,6 +2356,7 @@ int main() {
     testSectionBlockSnapshot();
     testMeshDiagnosticGate();
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
@@ -2320,6 +2364,7 @@ int main() {
     testLayoutRules();
     testProgress();
     testSettingsStore();
+    testComparisonSettings();
     testSettingsCurrentKeyPriority();
     testAtomicOutput();
     testStructureSession();

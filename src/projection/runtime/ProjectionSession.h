@@ -8,6 +8,7 @@
 #pragma once
 
 #include "overlay/BoundsWireframe.h"
+#include "projection/core/ComparisonStyle.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/runtime/ProjectionActivationRequests.h"
 
@@ -52,6 +53,10 @@ public:
     void setCorrectionFillOpacity(float opacity);
     [[nodiscard]] float correctionOutlineOpacity() const;
     void setCorrectionOutlineOpacity(float opacity);
+    [[nodiscard]] float comparisonStrength() const;
+    void setComparisonStrength(float strength);
+    [[nodiscard]] float correctionOutlineWidth() const;
+    void setCorrectionOutlineWidth(float width);
     [[nodiscard]] bool structureBoundsEnabled() const;
     void setStructureBoundsEnabled(bool enabled);
     // Independent X-ray controls for wrong-state and missing-block markers.
@@ -82,6 +87,7 @@ private:
     std::atomic<float> mOpacity{1.0f};
     std::atomic<float> mCorrectionFillOpacity{0.15f};
     std::atomic<float> mCorrectionOutlineOpacity{1.0f};
+    ComparisonPreferences mComparisonPreferences;
     std::atomic_bool   mStructureBoundsEnabled{true};
     std::atomic_bool   mCorrectionSeeThrough{false};
     std::atomic_bool   mMissingSeeThrough{false};

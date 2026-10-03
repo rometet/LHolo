@@ -98,6 +98,11 @@
     LHOLO_TEXT_KEY("hint.materialOrder", HintMaterialOrder, "")                                          \
     LHOLO_TEXT_KEY("hint.layerZeroBased", HintLayerZeroBased, "")                                        \
     LHOLO_TEXT_KEY("section.correctionStyle", SectionCorrectionStyle, "")                                \
+    LHOLO_TEXT_KEY("label.comparisonStrength", LabelComparisonStrength, "")                              \
+    LHOLO_TEXT_KEY("label.correctionOutlineWidth", LabelCorrectionOutlineWidth, "")                      \
+    LHOLO_TEXT_KEY("button.resetComparisonStrength", ButtonResetComparisonStrength, "")                  \
+    LHOLO_TEXT_KEY("button.resetCorrectionOutlineWidth", ButtonResetCorrectionOutlineWidth, "")          \
+    LHOLO_TEXT_KEY("hint.correctionOutlineWidth", HintCorrectionOutlineWidth, "")                        \
     LHOLO_TEXT_KEY("label.correctionFill", LabelCorrectionFill, "")                                      \
     LHOLO_TEXT_KEY("label.correctionOutline", LabelCorrectionOutline, "")                                \
     LHOLO_TEXT_KEY("button.resetCorrectionStyle", ButtonResetCorrectionStyle, "")                        \

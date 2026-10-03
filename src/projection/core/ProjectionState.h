@@ -123,6 +123,8 @@ struct ProjectionState {
     float                           cachedOpacity{-1.0f};
     float                           cachedCorrectionFillOpacity{-1.0f};
     float                           cachedCorrectionOutlineOpacity{-1.0f};
+    float                           cachedComparisonStrength{-1.0f};
+    float                           cachedCorrectionOutlineWidth{-1.0f};
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
     // Extra blocks occupy cells that have no render-block index. The detected
     // set covers the visible source region for HUD counting; the render set and

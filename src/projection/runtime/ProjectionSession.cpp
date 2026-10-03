@@ -36,6 +36,22 @@ void ProjectionSession::setCorrectionOutlineOpacity(float opacity) {
     mCorrectionOutlineOpacity.store(std::clamp(opacity, 0.0f, 1.0f), std::memory_order_relaxed);
 }
 
+float ProjectionSession::comparisonStrength() const {
+    return mComparisonPreferences.strength();
+}
+
+void ProjectionSession::setComparisonStrength(float strength) {
+    mComparisonPreferences.setStrength(strength);
+}
+
+float ProjectionSession::correctionOutlineWidth() const {
+    return mComparisonPreferences.outlineWidth();
+}
+
+void ProjectionSession::setCorrectionOutlineWidth(float width) {
+    mComparisonPreferences.setOutlineWidth(width);
+}
+
 bool ProjectionSession::structureBoundsEnabled() const {
     return mStructureBoundsEnabled.load(std::memory_order_relaxed);
 }

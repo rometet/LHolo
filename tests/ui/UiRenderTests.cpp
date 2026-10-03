@@ -38,6 +38,85 @@ void testMissingOptionalFonts() {
     check(glyph && glyph->AdvanceX > 0 && glyph->Y1 > glyph->Y0, "fallback contains readable Latin glyphs");
 }
 
+void testComparisonControls() {
+    using namespace lholo::ui;
+    auto* context = ImGui::CreateContext();
+    context->ErrorCallback = errorCallback;
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr; io.LogFilename = nullptr;
+    io.DisplaySize = {1400,2800}; io.DeltaTime = 1.f/60.f;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigErrorRecoveryEnableAssert = false;
+    io.Fonts->AddFontDefault(); io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    MenuModel model;
+    model.correctionFillOpacity = .23f; model.correctionOutlineOpacity = .74f;
+    auto const metrics = calculateMetrics(io.DisplaySize, 1);
+    applyFluentTheme(metrics);
+    auto frame = [&] {
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({10,10}); ImGui::SetNextWindowSize({1200,2600});
+        ImGui::Begin("ComparisonControlTest");
+        renderRenderPage(model, {}, metrics);
+        ImGui::End(); ImGui::Render();
+        check(context->ErrorCountCurrentFrame == 0, "comparison controls scopes");
+    };
+    frame(); frame();
+    ImGuiWindow* card{};
+    for (auto* window : context->Windows) {
+        if (std::string_view{window->Name}.find("##CorrectionStyle") != std::string_view::npos) card=window;
+    }
+    check(card != nullptr, "comparison style card exists");
+    auto enterNumber = [&](char const* id, char const* text) {
+        auto const item = card->GetID(id);
+        context->NavNextActivateId = item;
+        context->NavNextActivateFlags = ImGuiActivateFlags_PreferInput;
+        frame();
+        check(context->ActiveId == item, "comparison numeric control activates");
+        io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_A, true); frame();
+        io.AddKeyEvent(ImGuiKey_A, false); io.AddKeyEvent(ImGuiMod_Ctrl, false);
+        io.AddInputCharactersUTF8(text); frame();
+        io.AddKeyEvent(ImGuiKey_Enter, true); frame();
+        io.AddKeyEvent(ImGuiKey_Enter, false); frame();
+    };
+    enterNumber("##ComparisonStrengthValue", "175");
+    check(model.comparisonStrength == 1.75f, "comparison numeric strength applies");
+    enterNumber("##CorrectionOutlineWidthValue", "6.5");
+    check(model.correctionOutlineWidth == 6.5f, "comparison numeric width applies");
+    enterNumber("##ComparisonStrengthValue", "500");
+    check(model.comparisonStrength == 2.f, "comparison numeric strength clamps");
+    enterNumber("##CorrectionOutlineWidthValue", "-9");
+    check(model.correctionOutlineWidth == 1.f, "comparison numeric width clamps");
+    auto activateReset = [&](char const* scope, lholo::i18n::TextKey key) {
+        auto const id = ImHashStr(lholo::i18n::tr(key), 0, card->GetID(scope));
+        context->NavNextActivateId = id; frame();
+    };
+    model.comparisonStrength=.5f; model.correctionOutlineWidth=7.f;
+    activateReset("ComparisonStrength", lholo::i18n::TextKey::ButtonResetComparisonStrength);
+    check(model.comparisonStrength == 1.f && model.correctionOutlineWidth == 7.f,
+        "strength reset leaves outline width");
+    activateReset("CorrectionOutlineWidth", lholo::i18n::TextKey::ButtonResetCorrectionOutlineWidth);
+    check(model.correctionOutlineWidth == 1.f && model.correctionFillOpacity == .23f
+        && model.correctionOutlineOpacity == .74f, "width reset leaves existing opacity settings");
+    auto tweakSlider = [&](char const* id) {
+        context->NavNextActivateId = card->GetID(id);
+        context->NavNextActivateFlags = ImGuiActivateFlags_None;
+        frame();
+        io.AddKeyEvent(ImGuiKey_RightArrow, true); frame();
+        io.AddKeyEvent(ImGuiKey_RightArrow, false); frame();
+        io.AddKeyEvent(ImGuiKey_Escape, true); frame();
+        io.AddKeyEvent(ImGuiKey_Escape, false); frame();
+    };
+    model.comparisonStrength=.5f;
+    tweakSlider("##ComparisonStrengthSlider");
+    check(model.comparisonStrength > .5f && model.comparisonStrength <= 2.f,
+        "strength slider keyboard adjustment applies");
+    tweakSlider("##CorrectionOutlineWidthSlider");
+    check(model.correctionOutlineWidth > 1.f && model.correctionOutlineWidth <= 8.f,
+        "outline width slider keyboard adjustment applies");
+    resetFluentTheme(); ImGui::DestroyContext(context);
+}
+
 void renderPages(ImVec2 viewport, float scale, int state, int language) {
     auto* context = ImGui::CreateContext();
     context->ErrorCallback = errorCallback;
@@ -73,6 +152,8 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     model.manualPlace = state == 2;
     model.hudEnabled = state != 0;
     model.materialHudEnabled = state == 2;
+    model.comparisonStrength = static_cast<float>(state);
+    model.correctionOutlineWidth = state == 0 ? 1.f : (state == 1 ? 4.f : 8.f);
     model.maxLayerX = 63;
     model.maxLayerY = 255;
     model.materialCount = 32;
@@ -153,6 +234,7 @@ int main() {
     try {
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
+        testComparisonControls();
         for (std::size_t language = 0; language < lholo::i18n::languages().size(); ++language) {
             check(lholo::i18n::setLanguageByCode(lholo::i18n::languageCode(language)), "language selection");
             for (auto const viewport : {ImVec2{1920, 1080}, ImVec2{3840, 2160},

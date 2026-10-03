@@ -81,6 +81,22 @@ void setCorrectionOutlineOpacity(float opacity) {
     detail::ProjectionSession::getInstance().setCorrectionOutlineOpacity(opacity);
 }
 
+float getComparisonStrength() {
+    return detail::ProjectionSession::getInstance().comparisonStrength();
+}
+
+void setComparisonStrength(float strength) {
+    detail::ProjectionSession::getInstance().setComparisonStrength(strength);
+}
+
+float getCorrectionOutlineWidth() {
+    return detail::ProjectionSession::getInstance().correctionOutlineWidth();
+}
+
+void setCorrectionOutlineWidth(float width) {
+    detail::ProjectionSession::getInstance().setCorrectionOutlineWidth(width);
+}
+
 bool getStructureBoundsEnabled() {
     return detail::ProjectionSession::getInstance().structureBoundsEnabled();
 }

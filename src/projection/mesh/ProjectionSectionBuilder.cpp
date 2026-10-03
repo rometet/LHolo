@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionSectionBuilder.h"
+#include "projection/core/ComparisonStyle.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
@@ -1913,7 +1914,8 @@ void buildCorrectionSectionMeshes(
         else if (correction == CorrectionState::Missing) ++missingCount;
     }
     wrongCount += state.sectionExtraBlockPositions[section].size();
-    if (missingCount == 0 && wrongCount == 0) {
+    if ((missingCount == 0 && wrongCount == 0)
+        || normalizeComparisonStrength(settings.comparisonStrength) == 0.0f) {
         state.warningFillSectionMeshes[section].reset();
         state.correctionOutlineSectionMeshes[section].reset();
         state.wrongFillSectionMeshes[section].reset();
@@ -1923,20 +1925,34 @@ void buildCorrectionSectionMeshes(
 
     constexpr float outlineInset  = 0.0f;
     constexpr float outlineExtent = 1.0f;
+    auto const fillOpacity = scaledComparisonAlpha(settings.correctionFillOpacity, settings.comparisonStrength);
+    auto const outlineOpacity = scaledComparisonAlpha(settings.correctionOutlineOpacity, settings.comparisonStrength);
+    auto const thickOutline = usesThickCorrectionOutline(settings.correctionOutlineWidth);
     // Every overlay vertex aims at the center of the vanilla 2x2 pure-white
     // texture so the overlay materials' texture lookups stay a neutral opaque
     // (1,1,1,1) instead of sampling the missing-texture checkerboard.
     auto addOutlineEdge = [&](Vec3 const& first, Vec3 const& second) {
+        if (thickOutline) {
+            emitThickComparisonEdge({first.x, first.y, first.z}, {second.x, second.y, second.z},
+                settings.correctionOutlineWidth, [&](ComparisonQuad const& quad) {
+                    for (auto const& point : quad) {
+                        tessellator.tex2({0.5f, 0.5f});
+                        tessellator.vertex(point[0], point[1], point[2]);
+                    }
+                });
+            return;
+        }
         tessellator.tex2({0.5f, 0.5f}); tessellator.vertex(first.x, first.y, first.z);
         tessellator.tex2({0.5f, 0.5f}); tessellator.vertex(second.x, second.y, second.z);
     };
-    // Use true LineList geometry rendered with the vanilla outline material.
+    // Preserve the original LineList at width 1; wider outlines are real
+    // geometry, not an alpha change or an unsupported D3D line-width setting.
     auto buildOutline = [&](bool wantWrong, std::size_t count) -> std::unique_ptr<mce::Mesh> {
         if (count == 0) return nullptr;
         tessellator.begin(
             Tessellator::DebugContextCallback{},
-            mce::PrimitiveMode::LineList,
-            static_cast<int>(count * 24),
+            thickOutline ? mce::PrimitiveMode::QuadList : mce::PrimitiveMode::LineList,
+            static_cast<int>(count * (thickOutline ? 288 : 24)),
             false
         );
         for (auto const index : state.sectionBlockIndices[section]) {
@@ -1952,10 +1968,10 @@ void buildCorrectionSectionMeshes(
                 entry, *state.structure, settings.mirrorMode, settings.rotationTurns
             );
             auto const outlineColor = correction == CorrectionState::Missing
-                ? withAlpha(MissingColorAbgrRgb, settings.correctionOutlineOpacity)
+                ? withAlpha(MissingColorAbgrRgb, outlineOpacity)
                 : correction == CorrectionState::WrongState
-                    ? withAlpha(WrongStateColorAbgrRgb, settings.correctionOutlineOpacity)
-                    : withAlpha(WrongBlockColorAbgrRgb, settings.correctionOutlineOpacity);
+                    ? withAlpha(WrongStateColorAbgrRgb, outlineOpacity)
+                    : withAlpha(WrongBlockColorAbgrRgb, outlineOpacity);
             float const x0 = static_cast<float>(p.x) + outlineInset;
             float const y0 = static_cast<float>(p.y) + outlineInset;
             float const z0 = static_cast<float>(p.z) + outlineInset;
@@ -1972,7 +1988,7 @@ void buildCorrectionSectionMeshes(
         }
         if (wantWrong) {
             setColorAbgr(tessellator, withAlpha(
-                ExtraColorAbgrRgb, settings.correctionOutlineOpacity
+                ExtraColorAbgrRgb, outlineOpacity
             ));
             for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
                 auto const p = transformStructurePosition(
@@ -2062,10 +2078,10 @@ void buildCorrectionSectionMeshes(
             float const y1 = static_cast<float>(p.y + 1);
             float const z1 = static_cast<float>(p.z + 1);
             auto const fillColor = correction == CorrectionState::Missing
-                ? withAlpha(MissingColorAbgrRgb, settings.correctionFillOpacity)
+                ? withAlpha(MissingColorAbgrRgb, fillOpacity)
                 : correction == CorrectionState::WrongState
-                    ? withAlpha(WrongStateColorAbgrRgb, settings.correctionFillOpacity)
-                    : withAlpha(WrongBlockColorAbgrRgb, settings.correctionFillOpacity);
+                    ? withAlpha(WrongStateColorAbgrRgb, fillOpacity)
+                    : withAlpha(WrongBlockColorAbgrRgb, fillOpacity);
             setColorAbgr(tessellator, fillColor);
             if (priority > neighborPriority(p, 0, 0, -1)) addFillFace({x0,y0,z0}, {x0,y1,z0}, {x1,y1,z0}, {x1,y0,z0});
             if (priority > neighborPriority(p, 0, 0, 1))  addFillFace({x1,y0,z1}, {x1,y1,z1}, {x0,y1,z1}, {x0,y0,z1});
@@ -2077,7 +2093,7 @@ void buildCorrectionSectionMeshes(
         if (wantWrong) {
             constexpr int priority = 2;
             setColorAbgr(tessellator, withAlpha(
-                ExtraColorAbgrRgb, settings.correctionFillOpacity
+                ExtraColorAbgrRgb, fillOpacity
             ));
             for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
                 auto const p = transformStructurePosition(

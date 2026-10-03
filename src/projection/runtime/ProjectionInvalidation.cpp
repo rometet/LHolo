@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/runtime/ProjectionInvalidation.h"
+#include "projection/core/ComparisonStyle.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/runtime/ProjectionProgress.h"
@@ -60,8 +61,11 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     bool const opacityChanged
         = std::abs(state.cachedOpacity - settings.structureOpacity) > 0.0001f;
     bool const correctionStyleChanged
-        = std::abs(state.cachedCorrectionFillOpacity - settings.correctionFillOpacity) > 0.0001f
-        || std::abs(state.cachedCorrectionOutlineOpacity - settings.correctionOutlineOpacity) > 0.0001f;
+        = comparisonStyleChanged(
+            {state.cachedCorrectionFillOpacity, state.cachedCorrectionOutlineOpacity,
+             state.cachedComparisonStrength, state.cachedCorrectionOutlineWidth},
+            {settings.correctionFillOpacity, settings.correctionOutlineOpacity,
+             settings.comparisonStrength, settings.correctionOutlineWidth});
     if (!result.geometryTransformChanged && !result.placementMoved && !result.layerChanged
         && !opacityChanged && !correctionStyleChanged) {
         return result;
@@ -130,6 +134,8 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     state.cachedOpacity = settings.structureOpacity;
     state.cachedCorrectionFillOpacity = settings.correctionFillOpacity;
     state.cachedCorrectionOutlineOpacity = settings.correctionOutlineOpacity;
+    state.cachedComparisonStrength = settings.comparisonStrength;
+    state.cachedCorrectionOutlineWidth = settings.correctionOutlineWidth;
 
     if (result.placementViewChanged()) {
         state.detectedExtraBlockPositions.clear();

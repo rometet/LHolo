@@ -24,6 +24,8 @@ struct ProjectionInvalidationSettings {
     float structureOpacity{};
     float correctionFillOpacity{};
     float correctionOutlineOpacity{};
+    float comparisonStrength{1.0f};
+    float correctionOutlineWidth{1.0f};
 };
 
 struct ProjectionInvalidationResult {

@@ -5,6 +5,7 @@
 
 #include "place/PlaceHelper.h"
 #include "projection/Projection.h"
+#include "projection/core/ComparisonStyle.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureLoader.h"
 #include "structure/MaterialTracker.h"
@@ -123,6 +124,8 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.opacity = projection::getOpacity();
     model.correctionFillOpacity = projection::getCorrectionFillOpacity();
     model.correctionOutlineOpacity = projection::getCorrectionOutlineOpacity();
+    model.comparisonStrength = projection::getComparisonStrength();
+    model.correctionOutlineWidth = projection::getCorrectionOutlineWidth();
     model.layerDisplayMode = structure::toInt(sessionSnapshot.transform.layerDisplayMode);
     model.displayLayer = std::clamp(
         sessionSnapshot.transform.displayLayer, 0,
@@ -231,6 +234,16 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
         changed = true;
     }
     auto const layerAxis = structure::layerAxisFromInt(model.layerAxis);
+    auto const strength = projection::detail::normalizeComparisonStrength(model.comparisonStrength);
+    if (std::abs(projection::getComparisonStrength() - strength) > 0.0001f) {
+        projection::setComparisonStrength(strength);
+        changed = true;
+    }
+    auto const width = projection::detail::normalizeCorrectionOutlineWidth(model.correctionOutlineWidth);
+    if (std::abs(projection::getCorrectionOutlineWidth() - width) > 0.0001f) {
+        projection::setCorrectionOutlineWidth(width);
+        changed = true;
+    }
     changed = session.setLayerAxis(layerAxis) || changed;
     changed = session.setLayerDisplayMode(
         structure::layerDisplayModeFromInt(model.layerDisplayMode)
@@ -344,6 +357,8 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.resetCorrectionStyle = [] {
         projection::setCorrectionFillOpacity(0.15f);
         projection::setCorrectionOutlineOpacity(1.0f);
+        projection::setComparisonStrength(projection::detail::DefaultComparisonStrength);
+        projection::setCorrectionOutlineWidth(projection::detail::DefaultCorrectionOutlineWidth);
         structure::saveSettings();
     };
     actions.giveExperimentalConsent = [] {

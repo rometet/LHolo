@@ -109,6 +109,8 @@ struct MenuModel {
     float opacity{1.0f};
     float correctionFillOpacity{0.15f};
     float correctionOutlineOpacity{1.0f};
+    float comparisonStrength{1.0f};
+    float correctionOutlineWidth{1.0f};
     int layerAxis{};
     int layerDisplayMode{};
     int displayLayer{};

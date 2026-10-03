@@ -1033,6 +1033,8 @@ void loadSettings() {
         projection::setOpacity(settings.opacity);
         projection::setCorrectionFillOpacity(settings.correctionFillOpacity);
         projection::setCorrectionOutlineOpacity(settings.correctionOutlineOpacity);
+        projection::setComparisonStrength(settings.comparisonStrength);
+        projection::setCorrectionOutlineWidth(settings.correctionOutlineWidth);
         projection::setStructureBoundsEnabled(settings.structureBoundsEnabled);
         projection::setCorrectionSeeThrough(settings.correctionSeeThrough);
         projection::setMissingSeeThrough(settings.missingSeeThrough);
@@ -1145,6 +1147,8 @@ void saveSettings() {
         settings.opacity = projection::getOpacity();
         settings.correctionFillOpacity = projection::getCorrectionFillOpacity();
         settings.correctionOutlineOpacity = projection::getCorrectionOutlineOpacity();
+        settings.comparisonStrength = projection::getComparisonStrength();
+        settings.correctionOutlineWidth = projection::getCorrectionOutlineWidth();
         settings.structureBoundsEnabled = projection::getStructureBoundsEnabled();
         settings.correctionSeeThrough = projection::getCorrectionSeeThrough();
         settings.missingSeeThrough = projection::getMissingSeeThrough();

@@ -225,6 +225,8 @@ void renderProjection(
         auto const structureOpacity = session.opacity();
         auto const correctionFillOpacity = session.correctionFillOpacity();
         auto const correctionOutlineOpacity = session.correctionOutlineOpacity();
+        auto const comparisonStrength = session.comparisonStrength();
+        auto const correctionOutlineWidth = session.correctionOutlineWidth();
         auto const invalidation = reconcileProjectionInvalidation(
             state,
             ProjectionInvalidationSettings{
@@ -238,7 +240,9 @@ void renderProjection(
                 .layerAxis                = layerAxis,
                 .structureOpacity         = structureOpacity,
                 .correctionFillOpacity    = correctionFillOpacity,
-                .correctionOutlineOpacity = correctionOutlineOpacity
+                .correctionOutlineOpacity = correctionOutlineOpacity,
+                .comparisonStrength       = comparisonStrength,
+                .correctionOutlineWidth   = correctionOutlineWidth
             }
         );
         if (invalidation.placementViewChanged() || state.placementBuildActive) {
@@ -273,6 +277,8 @@ void renderProjection(
             .structureOpacity         = structureOpacity,
             .correctionFillOpacity    = correctionFillOpacity,
             .correctionOutlineOpacity = correctionOutlineOpacity,
+            .comparisonStrength       = comparisonStrength,
+            .correctionOutlineWidth   = correctionOutlineWidth,
             .identityTransform        = identityTransform
         };
         processProjectionOpaqueFrame(
