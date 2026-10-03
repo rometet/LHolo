@@ -228,6 +228,7 @@ ResolvedJavaBlock resolveJavaBlockState(
 ) {
     auto const* mapping = findMapping(javaName, properties, javaDataVersion);
     if (!mapping) {
+        if (!properties.empty()) return {.stateResolutionFailed = true};
         std::lock_guard lock(gCacheMutex);
         auto const* resolved = resolveExactBedrockBlock(javaName);
         if (!resolved || resolved->isAir()) return {};
@@ -249,10 +250,11 @@ ResolvedJavaBlock resolveJavaBlockState(
     auto const* resolved = resolvePermutation(
         permutationsFor(mapping->bedrockName), mapping->bedrockStates
     );
-    if (!resolved || resolved->isAir()) {
+    if (!resolved && mapping->bedrockStates.empty()) {
         resolved = resolveExactBedrockBlock(mapping->bedrockName);
     }
-    if (!resolved || resolved->isAir()) return {};
+    if (!resolved || resolved->isAir())
+        return {.stateResolutionFailed = !properties.empty() || !mapping->bedrockStates.empty()};
 
     ResolvedJavaBlock result{.mapped = true};
     if (resolved->getTypeName() == "minecraft:bubble_column") {

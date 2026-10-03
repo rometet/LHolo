@@ -1,5 +1,6 @@
 # XMake caches and generated output
 .xmake/
+.offline/
 build/
 bin/
 dist/

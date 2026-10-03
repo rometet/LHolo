@@ -16,6 +16,8 @@ struct ResolvedJavaBlock {
     Block const* block{};
     Block const* liquid{};
     bool         mapped{};
+    // An explicit state must fail the load instead of silently using a default.
+    bool         stateResolutionFailed{};
 };
 
 // Resolve one exact Java block state through the table generated from Chunker.

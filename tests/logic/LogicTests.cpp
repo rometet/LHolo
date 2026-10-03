@@ -2289,6 +2289,7 @@ void testI18n() {
 } // namespace
 
 int main() {
+    try {
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
     testLiquidReplayRules();
@@ -2332,4 +2333,8 @@ int main() {
     testI18n();
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
+    } catch (std::exception const& exception) {
+        std::fprintf(stderr, "LHoloLogicTests unhandled test error after %d checks: %s\n", gChecks, exception.what());
+        return 1;
+    }
 }

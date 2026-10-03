@@ -1,6 +1,7 @@
 #include "overlay/CompanionBridge.h"
 #include "app/NativeCallbackBoundary.h"
 #include "overlay/CompanionCallbackStore.h"
+#include "overlay/SharedFontPreparation.h"
 
 #include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
@@ -15,6 +16,7 @@ namespace {
 
 using detail::Registration;
 detail::CallbackStore gCallbacks;
+detail::SharedFontPreparation gSharedFonts;
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
@@ -126,6 +128,9 @@ bool unregisterProvider(void* owner) noexcept {
 bool registeredFor(void* owner) noexcept {
     return owner && gCallbacks.registered(owner);
 }
+bool setFontInitializer(void* owner, FontInitializerFn initializer) noexcept {
+    return gCallbacks.setFontInitializer(owner, initializer);
+}
 } // namespace
 
 bool isRegistered() noexcept {
@@ -179,6 +184,25 @@ void drawHud(void* imguiContext) noexcept {
     if (lease.registration.hudNeeded && !lease.registration.hudNeeded()) return;
     lease.registration.drawHud(imguiContext);
 }
+
+bool prepareSharedFonts(void* imguiContext) noexcept {
+    auto lease = acquireCallbacks();
+    auto const& registration = lease.registration;
+    if (!lease.active() || registration.independentRenderer || !registration.fontInitializer
+        || !gSharedFonts.needsPreparation(imguiContext, registration.owner, registration.fontGeneration)) return false;
+    auto& io = ImGui::GetIO();
+    auto const defaultFont = io.FontDefault;
+    auto const globalScale = io.FontGlobalScale;
+    auto const style = ImGui::GetStyle();
+    // The lease prevents provider retirement/unload while resource initialization runs.
+    registration.fontInitializer(imguiContext);
+    io.FontDefault = defaultFont;
+    io.FontGlobalScale = globalScale;
+    ImGui::GetStyle() = style;
+    gSharedFonts.prepared(imguiContext, registration.owner, registration.fontGeneration);
+    return true;
+}
+void resetSharedFonts() noexcept { gSharedFonts.reset(); }
 
 void renderIndependent(void* device, void* deviceContext, void* window, bool guiVisible) noexcept {
     auto lease = acquireCallbacks();
@@ -242,6 +266,13 @@ extern "C" __declspec(dllexport) bool __cdecl lholo_register_companion_gui_v3(
     return lholo::overlay::companion::registerProviderV3(
         owner, hotkey, render, windowMessage, hudNeeded, stateChanged, resetGraphics
     );
+}
+
+extern "C" __declspec(dllexport) bool __cdecl lholo_set_companion_gui_font_initializer_v2(
+    void* owner,
+    lholo::overlay::companion::FontInitializerFn initializer
+) noexcept {
+    return lholo::overlay::companion::setFontInitializer(owner, initializer);
 }
 
 extern "C" __declspec(dllexport) bool __cdecl lholo_unregister_companion_gui_v2(void* owner) noexcept {

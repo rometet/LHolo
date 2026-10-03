@@ -1174,7 +1174,13 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
         }
         region.palette.reserve(palette->size());
         for (auto const& entry : *palette) {
-            region.palette.push_back(resolveJavaBlock(entry, regionDataVersion));
+            auto const resolved = resolveJavaBlock(entry, regionDataVersion);
+            if (resolved.stateResolutionFailed) {
+                error = "Unresolved Java block state in Litematic region " + regionName
+                    + " at palette index " + std::to_string(region.palette.size());
+                return nullptr;
+            }
+            region.palette.push_back(resolved);
         }
         paletteEntries += palette->size();
 

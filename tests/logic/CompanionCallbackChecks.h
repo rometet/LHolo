@@ -1,6 +1,7 @@
 #pragma once
 
 #include "overlay/CompanionCallbackStore.h"
+#include "overlay/SharedFontPreparation.h"
 
 #include <atomic>
 #include <thread>
@@ -22,6 +23,32 @@ void runCompanionCallbackChecks(Check check) {
     auto changed = first;
     changed.hotkey = 122;
     check(!store.publish(changed)); // Never replace a live callback generation.
+    auto const initializeFonts = +[](void*) noexcept {};
+    check(!store.setFontInitializer(&nextOwner, initializeFonts));
+    check(!store.setFontInitializer(&owner, nullptr));
+    check(store.setFontInitializer(&owner, initializeFonts));
+    check(store.publish(first)); // Optional fonts preserve the old v2 entry point.
+    std::uint64_t fontGeneration{};
+    {
+        auto lease = store.acquire();
+        check(lease.registration.fontInitializer == initializeFonts);
+        fontGeneration = lease.registration.fontGeneration;
+    }
+    check(store.setFontInitializer(&owner, initializeFonts));
+    {
+        auto lease = store.acquire();
+        check(lease.registration.fontGeneration == fontGeneration);
+    }
+    SharedFontPreparation fonts;
+    int context{};
+    check(!fonts.needsPreparation(nullptr, &owner, fontGeneration));
+    check(fonts.needsPreparation(&context, &owner, fontGeneration));
+    fonts.prepared(&context, &owner, fontGeneration);
+    check(!fonts.needsPreparation(&context, &owner, fontGeneration));
+    check(fonts.needsPreparation(&context, &owner, fontGeneration + 1));
+    check(fonts.needsPreparation(&context, &nextOwner, fontGeneration));
+    fonts.reset();
+    check(fonts.needsPreparation(&context, &owner, fontGeneration));
     {
         auto lease = store.acquire();
         check(lease.active());
@@ -47,6 +74,7 @@ void runCompanionCallbackChecks(Check check) {
     auto retiring = store.beginRetirement(&owner);
     check(retiring && retiring->registration.owner == &owner && retiring->wasVisible);
     check(!store.acquire().active());
+    check(!store.setFontInitializer(&owner, initializeFonts));
     check(!store.publish(next));
     check(!store.publish(first));
     check(!store.beginRetirement(&owner));
@@ -61,6 +89,11 @@ void runCompanionCallbackChecks(Check check) {
     check(!store.publish(next));
     store.finishRetirement();
     check(store.publish(next));
+    {
+        auto lease = store.acquire();
+        check(!lease.registration.fontInitializer);
+        check(lease.registration.fontGeneration > fontGeneration);
+    }
     check(store.registered(&nextOwner));
     auto shutdown = store.beginRetirement(nullptr, true);
     check(shutdown && shutdown->registration.owner == &nextOwner);

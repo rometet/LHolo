@@ -34,8 +34,12 @@ namespace lholo::projection {
 namespace {
 
 bool projectionWorldViewMatches(detail::ProjectionState const& state, LocalPlayer& player) {
+    // Present may publish the next structure before the opaque frame adopts it.
+    // Retained cells must not drive placement during that handoff.
+    auto const loaded = structure::detail::StructureSession::getInstance().loaded();
     return !detail::consumeWorldExitRequest() && !detail::projectionDimensionSourceDestroyed()
         && !detail::projectionWorldEventsFailed()
+        && loaded && loaded == state.structure && loaded->generation == state.structureGeneration
         && state.level == &player.getLevel() && state.dimension == &player.getDimension();
 }
 

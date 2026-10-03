@@ -6,6 +6,7 @@
 namespace lholo::overlay::companion {
 
 using DrawFn = void (*)(void*) noexcept;
+using FontInitializerFn = void (*)(void* imguiContext) noexcept;
 using StateFn = void (*)(bool) noexcept;
 using HudNeededFn = bool (*)() noexcept;
 using RenderV3Fn = void (*)(void* device, void* deviceContext, void* window, bool guiVisible) noexcept;
@@ -24,6 +25,10 @@ void close() noexcept;
 
 void drawGui(void* imguiContext) noexcept;
 void drawHud(void* imguiContext) noexcept;
+// Called by the host with its graphics/context lock held, before NewFrame.
+// Providers append atlas-owned font data and preserve the host's default font.
+bool prepareSharedFonts(void* imguiContext) noexcept;
+void resetSharedFonts() noexcept;
 void renderIndependent(void* device, void* deviceContext, void* window, bool guiVisible) noexcept;
 void forwardWindowMessage(void* window, unsigned message, std::uintptr_t wParam, std::intptr_t lParam) noexcept;
 void resetGraphics() noexcept;

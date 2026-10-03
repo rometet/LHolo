@@ -848,6 +848,7 @@ bool initializeImGui(IDXGISwapChain* swapChain) {
     if (!gImGuiInitialized) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        companion::resetSharedFonts();
         app::ScopeExit rollbackContext([]() noexcept {
             if (gImGuiInitialized || !ImGui::GetCurrentContext()) return;
             if (ImGui::GetIO().BackendPlatformUserData) ImGui_ImplWin32_Shutdown();
@@ -973,6 +974,8 @@ void render(IDXGISwapChain* swapChain) {
             // and D3D11 device/context for this frame.
             companion::renderIndependent(gDevice, gDeviceContext, gWindow, true);
         } else {
+            if (companion::prepareSharedFonts(ImGui::GetCurrentContext()))
+                ImGui_ImplDX11_InvalidateDeviceObjects();
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();

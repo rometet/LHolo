@@ -19,6 +19,8 @@ struct Registration {
     RenderV3Fn renderV3{};
     WindowMessageV3Fn windowMessageV3{};
     GraphicsResetV3Fn resetGraphicsV3{};
+    FontInitializerFn fontInitializer{};
+    std::uint64_t fontGeneration{};
     bool independentRenderer{};
     bool operator==(Registration const&) const = default;
 };
@@ -72,7 +74,13 @@ public:
     bool publish(Registration registration) {
         std::lock_guard lock(mMutex);
         if (!mAccepting || mRetiring) return false;
-        if (mRegistered) return mRegistration == registration;
+        if (mRegistered) {
+            // The optional font extension must not break repeated v2 registration.
+            registration.fontInitializer = mRegistration.fontInitializer;
+            registration.fontGeneration = mRegistration.fontGeneration;
+            return mRegistration == registration;
+        }
+        registration.fontGeneration = ++mFontGeneration;
         mRegistration = registration;
         mVisible = false;
         mRegistered = true;
@@ -82,6 +90,17 @@ public:
     Lease acquire() {
         std::lock_guard lock(mMutex);
         return mRegistered ? Lease{*this, mRegistration} : Lease{};
+    }
+
+    bool setFontInitializer(void* owner, FontInitializerFn initializer) {
+        std::lock_guard lock(mMutex);
+        if (!owner || !initializer || !mRegistered || mRetiring
+            || mRegistration.owner != owner || mRegistration.independentRenderer) return false;
+        if (mRegistration.fontInitializer != initializer) {
+            mRegistration.fontInitializer = initializer;
+            mRegistration.fontGeneration = ++mFontGeneration;
+        }
+        return true;
     }
 
     Lease changeVisibility(bool visible) {
@@ -133,6 +152,7 @@ private:
     inline static thread_local unsigned sReaderDepth{};
     mutable std::mutex mMutex;
     Registration mRegistration;
+    std::uint64_t mFontGeneration{};
     std::atomic_uint mReaders{};
     bool mRegistered{};
     bool mVisible{};
