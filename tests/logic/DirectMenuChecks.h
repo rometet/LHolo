@@ -1,12 +1,7 @@
 #pragma once
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
 #include "input/MenuRoute.h"
 #include "input/NativeTextInputState.h"
 #include "structure/StructureUiState.h"
-#include "ui/MenuRoutePresentation.h"
 
 namespace lholo::tests {
 template<class Check> void runDirectMenuChecks(Check check) {
@@ -60,9 +55,10 @@ template<class Check> void runDirectMenuChecks(Check check) {
     state.bindCapturedHotkey(12,guiBefore.key,guiBefore.modifiers);
     check(state.hotkey(13).key==guiBefore.key);
     state.clearHotkey(12);state.clearHotkey(13);check(!state.firstHotkeyConflict(0));
-    state.setHotkey(13,VK_INSERT,0);
+    constexpr unsigned testKey=0x2d; // Win32 Insert key; no native input is sent.
+    state.setHotkey(13,testKey,0);
     check(state.tryPressHotkey(13));check(!state.tryPressHotkey(13));
-    check(state.releaseHotkeysForKey(VK_INSERT,100));check(state.ignoreHotkeyUntil()>100);
+    check(state.releaseHotkeysForKey(testKey,100));check(state.ignoreHotkeyUntil()>100);
     state.resetHotkeyState();check(state.tryPressHotkey(13));state.releaseHotkey(13);
 
     auto queue=[&](MenuRoute route){return state.queueMenuRoute({route,state.menuRouteGeneration(),7,1});};
