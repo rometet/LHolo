@@ -156,6 +156,7 @@ target("LHolo")
         local package_dir = path.join(os.projectdir(), "bin", target:name())
         os.mkdir(package_dir)
         os.cp(path.join(os.projectdir(), "LICENSE"), path.join(package_dir, "LICENSE"))
+        os.cp(path.join(os.projectdir(), "src", "vendor", "LICENSE.imgui.txt"), path.join(package_dir, "LICENSE.imgui.txt"))
     end)
 
 target("LHoloLogicTests")

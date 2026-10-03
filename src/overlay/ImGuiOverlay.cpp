@@ -980,6 +980,15 @@ void render(IDXGISwapChain* swapChain) {
             });
             if (companion::prepareSharedFonts(ImGui::GetCurrentContext()))
                 ImGui_ImplDX11_InvalidateDeviceObjects();
+            static bool fontFailureReported = false;
+            if (!ImGui::GetIO().Fonts->TexID && !ImGui_ImplDX11_CreateDeviceObjects()) {
+                if (!fontFailureReported)
+                    logger().error("ImGui font/device creation failed; skipping overlay frame safely (atlas {}x{})",
+                                   ImGui::GetIO().Fonts->TexWidth, ImGui::GetIO().Fonts->TexHeight);
+                fontFailureReported = true;
+                return;
+            }
+            fontFailureReported = false;
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();

@@ -8,6 +8,9 @@
 namespace lholo::overlay {
 
 void loadOverlayFonts(ImFontAtlas& atlas, OverlayFontFiles const& files) {
+    // ChineseFull at 36px plus the shared Praxis font exceeds a 4096x16384
+    // atlas. Widen packing without changing font sizes, glyphs or oversampling.
+    atlas.TexDesiredWidth = 8192;
     ImFontConfig config{};
     config.OversampleH = 2;
     config.OversampleV = 2;
