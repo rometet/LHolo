@@ -4,6 +4,7 @@
 #include "i18n/Translator.h"
 #include "ui/FluentTheme.h"
 #include "input/HotkeyTypes.h"
+#include "input/MenuRoute.h"
 #include "structure/SchematicRuntime.h"
 
 #include <array>
@@ -59,6 +60,8 @@ struct HotkeyRow {
     std::string label;
     std::string display;
     bool        capturing{};
+    std::string conflict;
+    bool reserved{};
 };
 
 struct MaterialRow {
@@ -72,6 +75,8 @@ struct MaterialRow {
 
 struct MenuModel {
     MenuPage page{MenuPage::Projection};
+    input::MenuRoute directMenuRoute{input::MenuRoute::None};
+    bool directMenuRoutesReady{true};
     char* pathBuffer{};
     std::size_t pathBufferSize{};
     bool blockOpeningInput{};

@@ -148,6 +148,7 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
     auto const tr = [](i18n::TextKey key){return i18n::tr(key);};
     if (!snap.status.empty()) ImGui::TextWrapped("%s",snap.status.c_str());
     if (!snap.session.status.empty()) ImGui::TextWrapped("%s",snap.session.status.c_str());
+    auto const filesTop=ImGui::GetCursorScreenPos().y-ImGui::GetWindowPos().y;
     renderSection("##SchematicFiles",tr(i18n::TextKey::SchematicFiles),metrics,[&] {
         ImGui::TextWrapped("%s",snap.library.c_str());
         if(ImGui::Button(tr(i18n::TextKey::SchematicRefresh)) && actions.refreshSchematics)actions.refreshSchematics();
@@ -162,6 +163,8 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             }
         }ImGui::EndChild();ImGui::EndDisabled();
     });
+    if(model.directMenuRoute==input::MenuRoute::Files)ImGui::SetScrollFromPosY(filesTop,0);
+    auto const placedTop=ImGui::GetCursorScreenPos().y-ImGui::GetWindowPos().y;
     renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicDeselect)) && actions.selectPlacement)actions.selectPlacement(0);
@@ -200,6 +203,7 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
         }
         ImGui::EndDisabled();
     });
+    if(model.directMenuRoute==input::MenuRoute::Placed)ImGui::SetScrollFromPosY(placedTop,0);
     if(placements.selected && ImGui::Button(tr(i18n::TextKey::PageVerification)))model.page=MenuPage::Verification;
     auto const report=snap.report;
     if(!report || report->running)return;
@@ -921,9 +925,13 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
             if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonClearHotkey)) && actions.clearHotkey) {
                 actions.clearHotkey(hotkey.id);
             }
+            if(!hotkey.conflict.empty())
+                ImGui::TextWrapped(i18n::tr(i18n::TextKey::HotkeyRouteConflict),hotkey.conflict.c_str());
+            if(hotkey.reserved)ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HotkeyRouteReserved));
             ImGui::PopID();
         }
         ImGui::PopStyleVar();
+        if(!model.directMenuRoutesReady)ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HotkeyRouteUnavailable));
         // The fixed Alt+wheel gesture has no rebindable slot of its own, so it
         // sits between the binding rows and the page-wide reset that also
         // restores it.

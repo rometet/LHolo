@@ -38,6 +38,10 @@ constexpr std::array<DefaultHotkey, input::kHotkeyCount> kDefaultHotkeys{{
     {0,       0},
     {0,       0},
     {0,       0},
+    {0,       0}, // OpenPlaced: direct routes start unassigned.
+    {0,       0}, // OpenFiles
+    {0,       0}, // OpenVerification
+    {0,       0}, // OpenMaterials
 }};
 
 // "Reset all hotkeys" restores this together with the bindings: it is an input
@@ -73,12 +77,97 @@ bool StructureUiState::guiVisible() const {
 
 bool StructureUiState::toggleGuiVisible() {
     auto const opening = !mGuiVisible.load(std::memory_order_acquire);
-    mGuiVisible.store(opening, std::memory_order_release);
+    setGuiVisible(opening);
     return opening;
 }
 
 void StructureUiState::setGuiVisible(bool visible) {
-    mGuiVisible.store(visible, std::memory_order_release);
+    std::lock_guard lock(mMenuRouteMutex);
+    cancelMenuRoutesLocked();
+    mGuiVisible.store(visible,std::memory_order_release);
+    mUiInteractionBlocked.store(false,std::memory_order_release);
+}
+
+void StructureUiState::cancelMenuRoutesLocked() {
+    mPendingMenuRoute.reset();
+    mMenuRouteGeneration.fetch_add(1,std::memory_order_acq_rel);
+    if(mMenuRouteOpeningGui) {
+        mGuiVisible.store(false,std::memory_order_release);
+        mBlockGameInputUntil.store(GetTickCount64()+180,std::memory_order_release);
+    }
+    mMenuRouteOpeningGui=false;
+}
+void StructureUiState::cancelMenuRoutes() {
+    std::lock_guard lock(mMenuRouteMutex);cancelMenuRoutesLocked();
+}
+std::uint64_t StructureUiState::menuRouteGeneration() const { return mMenuRouteGeneration.load(std::memory_order_acquire); }
+bool StructureUiState::queueMenuRoute(input::MenuRouteIntent intent) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.route<input::MenuRoute::Placed || intent.route>input::MenuRoute::Materials
+        || intent.uiGeneration!=menuRouteGeneration() || uiInteractionBlocked() || nativeTextInputBlocked())return false;
+    intent.uiGeneration=mMenuRouteGeneration.fetch_add(1,std::memory_order_acq_rel)+1;
+    mPendingMenuRoute=intent;
+    mMenuRouteOpeningGui=mMenuRouteOpeningGui || !guiVisible();
+    mGuiVisible.store(true, std::memory_order_release);
+    setOpeningInputBlockFrames(3);
+    return true;
+}
+std::optional<input::MenuRouteIntent> StructureUiState::consumeMenuRoute() {
+    std::lock_guard lock(mMenuRouteMutex);auto intent=mPendingMenuRoute;mPendingMenuRoute.reset();return intent;
+}
+bool StructureUiState::hasPendingMenuRoute() const {
+    std::lock_guard lock(mMenuRouteMutex);return mPendingMenuRoute.has_value();
+}
+bool StructureUiState::applyMenuRouteIfCurrent(input::MenuRouteIntent const& intent,bool currentInteractionBlocked,std::function<void()> const& apply) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.uiGeneration!=menuRouteGeneration())return false;
+    if(!guiVisible() || currentInteractionBlocked || uiInteractionBlocked() || nativeTextInputBlocked()) {
+        cancelMenuRoutesLocked();return false;
+    }
+    apply();mMenuRouteOpeningGui=false;return true;
+}
+void StructureUiState::discardMenuRoute(input::MenuRouteIntent const& intent) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.uiGeneration==menuRouteGeneration())cancelMenuRoutesLocked();
+}
+void StructureUiState::setUiInteractionBlocked(bool blocked) {
+    std::lock_guard lock(mMenuRouteMutex);
+    mUiInteractionBlocked.store(blocked, std::memory_order_release);
+    if(blocked)cancelMenuRoutesLocked();
+}
+bool StructureUiState::uiInteractionBlocked() const {
+    return mUiInteractionBlocked.load(std::memory_order_acquire);
+}
+void StructureUiState::setNativeTextInputFlag(input::NativeTextInputFlag flag, bool blocked) {
+    if(blocked) {
+        std::lock_guard lock(mMenuRouteMutex);mNativeTextInput.gain(flag);cancelMenuRoutesLocked();
+    } else clearNativeTextInputFlagIfCurrent(flag,nativeTextInputToken(flag));
+}
+std::uint64_t StructureUiState::nativeTextInputToken(input::NativeTextInputFlag flag) const { return mNativeTextInput.token(flag); }
+void StructureUiState::clearNativeTextInputFlagIfCurrent(input::NativeTextInputFlag flag,std::uint64_t token) { mNativeTextInput.clearIfCurrent(flag,token); }
+void StructureUiState::setNativeTextInputHooksReady(bool ready) {
+    mNativeTextInputHooksReady.store(ready, std::memory_order_release);
+    if(!ready)cancelMenuRoutes();
+}
+bool StructureUiState::nativeTextInputBlocked() const {
+    return !mNativeTextInputHooksReady.load(std::memory_order_acquire)
+        || mNativeTextInput.blocked();
+}
+bool StructureUiState::nativeTextInputHooksReady() const {
+    return mNativeTextInputHooksReady.load(std::memory_order_acquire);
+}
+void StructureUiState::releaseHotkey(std::size_t index) {
+    if(auto* storage=hotkeyStorage(index))storage->held.store(false,std::memory_order_release);
+}
+std::optional<std::size_t> StructureUiState::firstHotkeyConflict(std::size_t index) const {
+    auto const target=inputHotkey(index);
+    if (!target.key) return std::nullopt;
+    for (std::size_t candidate=0;candidate<input::kHotkeyCount;++candidate) {
+        if (candidate==index) continue;
+        auto const other=inputHotkey(candidate);
+        if (target.key==other.key && target.modifiers==other.modifiers) return candidate;
+    }
+    return std::nullopt;
 }
 
 bool StructureUiState::openingInputBlocked() const {
@@ -209,6 +298,8 @@ void StructureUiState::bindCapturedHotkey(
     if (!target) return;
     for (std::size_t current = 0; current < mHotkeys.size(); ++current) {
         if (current == index) continue;
+        // Direct shortcuts never silently displace a configured binding.
+        if (input::isDirectMenuHotkey(index) || input::isDirectMenuHotkey(current)) continue;
         auto& candidate = mHotkeys[current];
         if (candidate.key.load(std::memory_order_relaxed) == key
             && candidate.modifiers.load(std::memory_order_relaxed) == modifiers) {
@@ -289,6 +380,7 @@ bool StructureUiState::releaseHotkeysForKey(unsigned int key, std::uint64_t now)
 }
 
 void StructureUiState::resetHotkeyState() {
+    cancelMenuRoutes();
     mControlHeld.store(false, std::memory_order_release);
     mAltHeld.store(false, std::memory_order_release);
     mShiftHeld.store(false, std::memory_order_release);
@@ -499,7 +591,7 @@ void StructureUiState::clearMaterials() {
 }
 
 void StructureUiState::resetWorldSession() {
-    mGuiVisible.store(false, std::memory_order_release);
+    setGuiVisible(false);
     mOpeningInputBlockFrames.store(0, std::memory_order_release);
     mBlockGameInputUntil.store(0, std::memory_order_release);
     mPendingOffsetX.store(0, std::memory_order_release);

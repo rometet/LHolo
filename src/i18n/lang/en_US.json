@@ -251,5 +251,12 @@
   "verifier.actual": "Actual block / state",
   "verifier.shownCount": "Shown count",
   "verifier.coordinates": "Coordinates (distance)",
-  "verifier.noRows": "No mistakes in this category were found in the retained results."
+  "verifier.noRows": "No mistakes in this category were found in the retained results.",
+  "hotkey.openPlaced": "Open placed schematics",
+  "hotkey.openFiles": "Open schematic files",
+  "hotkey.openVerification": "Open verification",
+  "hotkey.openMaterials": "Open materials",
+  "hotkey.routeConflict": "Conflicts with %s; direct shortcut disabled.",
+  "hotkey.routeReserved": "F11 is reserved for fullscreen; direct shortcut disabled.",
+  "hotkey.routeUnavailable": "Direct shortcuts unavailable: text input tracking is not ready."
 }

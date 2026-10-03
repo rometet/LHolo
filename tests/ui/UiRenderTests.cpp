@@ -1,5 +1,6 @@
 #include "ui/LHoloMenu.h"
 #include "ui/MenuPages.h"
+#include "ui/MenuRoutePresentation.h"
 #include "ui/FileDialog.h"
 #include "i18n/LanguageStore.h"
 #include "overlay/ImGuiFrameRecovery.h"
@@ -210,6 +211,47 @@ void testVerifierControls() {
     resetFluentTheme();ImGui::DestroyContext(context);
 }
 
+void testDirectMenuRoutes() {
+    using namespace lholo::ui;
+    using lholo::input::MenuRoute;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={640,480};io.DeltaTime=1.f/60.f;
+    ImFontConfig font;font.SizePixels=36;io.Fonts->AddFontDefault(&font);io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    MenuModel model;model.schematic.worldAvailable=true;model.schematic.session.writable=true;
+    lholo::structure::SavedPlacement placement;placement.id=1;placement.name="Route test";placement.file="test.mcstructure";
+    model.schematic.session.document.placements={placement};model.schematic.session.document.selected=1;
+    model.schematic.files={"test.mcstructure"};
+    std::size_t verifyCalls{},placementCalls{};MenuActions actions;
+    actions.verifySchematic=[&]{++verifyCalls;};actions.placeSchematic=[&](std::string const&){++placementCalls;};
+    auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
+    auto frame=[&]{ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"direct route ImGui scopes");};
+    auto pageWindow=[&]()->ImGuiWindow*{
+        for(auto* window:context->Windows){auto name=std::string_view{window->Name};
+            auto const separator=name.find_last_of('/');auto child=name.substr(separator==std::string_view::npos?0:separator+1);
+            if(child.starts_with("##PageScroll"))return window;}
+        return nullptr;
+    };
+    applyMenuRoutePresentation(model,MenuRoute::Placed);frame();frame();frame();
+    check(model.page==MenuPage::Schematics,"placed route opens existing schematics page");
+    auto* page=pageWindow();check(page && page->ScrollMax.y>0,"compact schematics page scrolls");
+    applyMenuRoutePresentation(model,MenuRoute::Placed);frame();frame();
+    auto const placedScroll=page->Scroll.y;check(placedScroll>0,"placed route scrolls to placement section");
+    applyMenuRoutePresentation(model,MenuRoute::Files);frame();frame();
+    check(page->Scroll.y<placedScroll,"files route returns to file section");
+    applyMenuRoutePresentation(model,MenuRoute::Verification);frame();frame();
+    check(model.page==MenuPage::Verification,"verification route opens dedicated page");
+    check(verifyCalls==0,"opening verification does not start a scan");
+    applyMenuRoutePresentation(model,MenuRoute::Materials);frame();frame();
+    check(model.page==MenuPage::Projection,"materials route opens projection page");
+    check(context->OpenPopupStack.Size>0,"materials route opens existing materials popup");
+    check(verifyCalls==0 && placementCalls==0,"navigation does not verify or place structures");
+    check(model.directMenuRoute==MenuRoute::None,"route presentation is consumed once");
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
 void renderPages(ImVec2 viewport, float scale, int state, int language) {
     auto* context = ImGui::CreateContext();
     context->ErrorCallback = errorCallback;
@@ -287,6 +329,8 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
         model.hotkeys[index] = {static_cast<lholo::ui::HotkeyId>(index),
             "Hotkey " + std::to_string(index), "Ctrl + F10", index == 0 && state == 2};
     }
+    model.directMenuRoutesReady=state!=4;
+    if(state==3){model.hotkeys[13].conflict="Existing GUI hotkey with a long label";model.hotkeys[15].reserved=true;}
     auto const metrics = lholo::ui::calculateMetrics(viewport, scale);
     lholo::ui::applyFluentTheme(metrics);
     lholo::ui::MenuActions const actions{};
@@ -339,6 +383,7 @@ int main() {
         lholo::i18n::initLanguageStore();
         testComparisonControls();
         testVerifierControls();
+        testDirectMenuRoutes();
         for (std::size_t language = 0; language < lholo::i18n::languages().size(); ++language) {
             check(lholo::i18n::setLanguageByCode(lholo::i18n::languageCode(language)), "language selection");
             for (auto const viewport : {ImVec2{1920, 1080}, ImVec2{3840, 2160},

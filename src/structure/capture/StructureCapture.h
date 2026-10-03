@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <functional>
 
 class LocalPlayer;
 
@@ -44,6 +45,10 @@ struct Bounds {
 
 Snapshot              getSnapshot();
 std::optional<structure::detail::ClientViewSnapshot> getClientViewSnapshot();
+// Value-only publication under the view owner: callbacks must not query the
+// engine or reenter capture. Lock order is capture value-state -> UI route.
+bool publishMenuRouteIfCurrent(std::optional<structure::detail::ClientViewSnapshot> const& expected,
+    std::function<bool(std::optional<structure::detail::ClientViewSnapshot> const&)> const& publish);
 std::optional<Bounds> getBounds();
 void                  updateDraft(Draft const& draft, std::uint64_t revision);
 void                  setPointFromPlayer(PointSlot slot, std::uint64_t revision);

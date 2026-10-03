@@ -17,6 +17,8 @@
 #include "ui/FluentTheme.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/LHoloMenu.h"
+#include "ui/MenuRoutePresentation.h"
+#include "overlay/CompanionBridge.h"
 
 #include <algorithm>
 #include <array>
@@ -57,7 +59,11 @@ constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
     {HotkeyId::LayerDecrease, i18n::TextKey::HotkeyLayerDecrease},
     {HotkeyId::LoadProjection, i18n::TextKey::HotkeyLoadProjection},
     {HotkeyId::CloseProjection, i18n::TextKey::HotkeyCloseProjection},
-    {HotkeyId::ToggleManualPlacement, i18n::TextKey::CheckboxManualPlace}
+    {HotkeyId::ToggleManualPlacement, i18n::TextKey::CheckboxManualPlace},
+    {HotkeyId::OpenPlaced, i18n::TextKey::HotkeyOpenPlaced},
+    {HotkeyId::OpenFiles, i18n::TextKey::HotkeyOpenFiles},
+    {HotkeyId::OpenVerification, i18n::TextKey::HotkeyOpenVerification},
+    {HotkeyId::OpenMaterials, i18n::TextKey::HotkeyOpenMaterials}
 }};
 
 } // namespace
@@ -144,6 +150,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.hudShowExtraBlocks = hud.showExtraBlocks;
     model.hudShowProjectedBlockName = hud.showProjectedBlockName;
     model.altWheelOffsetEnabled = uiState().altWheelOffsetEnabled();
+    model.directMenuRoutesReady=uiState().nativeTextInputHooksReady();
     std::size_t rowIndex = 0;
     for (auto const& definition : kHotkeyDefinitions) {
         auto const binding = uiState().hotkey(static_cast<std::size_t>(definition.id));
@@ -152,6 +159,10 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
         row.label = i18n::tr(definition.label);
         row.display = hotkeyChordName(binding.modifiers, binding.key);
         row.capturing = binding.capturing;
+        if(auto const conflict=uiState().firstHotkeyConflict(static_cast<std::size_t>(definition.id));conflict
+            && (input::isDirectMenuHotkey(static_cast<std::size_t>(definition.id)) || input::isDirectMenuHotkey(*conflict)))
+            row.conflict=i18n::tr(kHotkeyDefinitions[*conflict].label);
+        row.reserved=input::isDirectMenuHotkey(static_cast<std::size_t>(definition.id)) && binding.key==VK_F11;
     }
     auto const materials = uiState().materialRequirements();
     model.materials.reserve(materials.size());
@@ -407,6 +418,21 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
 
 void renderStructureMenu() {
     if (!structure::isGuiVisible()) return;
+    auto route=input::MenuRoute::None;
+    if(auto const intent=uiState().consumeMenuRoute()) {
+        auto const view=structure::capture::getClientViewSnapshot();
+        bool const interaction=ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive();
+        bool applied{};
+        if(reinterpret_cast<std::uintptr_t>(GetForegroundWindow())==intent->window && !overlay::companion::isVisible())
+            applied=structure::capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
+                if((current?current->worldEpoch:0)!=intent->worldEpoch)return false;
+                return uiState().applyMenuRouteIfCurrent(*intent,interaction,[&]{
+                    route=intent->route;gActivePage=menuPageForRoute(route,gActivePage);
+                });
+            });
+        if(!applied)uiState().discardMenuRoute(*intent);
+    }
+    if(!structure::isGuiVisible())return;
     auto const displaySize = ImGui::GetIO().DisplaySize;
     auto const configuredScale = uiState().hud().uiScale;
     auto const effectiveScale = configuredScale > 0.0f
@@ -427,9 +453,15 @@ void renderStructureMenu() {
     auto const metrics = calculateMetrics(displaySize, effectiveScale);
     applyFluentTheme(metrics);
     auto model = buildStructureMenuModel(effectiveScale);
+    applyMenuRoutePresentation(model,route);
+    if(route==input::MenuRoute::Materials) {
+        structure::requestMaterialList();
+        model.materialPopupRequested=true;
+    }
     bool refreshModel = false;
     auto const actions = buildStructureMenuActions(refreshModel, model.captureRevision);
     renderMenu(model, actions, metrics);
+    uiState().setUiInteractionBlocked(ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive());
     gActivePage = model.page;
     if (!refreshModel) applyStructureMenuModel(model, effectiveScale);
     uiState().consumeOpeningInputBlockFrame();

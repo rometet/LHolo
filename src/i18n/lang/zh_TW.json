@@ -251,5 +251,12 @@
   "verifier.actual": "Actual block / state",
   "verifier.shownCount": "Shown count",
   "verifier.coordinates": "Coordinates (distance)",
-  "verifier.noRows": "No mistakes in this category were found in the retained results."
+  "verifier.noRows": "No mistakes in this category were found in the retained results.",
+  "hotkey.openPlaced": "開啟放置清單",
+  "hotkey.openFiles": "開啟原理圖檔案",
+  "hotkey.openVerification": "開啟驗證",
+  "hotkey.openMaterials": "開啟材料清單",
+  "hotkey.routeConflict": "與%s衝突；直接快捷鍵已停用。",
+  "hotkey.routeReserved": "F11保留用於全螢幕切換；直接快捷鍵已停用。",
+  "hotkey.routeUnavailable": "文字輸入監視尚未就緒，直接快捷鍵已停用。"
 }

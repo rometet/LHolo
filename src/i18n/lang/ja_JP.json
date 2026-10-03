@@ -251,5 +251,12 @@
   "verifier.actual": "実際のブロック / 状態",
   "verifier.shownCount": "表示件数",
   "verifier.coordinates": "座標（距離）",
-  "verifier.noRows": "保持されている結果に、この分類のミスはありません。"
+  "verifier.noRows": "保持されている結果に、この分類のミスはありません。",
+  "hotkey.openPlaced": "配置一覧を開く",
+  "hotkey.openFiles": "設計図ファイルを開く",
+  "hotkey.openVerification": "検証を開く",
+  "hotkey.openMaterials": "材料一覧を開く",
+  "hotkey.routeConflict": "キーが重複しています: %s（直接キーは無効）",
+  "hotkey.routeReserved": "F11は全画面切替用のため、直接キーには使えません。",
+  "hotkey.routeUnavailable": "入力フォーカスの監視が未準備のため、直接キーは無効です。"
 }

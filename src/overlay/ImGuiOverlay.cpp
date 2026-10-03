@@ -57,6 +57,7 @@
 #include "input/MenuInputGuard.h"
 #include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
+#include "structure/StructureUiState.h"
 #include "ui/FluentTheme.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/TargetedBedrock.h"
@@ -660,6 +661,11 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
 
     auto const menuWasVisible = anyMenuVisible();
     auto const lholoWasVisible = structure::isGuiVisible();
+    // A click can activate an ImGui text field before the next Present has
+    // published WantTextInput. Conservatively block direct routes until that
+    // frame resolves the active widget; do not inspect another thread's ImGui.
+    if(lholoWasVisible && (message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK))
+        structure::detail::StructureUiState::getInstance().setUiInteractionBlocked(true);
 
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
         && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
@@ -674,7 +680,8 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
             if (menuWasVisible && !menuVisible) confineMouseToClientCenter(window);
             return 1;
         }
-        if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam))) {
+        if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam),
+                isForegroundGameWindow(window) && !companion::isVisible())) {
             if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                 companion::close();
             }
@@ -690,6 +697,10 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         if (companion::handleHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
         if (structure::handleGuiHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
     }
+    if(lholoWasVisible && !structure::detail::StructureUiState::getInstance().hasPendingMenuRoute()
+        && (message==WM_CHAR || message==WM_UNICHAR || message==WM_IME_STARTCOMPOSITION || message==WM_IME_COMPOSITION
+            || ((message==WM_KEYDOWN || message==WM_SYSKEYDOWN) && (wParam==VK_TAB || wParam==VK_RETURN))))
+        structure::detail::StructureUiState::getInstance().setUiInteractionBlocked(true);
     if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam == VK_ESCAPE
         && gConsumeEscapeRelease.exchange(false, std::memory_order_acq_rel)) {
         return 1;
@@ -716,7 +727,8 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         }
         if (mouseKey != 0) {
             if (message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
-                if (structure::handleGuiHotkeyKeyDown(mouseKey)) {
+                if (structure::handleGuiHotkeyKeyDown(mouseKey,
+                        isForegroundGameWindow(window) && !companion::isVisible())) {
                     if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                         companion::close();
                     }

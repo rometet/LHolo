@@ -104,6 +104,7 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
     }
     ImGui::End();
     if (!open) model.closeRequested = true;
+    model.directMenuRoute=input::MenuRoute::None;
 }
 
 } // namespace lholo::ui

@@ -1,4 +1,5 @@
 #include "ui/LHoloMenu.h"
+#include "ui/MenuRoutePresentation.h"
 #include "i18n/LanguageStore.h"
 #include "overlay/OverlayFonts.h"
 #include <backends/imgui_impl_dx11.h>
@@ -42,7 +43,7 @@ void saveRender(std::filesystem::path const& path,int width,int height) {
     context->Unmap(readback.Get(),0);ImGui_ImplDX11_Shutdown();
     require(output.good(),"render artifact write");
 }
-void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running,bool scroll=false) {
+void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running,bool scroll=false,int directCase=0) {
     using namespace lholo::ui;using namespace lholo::structure;
     auto* context=ImGui::CreateContext();auto& io=ImGui::GetIO();
     io.IniFilename=nullptr;io.LogFilename=nullptr;io.DisplaySize={static_cast<float>(width),static_cast<float>(height)};io.DeltaTime=1.f/60.f;
@@ -51,6 +52,22 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     require(io.Fonts->Fonts[0]->FindGlyphNoFallback(0x691c)!=nullptr,"Japanese verification glyph");
     require(lholo::i18n::setLanguageByCode("ja_JP"),"Japanese UI");
     MenuModel model;model.page=MenuPage::Verification;
+    if(directCase==1 || directCase==2) {
+        model.page=MenuPage::Hotkeys;
+        std::array<lholo::i18n::TextKey,16> labels{
+            lholo::i18n::TextKey::HotkeyOpenMenu,lholo::i18n::TextKey::HotkeyMoveLeft,lholo::i18n::TextKey::HotkeyMoveRight,
+            lholo::i18n::TextKey::HotkeyMoveForward,lholo::i18n::TextKey::HotkeyMoveBackward,lholo::i18n::TextKey::HotkeyMoveUp,
+            lholo::i18n::TextKey::HotkeyMoveDown,lholo::i18n::TextKey::HotkeyLayerIncrease,lholo::i18n::TextKey::HotkeyLayerDecrease,
+            lholo::i18n::TextKey::HotkeyLoadProjection,lholo::i18n::TextKey::HotkeyCloseProjection,lholo::i18n::TextKey::CheckboxManualPlace,
+            lholo::i18n::TextKey::HotkeyOpenPlaced,lholo::i18n::TextKey::HotkeyOpenFiles,
+            lholo::i18n::TextKey::HotkeyOpenVerification,lholo::i18n::TextKey::HotkeyOpenMaterials};
+        for(std::size_t i=0;i<model.hotkeys.size();++i)
+            model.hotkeys[i]={static_cast<HotkeyId>(i),lholo::i18n::tr(labels[i]),i>=12?"---":"F10",false};
+        model.hotkeys[13].conflict=lholo::i18n::tr(labels[0]);model.hotkeys[15].reserved=true;
+        model.directMenuRoutesReady=directCase==1;
+    }
+    if(directCase==3)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Placed);
+    if(directCase==4)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Materials);
     model.schematic.worldAvailable=true;model.schematic.session.writable=true;
     SavedPlacement p;p.id=1;p.name="検証サンプル / 共有フォント・テーマ";p.file="sample.mcstructure";
     model.schematic.session.document.placements={p};model.schematic.session.document.selected=1;
@@ -94,6 +111,10 @@ int main(int argc,char** argv) {
         renderCase(dir/"verifier-640.ppm",640,480,1,false);
         renderCase(dir/"verifier-640-scrolled.ppm",640,480,1,false,true);
         renderCase(dir/"verifier-progress.ppm",1920,1080,1,true);
+        renderCase(dir/"direct-hotkeys-1920.ppm",1920,1080,1,false,true,1);
+        renderCase(dir/"direct-hotkeys-640.ppm",640,480,1,false,true,2);
+        renderCase(dir/"direct-placed-640.ppm",640,480,1,false,false,3);
+        renderCase(dir/"direct-materials-1920.ppm",1920,1080,1,false,false,4);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

@@ -17,6 +17,7 @@
 #pragma once
 
 #include "i18n/Message.h"
+#include "input/MenuRoute.h"
 #include "structure/LayerDisplayTypes.h"
 
 #include <cstdint>
@@ -77,7 +78,7 @@ bool isInputTransitionBlocked();
 // True while the LHolo menu owns keyboard and mouse input. Keep input guards
 // on every platform-facing path behind this single policy predicate.
 bool isMenuInputCaptured();
-bool handleGuiHotkeyKeyDown(unsigned int virtualKey);
+bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes=false);
 bool handleGuiHotkeyKeyUp(unsigned int virtualKey);
 bool handleProjectionOffsetWheel(short wheelDelta);
 void resetHotkeyState();

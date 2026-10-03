@@ -251,5 +251,12 @@
   "verifier.actual": "实际方块 / 状态",
   "verifier.shownCount": "显示数量",
   "verifier.coordinates": "坐标（距离）",
-  "verifier.noRows": "保留的结果中没有此类别的错误。"
+  "verifier.noRows": "保留的结果中没有此类别的错误。",
+  "hotkey.openPlaced": "打开放置列表",
+  "hotkey.openFiles": "打开原理图文件",
+  "hotkey.openVerification": "打开验证",
+  "hotkey.openMaterials": "打开材料列表",
+  "hotkey.routeConflict": "与%s冲突；直接快捷键已禁用。",
+  "hotkey.routeReserved": "F11保留用于全屏切换；直接快捷键已禁用。",
+  "hotkey.routeUnavailable": "文本输入监视尚未就绪，直接快捷键已禁用。"
 }

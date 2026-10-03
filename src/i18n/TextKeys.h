@@ -313,7 +313,14 @@
     LHOLO_TEXT_KEY("verifier.actual", VerifierActual, "") \
     LHOLO_TEXT_KEY("verifier.shownCount", VerifierShownCount, "") \
     LHOLO_TEXT_KEY("verifier.coordinates", VerifierCoordinates, "") \
-    LHOLO_TEXT_KEY("verifier.noRows", VerifierNoRows, "")
+    LHOLO_TEXT_KEY("verifier.noRows", VerifierNoRows, "") \
+    LHOLO_TEXT_KEY("hotkey.openPlaced", HotkeyOpenPlaced, "") \
+    LHOLO_TEXT_KEY("hotkey.openFiles", HotkeyOpenFiles, "") \
+    LHOLO_TEXT_KEY("hotkey.openVerification", HotkeyOpenVerification, "") \
+    LHOLO_TEXT_KEY("hotkey.openMaterials", HotkeyOpenMaterials, "") \
+    LHOLO_TEXT_KEY("hotkey.routeConflict", HotkeyRouteConflict, "") \
+    LHOLO_TEXT_KEY("hotkey.routeReserved", HotkeyRouteReserved, "") \
+    LHOLO_TEXT_KEY("hotkey.routeUnavailable", HotkeyRouteUnavailable, "")
 
 namespace lholo::i18n {
 

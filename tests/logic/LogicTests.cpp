@@ -25,6 +25,7 @@
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
 #include "ManualVerificationChecks.h"
+#include "DirectMenuChecks.h"
 #include "CompanionCallbackChecks.h"
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
@@ -1287,6 +1288,8 @@ void testSettingsStore() {
     settings.guiHotkeyModifiers = 1;
     settings.toggleManualHotkey = 'R';
     settings.toggleManualHotkeyModifiers = 0;
+    settings.directMenuHotkeys = {'P','F','V','M'};
+    settings.directMenuHotkeyModifiers = {1,2,4,7};
     settings.hudShowProjectedBlockName = false;
     settings.hudShowExtraBlocks = false;
     settings.autoPlacementBreakCooldownSeconds = 27;
@@ -1328,6 +1331,8 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.guiHotkeyModifiers == 1);
     LHOLO_CHECK(loaded.toggleManualHotkey == 'R');
     LHOLO_CHECK(loaded.toggleManualHotkeyModifiers == 0);
+    LHOLO_CHECK(loaded.directMenuHotkeys == settings.directMenuHotkeys);
+    LHOLO_CHECK(loaded.directMenuHotkeyModifiers == settings.directMenuHotkeyModifiers);
     LHOLO_CHECK(!loaded.hudShowProjectedBlockName);
     LHOLO_CHECK(!loaded.hudShowExtraBlocks);
     LHOLO_CHECK(loaded.autoPlacementBreakCooldownSeconds == 27);
@@ -1419,6 +1424,8 @@ void testSettingsStore() {
     LHOLO_CHECK(migrated.toggleManualHotkeyModifiers == 0);
     // Likewise, a config written before the Alt+wheel switch existed keeps the
     // gesture enabled, so upgrading never silently changes input behavior.
+    LHOLO_CHECK((migrated.directMenuHotkeys == std::array<int,4>{}));
+    LHOLO_CHECK((migrated.directMenuHotkeyModifiers == std::array<int,4>{}));
     LHOLO_CHECK(migrated.altWheelOffsetEnabled);
     // Move bindings survive the rename of the move slots from world axes to
     // view-relative directions: the old key names are still read as a fallback.
@@ -2362,6 +2369,7 @@ int main() {
     lholo::tests::runVerifierHighlightChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualVerificationChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();

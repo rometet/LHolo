@@ -251,5 +251,12 @@
   "verifier.actual": "Actual block / state",
   "verifier.shownCount": "Shown count",
   "verifier.coordinates": "Coordinates (distance)",
-  "verifier.noRows": "No mistakes in this category were found in the retained results."
+  "verifier.noRows": "No mistakes in this category were found in the retained results.",
+  "hotkey.openPlaced": "Открыть размещения",
+  "hotkey.openFiles": "Открыть файлы схем",
+  "hotkey.openVerification": "Открыть проверку",
+  "hotkey.openMaterials": "Открыть материалы",
+  "hotkey.routeConflict": "Совпадает с %s; прямой переход отключён.",
+  "hotkey.routeReserved": "F11 используется для полного экрана; прямой переход отключён.",
+  "hotkey.routeUnavailable": "Прямые переходы недоступны: отслеживание ввода текста не готово."
 }

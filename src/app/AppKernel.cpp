@@ -72,6 +72,8 @@ bool AppKernel::enable() {
             logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
         }
         logger.info("LHolo enabled. Type lholo to open the projection menu.");
+        if(!menuInputGuardStatus.textInputHooksInstalled)
+            logger.warn("Direct page hotkeys disabled: native text input tracking hooks are not ready");
         logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
         return true;
     }, [this]() noexcept {

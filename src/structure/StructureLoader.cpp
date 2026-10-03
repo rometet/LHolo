@@ -28,6 +28,7 @@
 #include "structure/LoadIntent.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
+#include "overlay/CompanionBridge.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/MenuController.h"
 #include "structure/capture/StructureCapture.h"
@@ -384,7 +385,22 @@ bool isMenuInputCaptured() {
     return isGuiVisible() || isInputTransitionBlocked();
 }
 
-bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
+static bool requestMenuRoute(input::MenuRoute route,bool allowDirectRoutes) {
+    if(route<input::MenuRoute::Placed || route>input::MenuRoute::Materials)return false;
+    auto const generation=uiState().menuRouteGeneration();
+    auto const view=capture::getClientViewSnapshot();
+    return capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
+        auto const now=GetTickCount64();
+        bool const gameInput=current && now>=current->sampledAtMillis && now-current->sampledAtMillis<=250 && current->gameplayInputEnabled;
+        input::DirectMenuInputContext const context{allowDirectRoutes,overlay::companion::isVisible(),isGuiVisible(),gameInput,
+            uiState().uiInteractionBlocked(),uiState().nativeTextInputBlocked()};
+        if(!input::directMenuInputAllowed(context))return false;
+        return uiState().queueMenuRoute({route,generation,current?current->worldEpoch:0,
+            reinterpret_cast<std::uintptr_t>(GetForegroundWindow())});
+    });
+}
+
+bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes) {
     auto const modifierKey = ui::isModifierKey(virtualKey);
     if (virtualKey == VK_CONTROL || virtualKey == VK_LCONTROL || virtualKey == VK_RCONTROL) {
         uiState().setControlHeld(true);
@@ -435,6 +451,27 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
             requestOpenGui();
         }
         return true;
+    }
+    auto const now=GetTickCount64();
+    auto const view=capture::getClientViewSnapshot();
+    bool const gameInput=view && now>=view->sampledAtMillis
+        && now-view->sampledAtMillis<=250 && view->gameplayInputEnabled;
+    input::DirectMenuInputContext const directContext{
+        allowDirectRoutes,false,isGuiVisible(),gameInput,
+        uiState().uiInteractionBlocked(),uiState().nativeTextInputBlocked()};
+    if(input::directMenuInputAllowed(directContext) && virtualKey!=VK_F11) {
+        for(std::size_t index=input::kDirectMenuHotkeyFirst;index<input::kHotkeyCount;++index) {
+            auto const hotkey=uiState().inputHotkey(index);
+            if(!hotkey.key || hotkey.key!=virtualKey || hotkey.modifiers!=modifiers)continue;
+            if(uiState().firstHotkeyConflict(index))continue;
+            if(now>=uiState().ignoreHotkeyUntil() && uiState().tryPressHotkey(index)) {
+                if(!requestMenuRoute(input::menuRouteForHotkey(index),allowDirectRoutes)) {
+                    uiState().releaseHotkey(index);
+                    return false;
+                }
+            }
+            return true;
+        }
     }
     if (isGuiVisible()) return false;
 
@@ -596,6 +633,7 @@ void processPendingActions() {
 }
 
 void resetDimensionSession() {
+    uiState().cancelMenuRoutes();
     uiState().clearMaterialHud();
 }
 
@@ -1104,6 +1142,10 @@ void loadSettings() {
             std::clamp(settings.toggleManualHotkey, 0, 255),
             std::clamp(settings.toggleManualHotkeyModifiers, 0, 7)
         );
+        for(std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index)
+            uiState().setHotkey(input::kDirectMenuHotkeyFirst+index,
+                std::clamp(settings.directMenuHotkeys[index],0,255),
+                std::clamp(settings.directMenuHotkeyModifiers[index],0,7));
         session.setSavedProjection({
             settings.hasSavedProjection,
             settings.savedAnchorX,
@@ -1192,6 +1234,11 @@ void saveSettings() {
         settings.closeProjectionHotkeyModifiers = closeProjectionHotkey.modifiers;
         settings.toggleManualHotkey = toggleManualHotkey.key;
         settings.toggleManualHotkeyModifiers = toggleManualHotkey.modifiers;
+        for(std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index) {
+            auto const hotkey=uiState().hotkey(input::kDirectMenuHotkeyFirst+index);
+            settings.directMenuHotkeys[index]=hotkey.key;
+            settings.directMenuHotkeyModifiers[index]=hotkey.modifiers;
+        }
         settings.altWheelOffsetEnabled = uiState().altWheelOffsetEnabled();
         settings.hasSavedProjection = sessionSnapshot.saved.available;
         settings.savedAnchorX = sessionSnapshot.saved.anchorX;

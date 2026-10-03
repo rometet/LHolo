@@ -8,6 +8,9 @@
 
 #include "i18n/Message.h"
 #include "input/HotkeyTypes.h"
+#include "input/MenuRoute.h"
+#include "input/NativeTextInputState.h"
+#include <functional>
 
 #include <array>
 #include <atomic>
@@ -123,6 +126,23 @@ public:
     );
     void resetHotkey(std::size_t index);
     void resetHotkeys();
+    [[nodiscard]] std::optional<std::size_t> firstHotkeyConflict(std::size_t index) const;
+    [[nodiscard]] std::uint64_t menuRouteGeneration() const;
+    bool queueMenuRoute(input::MenuRouteIntent intent);
+    [[nodiscard]] std::optional<input::MenuRouteIntent> consumeMenuRoute();
+    [[nodiscard]] bool hasPendingMenuRoute() const;
+    void cancelMenuRoutes();
+    bool applyMenuRouteIfCurrent(input::MenuRouteIntent const& intent,bool currentInteractionBlocked,std::function<void()> const& apply);
+    void discardMenuRoute(input::MenuRouteIntent const& intent);
+    void setUiInteractionBlocked(bool blocked);
+    [[nodiscard]] bool uiInteractionBlocked() const;
+    void setNativeTextInputFlag(input::NativeTextInputFlag flag, bool blocked);
+    [[nodiscard]] std::uint64_t nativeTextInputToken(input::NativeTextInputFlag flag) const;
+    void clearNativeTextInputFlagIfCurrent(input::NativeTextInputFlag flag,std::uint64_t token);
+    void setNativeTextInputHooksReady(bool ready);
+    [[nodiscard]] bool nativeTextInputBlocked() const;
+    [[nodiscard]] bool nativeTextInputHooksReady() const;
+    void releaseHotkey(std::size_t index);
 
     void setControlHeld(bool held);
     void setAltHeld(bool held);
@@ -210,6 +230,14 @@ private:
     std::atomic_bool     mGuiVisible{false};
     std::atomic_int      mOpeningInputBlockFrames{0};
     std::atomic_uint64_t mBlockGameInputUntil{};
+    mutable std::mutex mMenuRouteMutex;
+    std::optional<input::MenuRouteIntent> mPendingMenuRoute;
+    std::atomic_uint64_t mMenuRouteGeneration{};
+    bool mMenuRouteOpeningGui{};
+    void cancelMenuRoutesLocked();
+    std::atomic_bool mUiInteractionBlocked{};
+    input::NativeTextInputState mNativeTextInput;
+    std::atomic_bool mNativeTextInputHooksReady{};
 
     std::atomic_bool  mHudEnabled{true};
     std::atomic_bool  mHudShowFileName{true};
