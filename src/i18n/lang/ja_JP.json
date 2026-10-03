@@ -258,5 +258,9 @@
   "hotkey.openMaterials": "材料一覧を開く",
   "hotkey.routeConflict": "キーが重複しています: %s（直接キーは無効）",
   "hotkey.routeReserved": "F11は全画面切替用のため、直接キーには使えません。",
-  "hotkey.routeUnavailable": "入力フォーカスの監視が未準備のため、直接キーは無効です。"
+  "hotkey.routeUnavailable": "入力フォーカスの監視が未準備のため、直接キーは無効です。",
+  "page.files": "ファイル",
+  "page.placed": "配置",
+  "page.materials": "材料",
+  "material.refresh": "材料一覧を更新"
 }

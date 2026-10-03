@@ -73,6 +73,7 @@ StructureSessionSnapshot StructureSession::snapshot() const {
     result.lastPath  = mLastPath;
     result.transform = transformRelaxed();
     result.saved     = savedProjectionLocked();
+    result.request   = mRequest;
     if (mLoaded) {
         result.maxLayerY = maxLayerFor(*mLoaded, LayerAxis::Y);
         result.maxLayerX = maxLayerFor(*mLoaded, LayerAxis::X);
@@ -117,12 +118,14 @@ void StructureSession::setLastPath(std::string path) {
 void StructureSession::replaceLoaded(
     std::shared_ptr<LoadedStructure> loaded,
     std::string                      path,
-    i18n::Message                    status
+    i18n::Message                    status,
+    ProjectionRequestStamp          request
 ) {
     std::lock_guard lock(mMutex);
     mLastPath = std::move(path);
     mStatus   = std::move(status);
     mLoaded   = std::move(loaded);
+    mRequest  = request;
 }
 
 void StructureSession::clearLoaded(i18n::Message status) {
@@ -133,6 +136,7 @@ void StructureSession::clearLoaded(i18n::Message status) {
     // snapshot.
     refreshSavedTransformLocked();
     mLoaded.reset();
+    mRequest = {};
     mStatus = std::move(status);
 }
 
@@ -271,7 +275,14 @@ void StructureSession::refreshSavedTransformLocked() {
 }
 
 void StructureSession::recordProjectionAnchor(int x, int y, int z) {
+    std::lock_guard lock(mMutex);recordProjectionAnchorLocked(x,y,z);
+}
+bool StructureSession::recordProjectionAnchor(std::shared_ptr<LoadedStructure const> const& expected,std::uint64_t generation,int x,int y,int z) {
     std::lock_guard lock(mMutex);
+    if(!expected || mLoaded!=expected || mLoaded->generation!=generation)return false;
+    recordProjectionAnchorLocked(x,y,z);return true;
+}
+void StructureSession::recordProjectionAnchorLocked(int x,int y,int z) {
     mHasSavedProjection.store(false, std::memory_order_relaxed);
     auto const current = transformRelaxed();
     mSavedAnchorX.store(x, std::memory_order_relaxed);

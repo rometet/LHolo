@@ -258,5 +258,9 @@
   "hotkey.openMaterials": "Открыть материалы",
   "hotkey.routeConflict": "Совпадает с %s; прямой переход отключён.",
   "hotkey.routeReserved": "F11 используется для полного экрана; прямой переход отключён.",
-  "hotkey.routeUnavailable": "Прямые переходы недоступны: отслеживание ввода текста не готово."
+  "hotkey.routeUnavailable": "Прямые переходы недоступны: отслеживание ввода текста не готово.",
+  "page.files": "Файлы",
+  "page.placed": "Размещения",
+  "page.materials": "Материалы",
+  "material.refresh": "Обновить материалы"
 }

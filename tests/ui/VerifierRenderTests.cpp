@@ -66,9 +66,15 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         model.hotkeys[13].conflict=lholo::i18n::tr(labels[0]);model.hotkeys[15].reserved=true;
         model.directMenuRoutesReady=directCase==1;
     }
-    if(directCase==3)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Placed);
+    if(directCase==3 || directCase==5)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Placed);
     if(directCase==4)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Materials);
+    if(directCase==6)applyMenuRoutePresentation(model,lholo::input::MenuRoute::Files);
+    if(directCase==4) {
+        model.hasLoadedStructure=true;
+        model.materials={{"Stone bricks",{},"minecraft:stone_bricks",128,64},{"Oak stairs",{},"minecraft:oak_stairs",32,64}};
+    }
     model.schematic.worldAvailable=true;model.schematic.session.writable=true;
+    model.schematic.activeProjectionAvailable=true;
     SavedPlacement p;p.id=1;p.name="検証サンプル / 共有フォント・テーマ";p.file="sample.mcstructure";
     model.schematic.session.document.placements={p};model.schematic.session.document.selected=1;
     auto report=std::make_shared<schematic::Report>();report->stamp.worldEpoch=1;report->stamp.placementId=1;report->stamp.loadedGeneration=1;report->stamp.reportRevision=1;
@@ -82,6 +88,7 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     model.schematic.target=report->mismatches[0];model.schematic.report=report;
     model.schematic.phase=running?schematic::VerificationPhase::Running:schematic::VerificationPhase::Completed;
     report->running=running;report->checked=17200;report->progress=.42f;
+    if(directCase==4)report->materials={{"minecraft:stone_bricks",{128,96},160},{"minecraft:oak_stairs",{32,24},16}};
     auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
     for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");}
     if(scroll){
@@ -115,6 +122,8 @@ int main(int argc,char** argv) {
         renderCase(dir/"direct-hotkeys-640.ppm",640,480,1,false,true,2);
         renderCase(dir/"direct-placed-640.ppm",640,480,1,false,false,3);
         renderCase(dir/"direct-materials-1920.ppm",1920,1080,1,false,false,4);
+        renderCase(dir/"direct-placed-1920.ppm",1920,1080,1,false,false,5);
+        renderCase(dir/"direct-files-1920.ppm",1920,1080,1,false,false,6);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

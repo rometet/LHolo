@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "structure/StructureLoader.h"
+#include "app/ScopeExit.h"
 #include "app/FutureResult.h"
 #include "app/NativeCallbackBoundary.h"
 
@@ -115,6 +116,7 @@ struct PendingStructureLoad {
     PendingStructureLoadMode            mode{PendingStructureLoadMode::Normal};
     std::string                         path;
     detail::SavedProjectionSnapshot     saved;
+    ProjectionRequestStamp             request;
     std::future<PreparedStructureLoadResult> future;
     std::chrono::steady_clock::time_point started;
     std::uint64_t                       sourceWorldEpoch{};
@@ -131,7 +133,8 @@ detail::LoadIntent gLoadIntent;
 
 void commitNormalStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
-    std::string const&               pathText
+    std::string const&               pathText,
+    ProjectionRequestStamp           request
 ) {
     auto& session = detail::StructureSession::getInstance();
     auto const renderBlocks = loaded->renderBlocks.size();
@@ -139,7 +142,7 @@ void commitNormalStructureLoad(
 
     projection::cancelNextStructureAnchorRequest();
     session.resetTransform();
-    session.replaceLoaded(std::move(loaded), pathText, status);
+    session.replaceLoaded(std::move(loaded), pathText, status, request);
     detail::invalidateMaterialList();
     saveSettings();
     logger().info("Loaded structure {}: {} renderable blocks", pathText, renderBlocks);
@@ -147,7 +150,8 @@ void commitNormalStructureLoad(
 
 void commitRestoredStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
-    detail::SavedProjectionSnapshot const& saved
+    detail::SavedProjectionSnapshot const& saved,
+    ProjectionRequestStamp                request
 ) {
     auto& session = detail::StructureSession::getInstance();
     session.setRotation(saved.transform.rotation);
@@ -165,7 +169,8 @@ void commitRestoredStructureLoad(
     session.replaceLoaded(
         std::move(loaded),
         saved.structurePath,
-        i18n::Message{i18n::TextKey::StatusRestoredPending}
+        i18n::Message{i18n::TextKey::StatusRestoredPending},
+        request
     );
     detail::invalidateMaterialList();
     logger().info(
@@ -178,6 +183,8 @@ void commitRestoredStructureLoad(
 }
 
 bool launchPreparedStructureLoad(PendingStructureLoad pending) {
+    auto const request=pending.request;bool launched{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!launched)schematic::failProjectionRequest(request);});
     auto path = detail::pathFromUtf8(pending.path);
     try {
         pending.future = std::async(
@@ -205,6 +212,7 @@ bool launchPreparedStructureLoad(PendingStructureLoad pending) {
         return false;
     }
     gPendingStructureLoad.emplace(std::move(pending));
+    launched=true;
     logger().info("Preparing structure asynchronously: {}", gPendingStructureLoad->path);
     return true;
 }
@@ -213,13 +221,15 @@ bool startPreparedStructureLoad(
     PendingStructureLoadMode mode,
     std::string pathText,
     std::uint64_t ticket,
-    detail::SavedProjectionSnapshot const& saved = {}
+    detail::SavedProjectionSnapshot const& saved = {},
+    ProjectionRequestStamp request = {}
 ) {
     PendingStructureLoad pending;
     pending.mode = mode;
     pending.path = std::move(pathText);
     pending.ticket = ticket;
     pending.saved = saved;
+    pending.request = request;
     pending.started = std::chrono::steady_clock::now();
     if (auto const view = capture::getClientViewSnapshot()) {
         pending.sourceWorldEpoch = view->worldEpoch;
@@ -244,6 +254,8 @@ void processCompletedStructureLoad() {
     // get() consumes the future even when it throws. Retire the slot before
     // fallible error/status formatting, preserving admission of the next job.
     auto pending = app::takePendingValue(gPendingStructureLoad);
+    bool committed{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!committed)schematic::failProjectionRequest(pending.request);});
     auto const mode = pending.mode;
     auto const& path = pending.path;
     auto const& saved = pending.saved;
@@ -322,10 +334,11 @@ void processCompletedStructureLoad() {
 
     gLoadIntent.applyIfCurrent(ticket, [&] {
         if (mode == PendingStructureLoadMode::Restore) {
-            commitRestoredStructureLoad(std::move(loaded), saved);
+            commitRestoredStructureLoad(std::move(loaded), saved, pending.request);
         } else {
-            commitNormalStructureLoad(std::move(loaded), path);
+            commitNormalStructureLoad(std::move(loaded), path, pending.request);
         }
+        committed=true;
     });
 }
 
@@ -632,6 +645,7 @@ void processPendingActions() {
 }
 
 void resetDimensionSession() {
+    schematic::retireActiveProjection();
     uiState().cancelMenuRoutes();
     uiState().clearMaterialHud();
 }
@@ -1285,6 +1299,10 @@ void recordProjectionAnchor(int x, int y, int z) {
     detail::StructureSession::getInstance().recordProjectionAnchor(x, y, z);
     saveSettings();
 }
+bool recordProjectionAnchor(std::shared_ptr<LoadedStructure const> const& expected,std::uint64_t generation,int x,int y,int z) {
+    if(!detail::StructureSession::getInstance().recordProjectionAnchor(expected,generation,x,y,z))return false;
+    saveSettings();return true;
+}
 
 // Hotbar lock for the Alt+wheel projection offset: engages only while the
 // gesture is enabled, a projection is loaded AND the Alt key is held.
@@ -1306,13 +1324,18 @@ void requestStructureFileLoad(std::string pathText) {
     }
 
     auto const path = detail::pathFromUtf8(pathText);
+    auto const request = schematic::beginProjectionRequest();
+    bool handedOff{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
-        (void)startPreparedStructureLoad(
+        handedOff=startPreparedStructureLoad(
             PendingStructureLoadMode::Normal,
             std::move(pathText),
-            ticket
+            ticket,
+            {},
+            request
         );
         return;
     }
@@ -1326,23 +1349,27 @@ void requestStructureFileLoad(std::string pathText) {
         logger().error("Could not load structure {}: {}", pathText, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText); });
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText, request);handedOff=true; });
 }
 
-void restoreSavedProjection() {
+void restoreSavedProjection(std::uint64_t placementId) {
     auto& session = detail::StructureSession::getInstance();
     auto const saved = session.savedProjection();
     auto const& savedPath = saved.structurePath;
 
     auto const path = detail::pathFromUtf8(savedPath);
+    auto const request = schematic::beginProjectionRequest(placementId);
+    bool handedOff{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
-        (void)startPreparedStructureLoad(
+        handedOff=startPreparedStructureLoad(
             PendingStructureLoadMode::Restore,
             savedPath,
             ticket,
-            saved
+            saved,
+            request
         );
         return;
     }
@@ -1356,7 +1383,7 @@ void restoreSavedProjection() {
         logger().error("Could not restore structure {}: {}", savedPath, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitRestoredStructureLoad(std::move(loaded), saved); });
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitRestoredStructureLoad(std::move(loaded), saved, request);handedOff=true; });
 }
 
 namespace {
@@ -1404,7 +1431,8 @@ void shutdownPendingStructureLoad() {
     });
 }
 
-void clear() {
+void clear(bool preserveQueuedVerification) {
+    schematic::retireActiveProjection(preserveQueuedVerification);
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusProjectionClosed});
     uiState().clearMaterials();
 }

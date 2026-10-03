@@ -3,6 +3,7 @@
 #include "structure/Verification.h"
 #include "structure/VerificationSelection.h"
 #include "structure/ManualVerificationControl.h"
+#include "structure/ActiveProjection.h"
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +35,7 @@ struct Snapshot {
     std::string library, status;
     MistakeFilter filter{MistakeFilter::Mistakes};
     VerificationPhase phase{VerificationPhase::NotVerified};
+    bool activeProjectionAvailable{};
 };
 Snapshot snapshot();
 void refreshFiles();
@@ -60,4 +62,8 @@ void reset();
 // Called by the existing material shutdown after callback drain.
 void shutdown();
 void rememberSelectedTransform();
+ProjectionRequestStamp beginProjectionRequest(std::uint64_t placementId=0);
+void failProjectionRequest(ProjectionRequestStamp const& request) noexcept;
+void publishProjectionActivation(ActiveProjectionEvent event) noexcept;
+void retireActiveProjection(bool preserveQueuedVerification=false) noexcept;
 } // namespace lholo::structure::schematic

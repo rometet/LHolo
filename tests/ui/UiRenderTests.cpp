@@ -197,6 +197,9 @@ void testVerifierControls() {
         context->NavNextActivateId=ImGui::FindWindowByName("VerifierControlTest")->GetID(lholo::i18n::tr(key));
         context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
     };
+    model.schematic.activeProjectionAvailable=false;
+    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==0,"update disabled until selected projection is active");
+    model.schematic.activeProjectionAvailable=true;
     activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"manual update action");
     report->running=true;report->checked=256;report->progress=.25f;
     model.schematic.phase=schematic::VerificationPhase::Running;frame();
@@ -223,6 +226,7 @@ void testDirectMenuRoutes() {
     lholo::structure::SavedPlacement placement;placement.id=1;placement.name="Route test";placement.file="test.mcstructure";
     model.schematic.session.document.placements={placement};model.schematic.session.document.selected=1;
     model.schematic.files={"test.mcstructure"};
+    model.hasLoadedStructure=true;model.materials={{"Stone",{},"minecraft:stone",64,64}};
     std::size_t verifyCalls{},placementCalls{};MenuActions actions;
     actions.verifySchematic=[&]{++verifyCalls;};actions.placeSchematic=[&](std::string const&){++placementCalls;};
     auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
@@ -237,16 +241,19 @@ void testDirectMenuRoutes() {
     applyMenuRoutePresentation(model,MenuRoute::Placed);frame();frame();frame();
     check(model.page==MenuPage::Schematics,"placed route opens existing schematics page");
     auto* page=pageWindow();check(page && page->ScrollMax.y>0,"compact schematics page scrolls");
-    applyMenuRoutePresentation(model,MenuRoute::Placed);frame();frame();
-    auto const placedScroll=page->Scroll.y;check(placedScroll>0,"placed route scrolls to placement section");
+    check(page->Scroll.y==0,"cold placed route starts at its own placement section");
+    bool placementSectionVisible{};
+    for(auto* window:context->Windows)if(window->Active && std::string_view{window->Name}.find("##SchematicPlacements")!=std::string_view::npos)
+        placementSectionVisible=window->Pos.y<page->ClipRect.Max.y;
+    check(placementSectionVisible,"cold placed route shows placement controls without opening files first");
     applyMenuRoutePresentation(model,MenuRoute::Files);frame();frame();
-    check(page->Scroll.y<placedScroll,"files route returns to file section");
+    check(model.page==MenuPage::Projection && page->Scroll.y==0,"files route opens its dedicated file page at top");
     applyMenuRoutePresentation(model,MenuRoute::Verification);frame();frame();
     check(model.page==MenuPage::Verification,"verification route opens dedicated page");
     check(verifyCalls==0,"opening verification does not start a scan");
     applyMenuRoutePresentation(model,MenuRoute::Materials);frame();frame();
-    check(model.page==MenuPage::Projection,"materials route opens projection page");
-    check(context->OpenPopupStack.Size>0,"materials route opens existing materials popup");
+    check(model.page==MenuPage::Materials,"materials route opens its dedicated page");
+    check(context->OpenPopupStack.Size==0,"materials page needs no intermediate popup");
     check(verifyCalls==0 && placementCalls==0,"navigation does not verify or place structures");
     check(model.directMenuRoute==MenuRoute::None,"route presentation is consumed once");
     resetFluentTheme();ImGui::DestroyContext(context);
@@ -294,6 +301,7 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     model.materialCount = 32;
     model.sizeX=64;model.sizeY=256;model.sizeZ=31;
     model.schematic.worldAvailable=state!=0;
+    model.schematic.activeProjectionAvailable=state!=0;
     model.schematic.session.writable=state!=0;
     model.schematic.library="schematics/???";
     model.schematic.files={"a.mcstructure","folder/very-long-test-name.litematic"};

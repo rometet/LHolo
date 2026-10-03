@@ -258,5 +258,9 @@
   "hotkey.openMaterials": "打开材料列表",
   "hotkey.routeConflict": "与%s冲突；直接快捷键已禁用。",
   "hotkey.routeReserved": "F11保留用于全屏切换；直接快捷键已禁用。",
-  "hotkey.routeUnavailable": "文本输入监视尚未就绪，直接快捷键已禁用。"
+  "hotkey.routeUnavailable": "文本输入监视尚未就绪，直接快捷键已禁用。",
+  "page.files": "文件",
+  "page.placed": "放置",
+  "page.materials": "材料",
+  "material.refresh": "刷新材料"
 }

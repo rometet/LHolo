@@ -18,6 +18,7 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics);
 void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
+void renderMaterialsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderCreateStructurePage(
     MenuModel& model, MenuActions const& actions, UiMetrics const& metrics
 );

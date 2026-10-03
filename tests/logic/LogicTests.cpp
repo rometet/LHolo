@@ -26,6 +26,7 @@
 #include "ManualPlacementChecks.h"
 #include "ManualVerificationChecks.h"
 #include "DirectMenuChecks.h"
+#include "ActiveProjectionChecks.h"
 #include "CompanionCallbackChecks.h"
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
@@ -61,6 +62,16 @@
 #include <Windows.h>
 #include "SchematicChecks.h"
 #include "io/AtomicOutput.h"
+
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#ifdef DELETE
+#undef DELETE
+#endif
 
 namespace {
 
@@ -1574,7 +1585,11 @@ void testStructureSession() {
     session.setLayerAxis(LayerAxis::X);
     session.setDisplayLayer(4);
 
-    session.recordProjectionAnchor(10, 20, 30);
+    auto const activeGeneration=session.loaded()->generation;
+    LHOLO_CHECK(!session.recordProjectionAnchor({},activeGeneration,90,91,92));
+    LHOLO_CHECK(!session.recordProjectionAnchor(loaded,activeGeneration+1,90,91,92));
+    LHOLO_CHECK(!session.savedProjection().available);
+    LHOLO_CHECK(session.recordProjectionAnchor(loaded,activeGeneration,10,20,30));
     auto const saved = session.savedProjection();
     LHOLO_CHECK(saved.available);
     LHOLO_CHECK(saved.anchorX == 10);
@@ -1593,12 +1608,16 @@ void testStructureSession() {
         "layered.mcstructure",
         lholo::i18n::Message{lholo::i18n::TextKey::StatusRestoredPending}
     );
+    LHOLO_CHECK(!session.recordProjectionAnchor(loaded,activeGeneration,90,91,92));
+    LHOLO_CHECK(session.savedProjection().anchorX==10);
     session.setLayerDisplayMode(LayerDisplayMode::UpToCurrent);
     session.setDisplayLayer(7);
     session.setLayerAxis(LayerAxis::Y);
     session.recordProjectionAnchor(40, 50, 60);
     session.clearLoaded(lholo::i18n::Message{lholo::i18n::TextKey::StatusProjectionClosed});
     session.setDisplayLayer(0); // Empty-menu clamping must not alter the saved layer.
+    LHOLO_CHECK(!session.recordProjectionAnchor(layered,layered->generation,90,91,92));
+    LHOLO_CHECK(session.savedProjection().anchorX==40);
     auto const layeredSaved = session.savedProjection();
     LHOLO_CHECK(layeredSaved.transform.layerDisplayMode == LayerDisplayMode::UpToCurrent);
     LHOLO_CHECK(layeredSaved.transform.displayLayer == 7);
@@ -2344,6 +2363,7 @@ void testI18n() {
 int main() {
     try {
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
     testLiquidReplayRules();
     testProjectionCoordinateBounds();

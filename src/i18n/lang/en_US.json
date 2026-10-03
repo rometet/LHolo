@@ -258,5 +258,9 @@
   "hotkey.openMaterials": "Open materials",
   "hotkey.routeConflict": "Conflicts with %s; direct shortcut disabled.",
   "hotkey.routeReserved": "F11 is reserved for fullscreen; direct shortcut disabled.",
-  "hotkey.routeUnavailable": "Direct shortcuts unavailable: text input tracking is not ready."
+  "hotkey.routeUnavailable": "Direct shortcuts unavailable: text input tracking is not ready.",
+  "page.files": "Files",
+  "page.placed": "Placed",
+  "page.materials": "Materials",
+  "material.refresh": "Refresh materials"
 }

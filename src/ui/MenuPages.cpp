@@ -26,7 +26,7 @@ char const* pageName(MenuPage page) {
     // message" sentinel behind, which the assertion below rejects: a missing
     // initializer alone would only be value-initialized, not diagnosed.
     static constexpr std::array<i18n::TextKey, kMenuPageCount> kPageKeys{
-        i18n::TextKey::PageProjection,
+        i18n::TextKey::PageFiles,
         i18n::TextKey::PageCreateStructure,
         i18n::TextKey::PageTransform,
         i18n::TextKey::PageRender,
@@ -34,8 +34,9 @@ char const* pageName(MenuPage page) {
         i18n::TextKey::PageHotkeys,
         i18n::TextKey::PageInterface,
         i18n::TextKey::PageExperimental,
-        i18n::TextKey::PageSchematics,
-        i18n::TextKey::PageVerification
+        i18n::TextKey::PagePlaced,
+        i18n::TextKey::PageVerification,
+        i18n::TextKey::PageMaterials
     };
     constexpr auto allPagesNamed
         = [](std::array<i18n::TextKey, kMenuPageCount> const& keys) constexpr {
@@ -141,14 +142,10 @@ void renderPathRow(MenuModel& model, MenuActions const& actions, UiMetrics const
     }
 }
 
-void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+void renderSchematicFilesSection(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     using namespace structure;
     auto const& snap = model.schematic;
-    auto const& placements = snap.session.document;
     auto const tr = [](i18n::TextKey key){return i18n::tr(key);};
-    if (!snap.status.empty()) ImGui::TextWrapped("%s",snap.status.c_str());
-    if (!snap.session.status.empty()) ImGui::TextWrapped("%s",snap.session.status.c_str());
-    auto const filesTop=ImGui::GetCursorScreenPos().y-ImGui::GetWindowPos().y;
     renderSection("##SchematicFiles",tr(i18n::TextKey::SchematicFiles),metrics,[&] {
         ImGui::TextWrapped("%s",snap.library.c_str());
         if(ImGui::Button(tr(i18n::TextKey::SchematicRefresh)) && actions.refreshSchematics)actions.refreshSchematics();
@@ -163,8 +160,15 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             }
         }ImGui::EndChild();ImGui::EndDisabled();
     });
-    if(model.directMenuRoute==input::MenuRoute::Files)ImGui::SetScrollFromPosY(filesTop,0);
-    auto const placedTop=ImGui::GetCursorScreenPos().y-ImGui::GetWindowPos().y;
+}
+
+void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    using namespace structure;
+    auto const& snap=model.schematic;
+    auto const& placements=snap.session.document;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
+    if(!snap.status.empty())ImGui::TextWrapped("%s",snap.status.c_str());
+    if(!snap.session.status.empty())ImGui::TextWrapped("%s",snap.session.status.c_str());
     renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicDeselect)) && actions.selectPlacement)actions.selectPlacement(0);
@@ -179,23 +183,22 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             if(ImGui::Button(tr(i18n::TextKey::SchematicMove)) && actions.movePlacementToFeet)actions.movePlacementToFeet(p.id);
             if(!metrics.compact)ImGui::SameLine();
             if(ImGui::Button(tr(i18n::TextKey::SchematicDelete)) && actions.deletePlacement)actions.deletePlacement(p.id);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));
             char name[129]{};std::snprintf(name,sizeof(name),"%s",p.name.c_str());
-            if(ImGui::InputText("Name##PlacementName",name,sizeof(name)))p.name=name;
-            auto coordinate = [&](char const* label,std::int64_t& value){
-                ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::InputScalar(label,ImGuiDataType_S64,&value);
+            renderValueRow("Name",metrics,[&]{if(ImGui::InputText("##PlacementName",name,sizeof(name)))p.name=name;});
+            auto coordinate = [&](char const* label,char const* id,std::int64_t& value){
+                renderValueRow(label,metrics,[&]{ImGui::InputScalar(id,ImGuiDataType_S64,&value);});
             };
-            coordinate("X##PlacementX",p.origin.x);coordinate("Y##PlacementY",p.origin.y);coordinate("Z##PlacementZ",p.origin.z);
+            coordinate("X","##PlacementX",p.origin.x);coordinate("Y","##PlacementY",p.origin.y);coordinate("Z","##PlacementZ",p.origin.z);
             char const* rotations[]{"0","90","180","270"};char const* mirrors[]{"None","X","Z"};
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelRotation),&p.rotation,rotations,4);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelMirror),&p.mirror,mirrors,3);
-            ImGui::Checkbox(tr(i18n::TextKey::SchematicVisible),&p.visible);
-            ImGui::Checkbox(tr(i18n::TextKey::SchematicExtras),&p.countExtras);
+            renderValueRow(tr(i18n::TextKey::LabelRotation),metrics,[&]{ImGui::Combo("##PlacementRotation",&p.rotation,rotations,4);});
+            renderValueRow(tr(i18n::TextKey::LabelMirror),metrics,[&]{ImGui::Combo("##PlacementMirror",&p.mirror,mirrors,3);});
+            renderCheckboxRow("##PlacementVisible",tr(i18n::TextKey::SchematicVisible),p.visible,metrics);
+            renderCheckboxRow("##PlacementExtras",tr(i18n::TextKey::SchematicExtras),p.countExtras,metrics);
             char const* axes[]{"Y (legacy)","X (legacy)","Material", "Bottom -> Top","Top -> Bottom","West -> East","East -> West","North -> South","South -> North"};
             int axis=toInt(p.layerAxis),mode=toInt(p.layerMode);
             char const* modes[]{tr(i18n::TextKey::ComboRangeAll),tr(i18n::TextKey::ComboRangeSingle),tr(i18n::TextKey::ComboRangeUpToCurrent),tr(i18n::TextKey::ComboRangeFromCurrent)};
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelLayerAxis),&axis,axes,9);p.layerAxis=layerAxisFromInt(axis);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelDisplayRange),&mode,modes,4);p.layerMode=layerDisplayModeFromInt(mode);
+            renderValueRow(tr(i18n::TextKey::LabelLayerAxis),metrics,[&]{ImGui::Combo("##PlacementLayerAxis",&axis,axes,9);});p.layerAxis=layerAxisFromInt(axis);
+            renderValueRow(tr(i18n::TextKey::LabelDisplayRange),metrics,[&]{ImGui::Combo("##PlacementLayerMode",&mode,modes,4);});p.layerMode=layerDisplayModeFromInt(mode);
             auto const size=PlacementTransform{{model.sizeX,model.sizeY,model.sizeZ},{},p.rotation,p.mirror}.placedSize();
             int const max=p.layerAxis==LayerAxis::Material?std::max(0,model.materialCount-1):std::max(0,(p.layerAxis==LayerAxis::X?model.sizeX:layerCount(size,p.layerAxis))-1);
             renderSteppedInt("PlacementLayer",tr(i18n::TextKey::LabelCurrentLayer),p.layer,0,max,metrics);
@@ -203,8 +206,13 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
         }
         ImGui::EndDisabled();
     });
-    if(model.directMenuRoute==input::MenuRoute::Placed)ImGui::SetScrollFromPosY(placedTop,0);
     if(placements.selected && ImGui::Button(tr(i18n::TextKey::PageVerification)))model.page=MenuPage::Verification;
+    renderTransformPage(model,metrics);
+}
+
+void renderSelectedMaterials(MenuModel const& model) {
+    auto const& snap=model.schematic;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
     auto const report=snap.report;
     if(!report || report->running)return;
     ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));
@@ -226,9 +234,10 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
     if(p)ImGui::TextWrapped("%s",p->name.c_str());
     else ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierNoPlacement));
     bool const busy=snap.phase==VerificationPhase::Queued || snap.phase==VerificationPhase::Running;
-    ImGui::BeginDisabled(!snap.worldAvailable || !p || !snap.session.writable || busy);
-    if(ImGui::Button(tr(i18n::TextKey::SchematicVerify)) && !busy && snap.worldAvailable && p
-        && snap.session.writable && actions.verifySchematic)actions.verifySchematic();
+    bool const canVerify=snap.worldAvailable && p && snap.session.writable && snap.activeProjectionAvailable && !busy;
+    ImGui::BeginDisabled(!canVerify);
+    if(ImGui::Button(tr(i18n::TextKey::SchematicVerify)) && canVerify
+        && actions.verifySchematic)actions.verifySchematic();
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!busy);
@@ -351,7 +360,7 @@ void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetric
             ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HintNoSavedProjection));
         }
     });
-
+    renderSchematicFilesSection(model,actions,metrics);
 }
 
 bool renderCapturePoint(
@@ -892,7 +901,7 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
             ImGui::PushID(static_cast<int>(hotkey.id));
             auto const rowStart = ImGui::GetCursorPosX();
             if (metrics.compact) {
-                ImGui::TextUnformatted(hotkey.label.c_str());
+                ImGui::TextWrapped("%s",hotkey.label.c_str());
             } else {
                 // Put the action first: scanning the left edge now explains
                 // what a shortcut does before showing its current binding.
@@ -906,22 +915,25 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
             }
             auto const clearWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ButtonClearHotkey)).x
                 + ImGui::GetStyle().FramePadding.x * 2.0f;
+            auto const resetWidth=ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ButtonResetHotkey)).x
+                + ImGui::GetStyle().FramePadding.x*2.0f;
             auto const available = ImGui::GetContentRegionAvail().x;
             auto const controlSpacing = ImGui::GetStyle().ItemSpacing.x;
-            auto const requiredWidth = preferredBindingWidth + clearWidth + controlSpacing;
-            auto const totalWidth = std::min(available, requiredWidth);
-            auto const bindWidth = std::max(0.0f, totalWidth - clearWidth - controlSpacing);
+            auto const minimumBinding=ImGui::CalcTextSize("---").x+bindingPadding;
+            bool const stacked=available<minimumBinding+resetWidth+clearWidth+controlSpacing*2;
+            auto const bindWidth=stacked?std::max(1.f,available):std::min(preferredBindingWidth,
+                std::max(1.f,available-resetWidth-clearWidth-controlSpacing*2));
             auto const label = hotkey.capturing
                 ? i18n::tr(i18n::TextKey::HintPressKeys)
                 : hotkey.display.c_str();
             if (ImGui::Button(label, ImVec2(bindWidth, 0.0f)) && !hotkey.capturing && actions.beginHotkeyCapture) {
                 actions.beginHotkeyCapture(hotkey.id);
             }
-            ImGui::SameLine();
+            if(!stacked)ImGui::SameLine();
             if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonResetHotkey)) && actions.resetHotkey) {
                 actions.resetHotkey(hotkey.id);
             }
-            ImGui::SameLine();
+            if(!stacked || available>=resetWidth+clearWidth+controlSpacing)ImGui::SameLine();
             if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonClearHotkey)) && actions.clearHotkey) {
                 actions.clearHotkey(hotkey.id);
             }
@@ -1063,6 +1075,106 @@ void renderInterfacePage(MenuModel& model, UiMetrics const& metrics) {
     });
 }
 
+void renderMaterialRows(MenuModel const& model,UiMetrics const& metrics,float popupDensity,float areaHeight=0) {
+    constexpr float itemColumnWeight=.38f,typeColumnWeight=.42f,totalColumnWeight=.20f;
+    auto const rowHeight=(ImGui::GetTextLineHeight()+metrics.gap*.55f)*popupDensity;
+    auto const materialName=[](MaterialRow const& row){return materialDisplayName(row.displayName,row.nameKey);};
+    if (!model.hasLoadedStructure) {
+        ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::StatusNotLoaded));
+    } else {
+        std::uint64_t total{};
+        for (auto const& item : model.materials) {
+            if (std::numeric_limits<std::uint64_t>::max() - total < item.count) {
+                total = std::numeric_limits<std::uint64_t>::max();
+                break;
+            }
+            total += item.count;
+        }
+        ImGui::Text(
+            i18n::tr(i18n::TextKey::LabelMaterialSummary),
+            static_cast<unsigned long long>(total),
+            model.materials.size()
+        );
+        ImGui::Separator();
+        // The popup header and Close button are fixed. Only this child consumes
+        // the wheel; its visual scrollbar stays hidden to match the rest of the
+        // menu, while the non-scrollable parent prevents wheel propagation.
+        auto const materialAreaHeight = areaHeight>0?areaHeight:std::max(1.0f, ImGui::GetContentRegionAvail().y);
+        if (ImGui::BeginChild(
+                "##MaterialList",
+                ImVec2(0.0f, materialAreaHeight),
+                false,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings
+            )) {
+            if (model.materials.empty()) {
+                ImGui::TextDisabled(
+                    "%s", i18n::tr(i18n::TextKey::HintNoPlaceableMaterials)
+                );
+            } else if (ImGui::BeginTable(
+                           "##MaterialTable", 3,
+                           ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg
+                               | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings
+                       )) {
+                ImGui::TableSetupColumn(
+                    i18n::tr(i18n::TextKey::ColumnItem),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    itemColumnWeight
+                );
+                ImGui::TableSetupColumn(
+                    i18n::tr(i18n::TextKey::ColumnIdentifier),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    typeColumnWeight
+                );
+                ImGui::TableSetupColumn(
+                    i18n::tr(i18n::TextKey::ColumnTotal),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    totalColumnWeight
+                );
+                ImGui::TableHeadersRow();
+                auto renderCenteredCell = [&](char const* text) {
+                    auto const cellWidth = ImGui::GetContentRegionAvail().x;
+                    auto const textSize = ImGui::CalcTextSize(text, nullptr, false, cellWidth);
+                    auto const verticalOffset = std::max(
+                        0.0f,
+                        (rowHeight - textSize.y) * 0.5f
+                    );
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalOffset);
+                    if (textSize.y > ImGui::GetTextLineHeight() + 0.5f) {
+                        ImGui::TextWrapped("%s", text);
+                    } else {
+                        ImGui::TextUnformatted(text);
+                    }
+                };
+                for (auto const& item : model.materials) {
+                    ImGui::TableNextRow(
+                        ImGuiTableRowFlags_None,
+                        (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity
+                    );
+                    ImGui::TableSetColumnIndex(0);
+                    renderCenteredCell(materialName(item));
+                    ImGui::TableSetColumnIndex(1);
+                    renderCenteredCell(item.typeName.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    auto const countText = std::to_string(item.count);
+                    renderCenteredCell(countText.c_str());
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::EndChild();
+    }
+}
+
+void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics const& metrics) {
+    renderSection("##Materials",i18n::tr(i18n::TextKey::MaterialListTitle),metrics,[&]{
+        if(ImGui::Button(i18n::tr(i18n::TextKey::MaterialRefresh)) && actions.requestMaterials)actions.requestMaterials();
+        auto const lines=static_cast<float>(std::min<std::size_t>(model.materials.size(),10)+2);
+        auto const height=std::max(1.f,std::min(ImGui::GetTextLineHeightWithSpacing()*lines,metrics.viewport.y*.45f));
+        renderMaterialRows(model,metrics,1.f,height);
+    });
+    renderSelectedMaterials(model);
+}
+
 void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     auto const popupName = materialPopupName();
     if (!ImGui::IsPopupOpen(popupName.c_str())) return;
@@ -1140,90 +1252,7 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
 
-    if (!model.hasLoadedStructure) {
-        ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::StatusNotLoaded));
-    } else {
-        std::uint64_t total{};
-        for (auto const& item : model.materials) {
-            if (std::numeric_limits<std::uint64_t>::max() - total < item.count) {
-                total = std::numeric_limits<std::uint64_t>::max();
-                break;
-            }
-            total += item.count;
-        }
-        ImGui::Text(
-            i18n::tr(i18n::TextKey::LabelMaterialSummary),
-            static_cast<unsigned long long>(total),
-            model.materials.size()
-        );
-        ImGui::Separator();
-        // The popup header and Close button are fixed. Only this child consumes
-        // the wheel; its visual scrollbar stays hidden to match the rest of the
-        // menu, while the non-scrollable parent prevents wheel propagation.
-        auto const materialAreaHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y);
-        if (ImGui::BeginChild(
-                "##MaterialList",
-                ImVec2(0.0f, materialAreaHeight),
-                false,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings
-            )) {
-            if (model.materials.empty()) {
-                ImGui::TextDisabled(
-                    "%s", i18n::tr(i18n::TextKey::HintNoPlaceableMaterials)
-                );
-            } else if (ImGui::BeginTable(
-                           "##MaterialTable", 3,
-                           ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg
-                               | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings
-                       )) {
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnItem),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    itemColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnIdentifier),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    typeColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnTotal),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    totalColumnWeight
-                );
-                ImGui::TableHeadersRow();
-                auto renderCenteredCell = [&](char const* text) {
-                    auto const cellWidth = ImGui::GetContentRegionAvail().x;
-                    auto const textSize = ImGui::CalcTextSize(text, nullptr, false, cellWidth);
-                    auto const verticalOffset = std::max(
-                        0.0f,
-                        (rowHeight - textSize.y) * 0.5f
-                    );
-                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalOffset);
-                    if (textSize.y > ImGui::GetTextLineHeight() + 0.5f) {
-                        ImGui::TextWrapped("%s", text);
-                    } else {
-                        ImGui::TextUnformatted(text);
-                    }
-                };
-                for (auto const& item : model.materials) {
-                    ImGui::TableNextRow(
-                        ImGuiTableRowFlags_None,
-                        (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity
-                    );
-                    ImGui::TableSetColumnIndex(0);
-                    renderCenteredCell(materialName(item));
-                    ImGui::TableSetColumnIndex(1);
-                    renderCenteredCell(item.typeName.c_str());
-                    ImGui::TableSetColumnIndex(2);
-                    auto const countText = std::to_string(item.count);
-                    renderCenteredCell(countText.c_str());
-                }
-                ImGui::EndTable();
-            }
-        }
-        ImGui::EndChild();
-    }
+    renderMaterialRows(model,metrics,popupDensity);
     ImGui::EndPopup();
 }
 
@@ -1233,11 +1262,11 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
     // Display frequent schematic routes together; enum values and widget IDs
     // remain stable for saved state and future direct hotkey routing.
     constexpr std::array navigation{
-        MenuPage::Projection,MenuPage::Verification,MenuPage::Schematics,
-        MenuPage::CreateStructure,MenuPage::Transform,MenuPage::Render,
+        MenuPage::Projection,MenuPage::Schematics,MenuPage::Verification,MenuPage::Materials,
+        MenuPage::CreateStructure,MenuPage::Render,
         MenuPage::Hud,MenuPage::Hotkeys,MenuPage::Interface,MenuPage::Experimental};
-    static_assert(navigation.size()==kMenuPageCount);
-    for (std::size_t index = 0; index < kMenuPageCount; ++index) {
+    static_assert(navigation.size()+1==kMenuPageCount); // Transform is included in Placed.
+    for (std::size_t index = 0; index < navigation.size(); ++index) {
         auto const page = navigation[index];
         auto const* name = pageName(page);
         auto const selected = model.page == page;

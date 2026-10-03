@@ -456,11 +456,12 @@ void renderStructureMenu() {
     applyMenuRoutePresentation(model,route);
     if(route==input::MenuRoute::Materials) {
         structure::requestMaterialList();
-        model.materialPopupRequested=true;
     }
     bool refreshModel = false;
     auto const actions = buildStructureMenuActions(refreshModel, model.captureRevision);
+    auto const previousPage=model.page;
     renderMenu(model, actions, metrics);
+    if(model.page==MenuPage::Materials && previousPage!=MenuPage::Materials)structure::requestMaterialList();
     uiState().setUiInteractionBlocked(ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive());
     gActivePage = model.page;
     if (!refreshModel) applyStructureMenuModel(model, effectiveScale);

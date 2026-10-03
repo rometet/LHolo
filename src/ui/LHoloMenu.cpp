@@ -44,7 +44,9 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
             ImGui::TextUnformatted("LHolo");
             ImGui::PopStyleColor();
-            ImGui::TextDisabled("PROJECTION CLIENT");
+            ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("PROJECTION CLIENT");
+            ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
             ImGui::Separator();
             ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
@@ -78,6 +80,7 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 case MenuPage::Projection: renderProjectionPage(model, actions, metrics); break;
                 case MenuPage::Schematics: renderSchematicsPage(model, actions, metrics); break;
                 case MenuPage::Verification: renderVerificationPage(model, actions, metrics); break;
+                case MenuPage::Materials: renderMaterialsPage(model, actions, metrics); break;
                 case MenuPage::CreateStructure: renderCreateStructurePage(model, actions, metrics); break;
                 case MenuPage::Experimental:
                     renderExperimentalPage(model, actions, metrics);
@@ -97,6 +100,7 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 // Both opening and rendering happen in this page child. Dear
                 // ImGui popup IDs are scoped to the current window.
                 renderMaterialPopup(model, metrics);
+                if(model.directMenuRoute!=input::MenuRoute::None)ImGui::SetScrollY(0);
             }
             ImGui::EndChild();
         }

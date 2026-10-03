@@ -258,5 +258,9 @@
   "hotkey.openMaterials": "開啟材料清單",
   "hotkey.routeConflict": "與%s衝突；直接快捷鍵已停用。",
   "hotkey.routeReserved": "F11保留用於全螢幕切換；直接快捷鍵已停用。",
-  "hotkey.routeUnavailable": "文字輸入監視尚未就緒，直接快捷鍵已停用。"
+  "hotkey.routeUnavailable": "文字輸入監視尚未就緒，直接快捷鍵已停用。",
+  "page.files": "檔案",
+  "page.placed": "配置",
+  "page.materials": "材料",
+  "material.refresh": "重新整理材料"
 }

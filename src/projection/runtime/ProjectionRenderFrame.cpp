@@ -137,7 +137,7 @@ bool enableStructureProjection(
     }
     attachProjectionWorldEvents(player->getLevel(), player->getDimensionBlockSource());
     initializePublishedBuildProgress(state.structure->renderBlocks.size());
-    structure::recordProjectionAnchor(state.anchor.x, state.anchor.y, state.anchor.z);
+    if(!structure::recordProjectionAnchor(state.structure,state.structureGeneration,state.anchor.x,state.anchor.y,state.anchor.z))return false;
     logger().info(
         "Structure projection enabled: {} renderable blocks at ({}, {}, {})",
         state.structure->renderBlocks.size(),
@@ -607,6 +607,25 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                     logger().error("Could not enable loaded structure projection");
                 } else {
                     session.cancelDimensionSuspension();
+                    // Publish an owned identity only after native activation and
+                    // anchor recording succeeded. Adoption/I/O happens in the
+                    // existing Present control plane, never under these locks.
+                    auto const committed=structure::detail::StructureSession::getInstance().snapshot();
+                    auto const view=structure::capture::getClientViewSnapshot();
+                    if(view && committed.loaded==state.structure
+                        && committed.loaded->generation==state.structureGeneration){
+                        auto const& t=committed.transform;
+                        structure::SavedPlacement placement;placement.dimension=state.dimensionId;
+                        placement.origin={static_cast<std::int64_t>(state.anchor.x)+t.offsetX,
+                            static_cast<std::int64_t>(state.anchor.y)+t.offsetY,
+                            static_cast<std::int64_t>(state.anchor.z)+t.offsetZ};
+                        placement.rotation=t.rotation;placement.mirror=t.mirror;placement.layerAxis=t.layerAxis;
+                        placement.layerMode=t.layerDisplayMode;placement.layer=t.displayLayer;
+                        placement.visible=t.visible;placement.countExtras=t.countExtras;
+                        structure::schematic::publishProjectionActivation({committed.request,view->worldEpoch,
+                            state.structureGeneration,state.activationGeneration,state.dimensionId,
+                            committed.loaded->sourcePath,std::move(placement)});
+                    }
                     if (activationStatus == DimensionActivationStatus::Resuming) {
                         structure::showActionHint(
                             i18n::Message{i18n::TextKey::ActionHintProjectionRestored},

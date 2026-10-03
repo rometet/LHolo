@@ -320,7 +320,11 @@
     LHOLO_TEXT_KEY("hotkey.openMaterials", HotkeyOpenMaterials, "") \
     LHOLO_TEXT_KEY("hotkey.routeConflict", HotkeyRouteConflict, "") \
     LHOLO_TEXT_KEY("hotkey.routeReserved", HotkeyRouteReserved, "") \
-    LHOLO_TEXT_KEY("hotkey.routeUnavailable", HotkeyRouteUnavailable, "")
+    LHOLO_TEXT_KEY("hotkey.routeUnavailable", HotkeyRouteUnavailable, "") \
+    LHOLO_TEXT_KEY("page.files", PageFiles, "") \
+    LHOLO_TEXT_KEY("page.placed", PagePlaced, "") \
+    LHOLO_TEXT_KEY("page.materials", PageMaterials, "") \
+    LHOLO_TEXT_KEY("material.refresh", MaterialRefresh, "")
 
 namespace lholo::i18n {
 

@@ -31,6 +31,7 @@ enum class MenuPage : std::uint8_t {
     Experimental,
     Schematics,
     Verification,
+    Materials,
     Count
 };
 
