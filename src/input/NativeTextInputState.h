@@ -22,8 +22,8 @@ public:
     }
 private:
     static constexpr std::size_t index(NativeTextInputFlag flag) {
-        return flag==NativeTextInputFlag::Focus?0:flag==NativeTextInputFlag::Keyboard?1:2;
+        return flag==NativeTextInputFlag::Focus?0:flag==NativeTextInputFlag::Keyboard?1:flag==NativeTextInputFlag::Ime?2:3;
     }
-    std::array<std::atomic_uint64_t,3> mState{};
+    std::array<std::atomic_uint64_t,4> mState{};
 };
 } // namespace lholo::input

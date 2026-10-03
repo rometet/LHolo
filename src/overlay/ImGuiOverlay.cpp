@@ -681,7 +681,7 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
             return 1;
         }
         if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam),
-                isForegroundGameWindow(window) && !companion::isVisible())) {
+                isForegroundGameWindow(window) && !companion::isVisible(),reinterpret_cast<std::uintptr_t>(window))) {
             if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                 companion::close();
             }
@@ -728,7 +728,7 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         if (mouseKey != 0) {
             if (message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
                 if (structure::handleGuiHotkeyKeyDown(mouseKey,
-                        isForegroundGameWindow(window) && !companion::isVisible())) {
+                        isForegroundGameWindow(window) && !companion::isVisible(),reinterpret_cast<std::uintptr_t>(window))) {
                     if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                         companion::close();
                     }

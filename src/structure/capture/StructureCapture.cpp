@@ -7,7 +7,7 @@
 #include "projection/core/ProjectionCoordinateBounds.h"
 #include "app/ListenerRetirement.h"
 #include "ll/api/service/Bedrock.h"
-#include "mc/client/ClientInstance.h"
+#include "mc/client/game/ClientInstance.h"
 #include <Windows.h>
 
 #include <algorithm>

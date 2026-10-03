@@ -385,22 +385,21 @@ bool isMenuInputCaptured() {
     return isGuiVisible() || isInputTransitionBlocked();
 }
 
-static bool requestMenuRoute(input::MenuRoute route,bool allowDirectRoutes) {
+static bool requestMenuRoute(input::MenuRoute route,bool allowDirectRoutes,std::uintptr_t gameWindow) {
     if(route<input::MenuRoute::Placed || route>input::MenuRoute::Materials)return false;
     auto const generation=uiState().menuRouteGeneration();
     auto const view=capture::getClientViewSnapshot();
     return capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
         auto const now=GetTickCount64();
         bool const gameInput=current && now>=current->sampledAtMillis && now-current->sampledAtMillis<=250 && current->gameplayInputEnabled;
-        input::DirectMenuInputContext const context{allowDirectRoutes,overlay::companion::isVisible(),isGuiVisible(),gameInput,
+        input::DirectMenuInputContext const context{allowDirectRoutes && input::directMenuForegroundMatches(gameWindow,reinterpret_cast<std::uintptr_t>(GetForegroundWindow())),overlay::companion::isVisible(),isGuiVisible(),gameInput,
             uiState().uiInteractionBlocked(),uiState().nativeTextInputBlocked()};
         if(!input::directMenuInputAllowed(context))return false;
-        return uiState().queueMenuRoute({route,generation,current?current->worldEpoch:0,
-            reinterpret_cast<std::uintptr_t>(GetForegroundWindow())});
+        return uiState().queueMenuRoute({route,generation,current?current->worldEpoch:0,gameWindow});
     });
 }
 
-bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes) {
+bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes,std::uintptr_t gameWindow) {
     auto const modifierKey = ui::isModifierKey(virtualKey);
     if (virtualKey == VK_CONTROL || virtualKey == VK_LCONTROL || virtualKey == VK_RCONTROL) {
         uiState().setControlHeld(true);
@@ -465,7 +464,7 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes) {
             if(!hotkey.key || hotkey.key!=virtualKey || hotkey.modifiers!=modifiers)continue;
             if(uiState().firstHotkeyConflict(index))continue;
             if(now>=uiState().ignoreHotkeyUntil() && uiState().tryPressHotkey(index)) {
-                if(!requestMenuRoute(input::menuRouteForHotkey(index),allowDirectRoutes)) {
+                if(!requestMenuRoute(input::menuRouteForHotkey(index),allowDirectRoutes,gameWindow)) {
                     uiState().releaseHotkey(index);
                     return false;
                 }

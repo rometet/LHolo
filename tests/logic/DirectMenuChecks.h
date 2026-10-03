@@ -1,4 +1,7 @@
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include "input/MenuRoute.h"
 #include "input/NativeTextInputState.h"
@@ -16,6 +19,9 @@ template<class Check> void runDirectMenuChecks(Check check) {
     check(menuRouteForHotkey(14)==MenuRoute::Verification);
     check(menuRouteForHotkey(15)==MenuRoute::Materials);
     check(menuRouteForHotkey(16)==MenuRoute::None);
+    check(directMenuForegroundMatches(17,17));
+    check(!directMenuForegroundMatches(17,18));
+    check(!directMenuForegroundMatches(0,0));
     DirectMenuInputContext context{true,false,false,true,false,false};
     check(directMenuInputAllowed(context));
     context.nativeTextInputBlocked=true;check(!directMenuInputAllowed(context));
@@ -26,7 +32,7 @@ template<class Check> void runDirectMenuChecks(Check check) {
     context.lholoVisible=true;check(directMenuInputAllowed(context));
 
     NativeTextInputState native;
-    for(auto flag:{NativeTextInputFlag::Focus,NativeTextInputFlag::Keyboard,NativeTextInputFlag::Ime}) {
+    for(auto flag:{NativeTextInputFlag::Focus,NativeTextInputFlag::Keyboard,NativeTextInputFlag::Ime,NativeTextInputFlag::GameplayDisabled}) {
         native.gain(flag);auto old=native.token(flag);native.gain(flag);
         check(!native.clearIfCurrent(flag,old));check(native.blocked());
         check(native.clearIfCurrent(flag,native.token(flag)));check(!native.blocked());
@@ -39,7 +45,7 @@ template<class Check> void runDirectMenuChecks(Check check) {
     check(native.clearIfCurrent(NativeTextInputFlag::Keyboard,native.token(NativeTextInputFlag::Keyboard)));
     check(!native.blocked());
 
-    auto& state=structure::StructureUiState::getInstance();
+    auto& state=structure::detail::StructureUiState::getInstance();
     state.resetWorldSession();state.resetHotkeys();state.resetHotkeyState();
     check(state.nativeTextInputBlocked());state.setNativeTextInputHooksReady(true);
     check(!state.nativeTextInputBlocked());
@@ -79,6 +85,9 @@ template<class Check> void runDirectMenuChecks(Check check) {
     state.setNativeTextInputFlag(NativeTextInputFlag::Focus,true);
     state.clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Focus,oldFocus);check(state.nativeTextInputBlocked());
     state.clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Focus,state.nativeTextInputToken(NativeTextInputFlag::Focus));
+    check(queue(MenuRoute::Files));state.setNativeTextInputFlag(NativeTextInputFlag::GameplayDisabled,true);
+    check(!state.guiVisible());check(!queue(MenuRoute::Verification));
+    state.clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::GameplayDisabled,state.nativeTextInputToken(NativeTextInputFlag::GameplayDisabled));
     check(queue(MenuRoute::Files));state.resetHotkeyState();check(!state.guiVisible());
     state.setGuiVisible(true);check(queue(MenuRoute::Placed));state.cancelMenuRoutes();check(state.guiVisible());
     state.setGuiVisible(false);state.resetHotkeys();state.resetHotkeyState();state.setNativeTextInputHooksReady(false);

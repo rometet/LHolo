@@ -10,6 +10,8 @@
 #include "structure/StructureUiState.h"
 
 #include "ll/api/memory/Hook.h"
+#include "ll/api/service/Bedrock.h"
+#include "mc/client/game/ClientInstance.h"
 
 #include "mc/deps/input/Keyboard.h"
 #include "mc/deps/input/MouseAction.h"
@@ -26,7 +28,7 @@ namespace {
 
 MenuInputGuardStatus gInstallStatus{};
 std::atomic_bool gInputGuardReady{};
-std::array<bool,6> gTextInputHooksInstalled{};
+std::array<bool,7> gTextInputHooksInstalled{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
@@ -88,6 +90,30 @@ LL_TYPE_INSTANCE_HOOK(MenuImeEndHook,ll::memory::HookPriority::Highest,
     auto const token=tracking?structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::Ime):0;
     origin();
     if(tracking && gInputGuardReady.load(std::memory_order_acquire))structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Ime,token);
+}
+
+// Invalidate routes at a game GUI transition, before the next player-tick
+// snapshot. Native access stays inside this owning engine callback.
+LL_TYPE_INSTANCE_HOOK(MenuGameplayInputHook,ll::memory::HookPriority::Highest,
+    ClientInstance,&ClientInstance::$setInGameInputEnabled,void,bool enabled) {
+    app::hook_lifecycle::DetourGuard guard;
+    bool tracking{};
+    std::uint64_t token{};
+    try {
+        if(guard && gInputGuardReady.load(std::memory_order_acquire) && gInputHandoffDepth==0) {
+            auto const client=ll::service::getClientInstance();
+            tracking=client && &*client==this;
+            if(tracking) {
+                token=structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::GameplayDisabled);
+                if(!enabled)trackTextInput(NativeTextInputFlag::GameplayDisabled,true);
+            }
+        }
+    } catch (...) {
+        structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(false);
+    }
+    origin(enabled);
+    if(tracking && enabled && gInputGuardReady.load(std::memory_order_acquire))
+        structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::GameplayDisabled,token);
 }
 
 LL_TYPE_INSTANCE_HOOK(
@@ -191,6 +217,7 @@ MenuInputGuardStatus installMenuInputGuard() {
     if(!gTextInputHooksInstalled[3])gTextInputHooksInstalled[3]=MenuKeyboardHideHook::hook()==0;
     if(!gTextInputHooksInstalled[4])gTextInputHooksInstalled[4]=MenuImeStartHook::hook()==0;
     if(!gTextInputHooksInstalled[5])gTextInputHooksInstalled[5]=MenuImeEndHook::hook()==0;
+    if(!gTextInputHooksInstalled[6])gTextInputHooksInstalled[6]=MenuGameplayInputHook::hook()==0;
     gInstallStatus.textInputHooksInstalled=std::all_of(gTextInputHooksInstalled.begin(),gTextInputHooksInstalled.end(),[](bool installed){return installed;});
     structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(gInstallStatus.textInputHooksInstalled);
     gInputGuardReady.store(
@@ -209,6 +236,7 @@ bool uninstallMenuInputGuard() {
         if(removed)gTextInputHooksInstalled[index]=false;
         else ok=false;
     };
+    if(gTextInputHooksInstalled[6])removeTextHook(6,MenuGameplayInputHook::unhook());
     if(gTextInputHooksInstalled[5])removeTextHook(5,MenuImeEndHook::unhook());
     if(gTextInputHooksInstalled[4])removeTextHook(4,MenuImeStartHook::unhook());
     if(gTextInputHooksInstalled[3])removeTextHook(3,MenuKeyboardHideHook::unhook());

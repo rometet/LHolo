@@ -423,7 +423,7 @@ void renderStructureMenu() {
         auto const view=structure::capture::getClientViewSnapshot();
         bool const interaction=ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive();
         bool applied{};
-        if(reinterpret_cast<std::uintptr_t>(GetForegroundWindow())==intent->window && !overlay::companion::isVisible())
+        if(input::directMenuForegroundMatches(intent->window,reinterpret_cast<std::uintptr_t>(GetForegroundWindow())) && !overlay::companion::isVisible())
             applied=structure::capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
                 if((current?current->worldEpoch:0)!=intent->worldEpoch)return false;
                 return uiState().applyMenuRouteIfCurrent(*intent,interaction,[&]{

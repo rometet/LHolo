@@ -27,9 +27,12 @@ struct DirectMenuInputContext {
     bool uiInteractionBlocked{};
     bool nativeTextInputBlocked{true};
 };
+constexpr bool directMenuForegroundMatches(std::uintptr_t gameWindow,std::uintptr_t foreground) noexcept {
+    return gameWindow!=0 && gameWindow==foreground;
+}
 constexpr bool directMenuInputAllowed(DirectMenuInputContext const& context) noexcept {
     return context.foreground && !context.companionVisible && !context.uiInteractionBlocked
         && !context.nativeTextInputBlocked && (context.lholoVisible || context.gameplayInputEnabled);
 }
-enum class NativeTextInputFlag : unsigned { Focus = 1, Keyboard = 2, Ime = 4 };
+enum class NativeTextInputFlag : unsigned { Focus = 1, Keyboard = 2, Ime = 4, GameplayDisabled = 8 };
 } // namespace lholo::input
