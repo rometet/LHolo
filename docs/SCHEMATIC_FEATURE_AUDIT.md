@@ -45,7 +45,8 @@ The selected verifier/material job consumes at most 256 scan operations per game
 tick. Region traversal and overlap comparisons also consume that budget; material
 row finalization is incremental. Nearest sorting is capped at 1,536 entries and
 inventory reads at 36 existing slots; each carried shulker contributes at most 27
-validated NBT entries. Counting does not run in mesh/render/upload code. Reports describe a completed incremental pass, not an atomic world snapshot;
+validated NBT entries. Counting does not run in mesh/render/upload code. Reports
+describe a completed incremental pass, not an atomic world snapshot;
 while the menu is open they refresh after a two-second interval, or explicitly on
 Verify/placement edits. Existing renderer direct-update convergence is retained.
 Hiding a placement gates drawing while the existing update pipeline continues.
@@ -61,11 +62,25 @@ Hiding a placement gates drawing while the existing update pipeline continues.
   is single-state. This would require additional renderer/VirtualWorld/worker
   ownership and is outside the requested renderer boundary. Saved records and
   selected-placement actions are implemented without that redesign.
-- **Container contents and entity-placement flag:** inventory counting now includes
-  the contents of carried shulker boxes through the existing game-tick ItemStack
-  NBT path (27 entries maximum, slot/count validation, duplicate rejection, and
-  whole-box fail-closed decoding). Other container item types and entity projection
-  remain outside this change. Existing capture entity export and BlockActor rendering are retained.
+- **Other container contents and entity-placement flag:** inventory counting now
+  includes the carried shulker item itself and its immediate contents. Identity
+  follows Praxis Companion 26.51: strip `minecraft:`, then accept `shulker_box`
+  or a nonempty prefix ending in `_shulker_box`. On the existing game-tick path,
+  `mUserData` compounds are searched for `Items`/`items` through depth 3 (root
+  depth 0). A named items tag with a non-list type fails closed. At most 27
+  CompoundTag entries are accepted, each with a unique `Slot`/`slot` in 0–26
+  and `Count`/`count` in 1–127 (Byte/Short/Int). Each entry is reconstructed with
+  `ItemStack::fromTag`; its canonical type ID is counted using the validated NBT
+  count, with integer saturation. Null entries/items, empty IDs, invalid
+  slots/counts, duplicates, oversize lists or decode/merge exceptions discard the
+  whole nested contribution while retaining the outer shulker count. Counts are
+  staged in owned maps and published only after a successful merge. Empty/no-Items
+  shulkers contribute zero nested items. Contained shulkers count as items without
+  expanding their contents; other container types and placed containers are not
+  scanned. No hook, worker or scheduling change was added. Entity projection APIs
+  remain absent; existing capture entity export and BlockActor rendering are
+  retained. Minecraft runtime visual/material-count QA for carried shulker
+  contents is still pending.
 - Native stairs/hopper/trapdoor/redstone orientation results, chunk event timing,
   world/dimension switching, actual cursor/F10 interaction, capture roundtrip,
   large-structure frame time and GPU visuals have not been exercised in Minecraft.
@@ -79,13 +94,13 @@ existing multilingual/viewport/scale UI matrix.
 
 | Target | Result |
 |---|---|
-| LHoloLogicTests (including manual placement/projection rules) | 1,181,025 checks / 0 failures |
+| LHoloLogicTests (including manual placement/projection rules) | 1,181,158 checks / 0 failures |
 | LHoloNbtTests | 3,091 checks / 0 failures |
 | LHoloLanguageStoreTests | 16 checks / 0 failures / 0 tracked allocations left |
 | LHoloUiTests | 29,349 checks / 4,860 frames / ImGui errors 0 |
 | LHoloGraphicsTests | 1,638 checks / 0 failures; cross-device 10, removal 12 |
 | LHoloTranslucencyTests | 573 checks / PASS |
-| LHolo | Windows x64 Release client DLL full rebuild passed (35.594 s) with the existing cached toolchain/dependencies |
+| LHolo | Windows x64 Release client DLL full rebuild passed (34.797 s) with the existing cached toolchain/dependencies |
 
 Commands: `xmake -P . -b <test target>`, then the executable under
 `build/integrated-clean/windows/x64/release/`; `xmake -P . -r LHolo`.
@@ -94,6 +109,16 @@ dependency require disabled. No dependencies/configuration were upgraded.
 Logs: ignored `build/schematic-validation/`. UI uses the test fallback font and
 reports missing optional fonts; this is not CJK glyph visual QA. Existing prelink
 RC diagnostic and hook macro warnings do not prevent the successful DLL build.
+
+The carried-shulker counting follow-up uses baseline `274c5f8` and changes only
+`InventoryContents.h`, `InventoryCountRules.h`, `tests/logic/SchematicChecks.h`
+and this audit. It adds 146 pure identity/slot/duplicate/saturation checks without
+calling `ItemStack::fromTag` outside Minecraft. Logic and NBT targets were built
+and run, and LHolo was fully rebuilt with the cached Windows/x64/release/client
+configuration. Follow-up logs are in ignored `build/shulker-material-validation/`;
+the other test rows above retain their earlier audit results. `git diff --check`
+and the baseline-to-final path allowlist pass. Minecraft runtime visual/material
+count QA is pending; no DLL installation, push, merge or release was performed.
 
 Final diff review explicitly checks Map paths and the protected renderer,
 VirtualWorld, frame pipeline, lifecycle, app/overlay/input, capture and format

@@ -42,6 +42,7 @@ inline InventoryItemsListLookup findInventoryItemsList(CompoundTag const& tag, i
         if (value.index() != Tag::List) return {nullptr, true};
         return {&value.get<ListTag>(), false};
     }
+    if (depth == 3) return {};
     for (auto const& [name, value] : tag) {
         (void)name;
         if (value.index() != Tag::Compound) continue;
@@ -60,6 +61,7 @@ inline void addInventoryItemCount(InventoryItemCounts& counts, std::string const
 inline bool addShulkerInventoryContents(
     InventoryItemCounts& counts, ItemStack const& box
 ) noexcept {
+    // This native/NBT work only runs on the existing game-tick inventory path.
     try {
         if (!box.mUserData) return true;
         auto const lookup = findInventoryItemsList(*box.mUserData);
@@ -87,11 +89,17 @@ inline bool addShulkerInventoryContents(
             auto const itemId = item.getTypeName();
             if (itemId.empty()) return false;
             addInventoryItemCount(nested, itemId, count);
+            // Contained shulkers count as items without expanding their NBT.
         }
 
-        for (auto const& [id, amount] : nested) addInventoryItemCount(counts, id, amount);
+        // Stage the merge as well: allocation failure must never leave partial
+        // contents in counts. Only the nonthrowing swap publishes this box.
+        auto next = counts;
+        for (auto const& [id, amount] : nested) addInventoryItemCount(next, id, amount);
+        counts.swap(next);
         return true;
     } catch (...) {
+        // Keep the already-counted outer box and discard all nested contents.
         return false;
     }
 }

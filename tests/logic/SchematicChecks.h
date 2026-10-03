@@ -28,20 +28,38 @@ template<class Check> void runSchematicChecks(Check check) {
     check(inventoryCountAfterStack(-1,64)==64);
     check(inventoryCountAfterStack(INT_MAX-1,64)==INT_MAX);
     check(inventoryCountAfterStack(INT_MAX,1)==INT_MAX);
+    check(isShulkerInventoryContainer("shulker_box"));
     check(isShulkerInventoryContainer("minecraft:shulker_box"));
-    check(isShulkerInventoryContainer("minecraft:white_shulker_box"));
-    check(isShulkerInventoryContainer("blue_shulker_box"));
-    check(!isShulkerInventoryContainer("minecraft:shulker_shell"));
-    check(!isShulkerInventoryContainer("minecraft:shulker"));
-    check(!isShulkerInventoryContainer("minecraft:not_a_shulker_box_item"));
+    for (auto color : {"white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                       "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"}) {
+        auto const id = std::string(color) + "_shulker_box";
+        check(isShulkerInventoryContainer(id));
+        check(isShulkerInventoryContainer("minecraft:" + id));
+    }
+    for (auto id : {"", "minecraft:", "shulker", "minecraft:shulker_shell", "_shulker_box",
+                    "minecraft:_shulker_box", "minecraft:red_shulker_boxes", "shulker_box_extra",
+                    "minecraft:red_shulker_box_extra", "minecraft:shulker_box_spawn_egg",
+                    "minecraft:shulker_box ", "other:shulker_box"})
+        check(!isShulkerInventoryContainer(id));
     ShulkerInventorySlotState shulkerSlots{};
-    check(claimShulkerInventorySlot(shulkerSlots,0,1));
-    check(claimShulkerInventorySlot(shulkerSlots,26,127));
-    check(!claimShulkerInventorySlot(shulkerSlots,0,1));
-    check(!claimShulkerInventorySlot(shulkerSlots,-1,1));
-    check(!claimShulkerInventorySlot(shulkerSlots,27,1));
-    check(!claimShulkerInventorySlot(shulkerSlots,1,0));
-    check(!claimShulkerInventorySlot(shulkerSlots,1,128));
+    auto const emptySlots = shulkerSlots;
+    for (auto const [slot, count] : {std::pair{-1, 1}, {27, 1}, {INT_MIN, 1}, {INT_MAX, 1},
+                                   {0, 0}, {0, -1}, {26, 128}, {0, INT_MAX}}) {
+        check(!claimShulkerInventorySlot(shulkerSlots, slot, count));
+        check(shulkerSlots == emptySlots);
+    }
+    for (int slot = 0; slot < 27; ++slot) {
+        check(claimShulkerInventorySlot(shulkerSlots, slot, slot == 26 ? 127 : 1));
+        auto const beforeDuplicate = shulkerSlots;
+        check(!claimShulkerInventorySlot(shulkerSlots, slot, 64));
+        check(shulkerSlots == beforeDuplicate);
+    }
+    check(inventoryCountAfterStack(INT_MAX - 127, 127) == INT_MAX);
+    check(inventoryCountAfterStack(INT_MAX - 126, 127) == INT_MAX);
+    int shulkerTotal = INT_MAX - 127;
+    for (int slot = 0; slot < 27; ++slot)
+        shulkerTotal = inventoryCountAfterStack(shulkerTotal, 127);
+    check(shulkerTotal == INT_MAX);
     for(int y=-1024;y<=1024;++y) {
         auto const sub=ChunkAvailabilityQueue::subChunkY(y);
         check(sub*16<=y && (sub+1)*16>y);
