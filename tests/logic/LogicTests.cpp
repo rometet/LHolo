@@ -54,6 +54,7 @@
 #include "structure/StructureUiState.h"
 #include "structure/java_to_bedrock/JavaBlockEntityToBedrock.h"
 #include "ui/HotkeyFormat.h"
+#include "HudControlChecks.h"
 
 #include <Windows.h>
 #include "SchematicChecks.h"
@@ -2378,6 +2379,7 @@ int main() {
     testBlockPlacementRules();
     testJavaTextComponents();
     testI18n();
+    lholo::tests::runHudControlChecks([](bool ok) { LHOLO_CHECK(ok); });
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
     } catch (std::exception const& exception) {

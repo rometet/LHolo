@@ -152,6 +152,9 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         parsed.hudShowProjectedBlockName
     );
     parsed.hudPosition = json.value("hudPosition", parsed.hudPosition);
+    if(auto found=json.find("hudLayouts");found!=json.end()&&found->is_array()&&found->size()==2) {
+        for(unsigned i=0;i<2;++i)try {auto const& j=(*found)[i];ui::HudLayout v{j.value("custom",false),j.value("x",0.f),j.value("y",0.f),j.value("scale",1.f),j.value("anchor",0)};if(ui::validHudLayout(v))parsed.hudLayouts[i]=v;}catch(...){}
+    }
     parsed.guiHotkey = json.value("guiHotkey", parsed.guiHotkey);
     parsed.guiHotkeyModifiers = json.value("guiHotkeyModifiers", parsed.guiHotkeyModifiers);
     // Upstream schema 12 used Simplified Chinese and Alt+M as defaults. On the
@@ -290,6 +293,9 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"hudShowExtraBlocks", settings.hudShowExtraBlocks},
         {"hudShowProjectedBlockName", settings.hudShowProjectedBlockName},
         {"hudPosition", settings.hudPosition},
+        {"hudLayouts", nlohmann::json::array({
+            {{"custom",settings.hudLayouts[0].custom},{"x",settings.hudLayouts[0].x},{"y",settings.hudLayouts[0].y},{"scale",settings.hudLayouts[0].scale},{"anchor",settings.hudLayouts[0].anchor}},
+            {{"custom",settings.hudLayouts[1].custom},{"x",settings.hudLayouts[1].x},{"y",settings.hudLayouts[1].y},{"scale",settings.hudLayouts[1].scale},{"anchor",settings.hudLayouts[1].anchor}}})},
         {"guiHotkey", settings.guiHotkey},
         {"guiHotkeyModifiers", settings.guiHotkeyModifiers},
         {"layerIncreaseHotkey", settings.layerIncreaseHotkey},

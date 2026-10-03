@@ -211,6 +211,11 @@
     LHOLO_TEXT_KEY("hud.rangeFromZero", HudRangeFromZero, "")                                            \
     LHOLO_TEXT_KEY("hud.rangeBetween", HudRangeBetween, "")                                              \
     LHOLO_TEXT_KEY("hud.overallProgress", HudOverallProgress, "")                                        \
+    LHOLO_TEXT_KEY("hud.transform", HudTransform, "") \
+    LHOLO_TEXT_KEY("hud.remaining", HudRemaining, "") \
+    LHOLO_TEXT_KEY("hud.progressUnknown", HudProgressUnknown, "") \
+    LHOLO_TEXT_KEY("materialHud.summary", MaterialHudSummary, "") \
+    LHOLO_TEXT_KEY("materialHud.types", MaterialHudTypes, "") \
     LHOLO_TEXT_KEY("hud.buildProgress", HudBuildProgress, "")                                            \
     LHOLO_TEXT_KEY("hud.wrongState", HudWrongState, "")                                                  \
     LHOLO_TEXT_KEY("hud.wrongType", HudWrongType, "")                                                    \

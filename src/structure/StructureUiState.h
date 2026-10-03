@@ -8,6 +8,7 @@
 
 #include "i18n/Message.h"
 #include "input/HotkeyTypes.h"
+#include "ui/HudLayout.h"
 
 #include <array>
 #include <atomic>
@@ -106,6 +107,8 @@ public:
     void setBlockGameInputUntil(std::uint64_t deadline);
 
     [[nodiscard]] HudStateSnapshot hud() const;
+    [[nodiscard]] ui::HudLayout hudLayout(unsigned id) const;
+    bool setHudLayout(unsigned id,ui::HudLayout const&);
     bool setUiScale(float scale);
     bool applyHud(HudStateSnapshot const& snapshot);
 
@@ -211,6 +214,8 @@ private:
     std::atomic_int      mOpeningInputBlockFrames{0};
     std::atomic_uint64_t mBlockGameInputUntil{};
 
+    mutable std::mutex mHudLayoutMutex;
+    std::array<ui::HudLayout,2> mHudLayouts{};
     std::atomic_bool  mHudEnabled{true};
     std::atomic_bool  mHudShowFileName{true};
     std::atomic_bool  mHudShowLayer{true};

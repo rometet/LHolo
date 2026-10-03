@@ -103,6 +103,13 @@ void StructureUiState::setBlockGameInputUntil(std::uint64_t deadline) {
     mBlockGameInputUntil.store(deadline, std::memory_order_release);
 }
 
+ui::HudLayout StructureUiState::hudLayout(unsigned id) const {
+    std::lock_guard lock(mHudLayoutMutex);return id<mHudLayouts.size()?mHudLayouts[id]:ui::HudLayout{};
+}
+bool StructureUiState::setHudLayout(unsigned id,ui::HudLayout const& value) {
+    if(id>=mHudLayouts.size()||!ui::validHudLayout(value))return false;
+    std::lock_guard lock(mHudLayoutMutex);bool changed=mHudLayouts[id]!=value;mHudLayouts[id]=value;return changed;
+}
 HudStateSnapshot StructureUiState::hud() const {
     return {
         mHudEnabled.load(std::memory_order_relaxed),
