@@ -69,7 +69,12 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");}
     if(scroll){
         ImGuiWindow* page{};
-        for(auto* window:context->Windows)if(std::string_view(window->Name).find("##PageScroll")!=std::string_view::npos)page=window;
+        for(auto* window:context->Windows){
+            auto const name=std::string_view(window->Name);
+            auto const separator=name.find_last_of('/');
+            auto const child=name.substr(separator==std::string_view::npos?0:separator+1);
+            if(child.starts_with("##PageScroll"))page=window;
+        }
         require(page && page->ScrollMax.y>0,"compact verifier has page scroll");
         ImGui::SetScrollY(page,page->ScrollMax.y);
         for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();}
