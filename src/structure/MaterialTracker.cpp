@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "structure/MaterialTracker.h"
+#include "io/MaterialExport.h"
 #include "structure/InventoryContents.h"
 #include "structure/SchematicRuntime.h"
 #include "structure/PlacementTransform.h"
@@ -129,7 +130,7 @@ std::vector<MaterialRequirement> resolveMaterials(
 ) {
     std::map<std::string, MaterialRequirement> byType;
     std::map<std::string, MaterialRequirement> byLiquidType;
-    auto aggregate = [&](auto& destination, Block const* blockValue, std::uint64_t blockCount) {
+    auto aggregate = [&](auto& destination, Block const* blockValue, std::uint64_t blockCount, bool liquid=false) {
         if (!blockValue || blockCount == 0) return;
 
         std::string const typeName{blockValue->getTypeName()};
@@ -155,6 +156,7 @@ std::vector<MaterialRequirement> resolveMaterials(
             requirement.displayName = localizedBlockName(*blockValue, localeCode);
         }
 
+        requirement.key = std::string(liquid ? "liquid:" : "body:") + key + "|item=" + requirement.itemId;
         auto const result = destination.try_emplace(key, std::move(requirement));
         auto& total = result.first->second.count;
         auto const maximum = std::numeric_limits<std::uint64_t>::max();
@@ -166,7 +168,7 @@ std::vector<MaterialRequirement> resolveMaterials(
     // structures; the first pass above is only pointer counting.
     for (auto const& [blockValue, count] : counts.body) aggregate(byType, blockValue, count);
     for (auto const& [blockValue, count] : counts.liquid) {
-        aggregate(byLiquidType, blockValue, count);
+        aggregate(byLiquidType, blockValue, count, true);
     }
 
     std::vector<MaterialRequirement> materials;
@@ -304,7 +306,9 @@ void processPendingMaterialList(LocalPlayer& player) {
     auto& ui = StructureUiState::getInstance();
     if (!ui.consumeMaterialListRequest()) return;
 
-    auto const loaded = StructureSession::getInstance().loaded();
+    auto const token=ui.materialListToken();
+    auto const session=StructureSession::getInstance().snapshot();
+    auto const loaded=session.loaded;
     std::vector<MaterialRequirement> materials;
     if (loaded) materials = collectMaterials(loaded->renderBlocks, player.getLocaleCode());
     // Loading another structure can overlap this game-thread calculation. Never
@@ -313,13 +317,41 @@ void processPendingMaterialList(LocalPlayer& player) {
         ui.requestMaterialList();
         return;
     }
-    ui.replaceMaterialRequirements(std::move(materials));
+    if (!loaded) return;
+    bool inventoryComplete{};
+    auto const inventory=countInventoryItems(player.getInventory(),&inventoryComplete);
+    std::vector<std::optional<int>> availability;
+    availability.reserve(materials.size());
+    for(auto const& row:materials) {
+        if(!inventoryComplete || row.itemId.empty())availability.push_back(std::nullopt);
+        else { auto found=inventory.find(row.itemId);availability.push_back(found==inventory.end()?0:found->second); }
+    }
+    (void)ui.publishMaterialList(std::move(materials),std::move(availability),loaded->generation,session.lastPath,token);
     // Cover the narrow hand-off where the active structure changes between the
     // identity check above and publishing the snapshot.
     if (StructureSession::getInstance().loaded() != loaded) {
         ui.clearMaterials();
         ui.requestMaterialList();
     }
+}
+
+void refreshMaterialListAvailability(LocalPlayer& player) {
+    static std::uint64_t lastRefresh{};
+    auto& ui=StructureUiState::getInstance();auto const snapshot=ui.materialListView();
+    if(!snapshot || snapshot->requirements.empty())return;
+    auto const loaded=StructureSession::getInstance().loaded();
+    if(!loaded || loaded->generation!=snapshot->scope.generation)return;
+    auto const force=ui.consumeMaterialAvailabilityRefresh();
+    auto const now=GetTickCount64();if(!force && lastRefresh && now-lastRefresh<kAvailabilityRefreshMs)return;
+    lastRefresh=now;
+    bool inventoryComplete{};
+    auto const inventory=countInventoryItems(player.getInventory(),&inventoryComplete);
+    std::vector<std::optional<int>> counts;counts.reserve(snapshot->requirements.size());
+    for(auto const& row:snapshot->requirements) {
+        if(!inventoryComplete || row.itemId.empty())counts.push_back(std::nullopt);
+        else { auto found=inventory.find(row.itemId);counts.push_back(found==inventory.end()?0:found->second); }
+    }
+    if(StructureSession::getInstance().loaded()==loaded)(void)ui.setMaterialListAvailability(snapshot->scope,std::move(counts));
 }
 
 void refreshAvailability(LocalPlayer& player) {
@@ -359,11 +391,13 @@ void tickMaterialTracker(LocalPlayer& player) {
         worker.nextScheduleAt = 0;
     }
     processPendingMaterialList(player);
+    refreshMaterialListAvailability(player);
     updateMaterialHud(player);
     refreshAvailability(player);
 }
 
 void shutdownMaterialTracker() {
+    io::materialExportJob().shutdown();
     schematic::shutdown();
     auto& worker = materialHudWorkerState();
     if (worker.inFlight) {

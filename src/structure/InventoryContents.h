@@ -104,22 +104,23 @@ inline bool addShulkerInventoryContents(
     }
 }
 
-inline void addInventoryStack(InventoryItemCounts& counts, ItemStack const& stack) {
+inline void addInventoryStack(InventoryItemCounts& counts, ItemStack const& stack, bool* complete = nullptr) {
     if (stack.isNull()) return;
     auto const itemId = stack.getTypeName();
     addInventoryItemCount(counts, itemId, static_cast<int>(stack.mCount));
     if (isShulkerInventoryContainer(itemId)) {
-        (void)addShulkerInventoryContents(counts, stack);
+        if (!addShulkerInventoryContents(counts, stack) && complete) *complete = false;
     }
 }
 
-inline InventoryItemCounts countInventoryItems(Inventory& inventory) {
+inline InventoryItemCounts countInventoryItems(Inventory& inventory, bool* complete = nullptr) {
     InventoryItemCounts counts;
+    if (complete) *complete = true;
     // Keep LHolo's established bounded 36-slot read. Carried shulker contents
     // are decoded from each stack's already-owned NBT on this same game-tick path.
     auto const slots = std::clamp(inventory.getContainerSize(), 0, 36);
     for (int slot = 0; slot < slots; ++slot)
-        addInventoryStack(counts, inventory.getItem(slot));
+        addInventoryStack(counts, inventory.getItem(slot), complete);
     return counts;
 }
 } // namespace lholo::structure

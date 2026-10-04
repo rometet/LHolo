@@ -7,6 +7,7 @@
 #pragma once
 
 #include "i18n/Message.h"
+#include "structure/MaterialList.h"
 #include "input/HotkeyTypes.h"
 #include "input/MenuRoute.h"
 #include "input/NativeTextInputState.h"
@@ -24,22 +25,6 @@
 #include <vector>
 
 namespace lholo::structure::detail {
-
-struct MaterialRequirement {
-    std::string   displayName;
-    // Set when the display name comes from the interface language table rather
-    // than from the game (projected liquids have no item to take a name from).
-    std::optional<i18n::TextKey> nameKey;
-    std::string   typeName;
-    // Resolved inventory item type. Empty for materials without a directly
-    // countable inventory form (for example projected water/lava cells).
-    std::string   itemId;
-    std::uint64_t count{};
-    // Max stack size of the item this block resolves to (64 normally, 16 for
-    // signs etc., 1 for filled buckets). Used for the JE-style "N (a x S + b)"
-    // count display. Computed on the tick thread; 64 when unknown.
-    int           stackSize{64};
-};
 
 struct ActionHintSnapshot {
     std::string   text;
@@ -189,10 +174,19 @@ public:
     [[nodiscard]] ActionHintSnapshot actionHint() const;
 
     void requestMaterialList();
+    void requestMaterialAvailabilityRefresh() { mMaterialAvailabilityRequested.store(true,std::memory_order_release); }
+    bool consumeMaterialAvailabilityRefresh() { return mMaterialAvailabilityRequested.exchange(false,std::memory_order_acq_rel); }
     [[nodiscard]] bool consumeMaterialListRequest();
     [[nodiscard]] bool materialListReady() const;
     void replaceMaterialRequirements(std::vector<MaterialRequirement> materials);
     [[nodiscard]] std::vector<MaterialRequirement> materialRequirements() const;
+    [[nodiscard]] std::uint64_t materialListToken() const;
+    [[nodiscard]] std::shared_ptr<MaterialListSnapshot const> materialListView() const;
+    bool publishMaterialList(std::vector<MaterialRequirement> materials, std::vector<std::optional<int>> available,
+        std::uint64_t generation, std::string source, std::uint64_t expectedToken);
+    bool setMaterialListAvailability(MaterialListScope scope, std::vector<std::optional<int>> counts);
+    bool setMaterialIgnored(MaterialListScope scope, std::string const& key, bool ignored);
+    bool clearMaterialIgnored(MaterialListScope scope);
     // The material-list popup and the current-layer HUD deliberately own
     // separate snapshots: the popup covers the whole structure, while the HUD
     // follows projection correction and layer visibility.
@@ -283,7 +277,9 @@ private:
     mutable std::mutex                mMaterialMutex;
     std::atomic_bool                  mMaterialListRequested{false};
     std::atomic_bool                  mMaterialListReady{false};
-    std::vector<MaterialRequirement>  mMaterialRequirements;
+    std::atomic_bool                  mMaterialAvailabilityRequested{false};
+    std::shared_ptr<MaterialListSnapshot const> mMaterialList;
+    std::uint64_t mMaterialListToken{}, mMaterialListRevision{};
     std::shared_ptr<MaterialHudSnapshot const> mMaterialHud;
     std::uint64_t                     mMaterialHudRevision{};
 };

@@ -75,6 +75,27 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
                 "Japanese API/status text uses existing actual font glyphs");
     }
     MenuModel model;model.page=MenuPage::Verification;
+    if(directCase>=30 && directCase<40) {
+        using namespace lholo::structure::detail;
+        model.page=MenuPage::Materials;model.hasLoadedStructure=true;
+        auto bill=std::make_shared<MaterialListSnapshot>();bill->scope={71,9};bill->source="fixture/材料一覧.mcstructure";bill->revision=5;
+        bill->requirements={{"石レンガ",{},"minecraft:stone_bricks","minecraft:stone_bricks",128,64,"body:item:stone_bricks"},
+            {"オークの階段",{},"minecraft:oak_stairs","minecraft:oak_stairs",32,64,"body:item:oak_stairs"},
+            {"ガラス",{},"minecraft:glass","minecraft:glass",64,64,"body:item:glass"},
+            {"水",{},"minecraft:water",{},24,64,"liquid:water"}};
+        bill->available={64,48,16,std::nullopt};bill->ignored.insert("body:item:glass");
+        model.materialList=bill;model.materialsView=std::make_shared<MaterialsViewState>();
+        if(directCase==31)model.materialsView->filter=MaterialFilter::Shortage;
+        if(directCase==32)model.materialsView->filter=MaterialFilter::Ignored;
+        if(directCase==33){bill->ignored.clear();model.materialsView->filter=MaterialFilter::Ignored;}
+        if(directCase==34)model.materialExport.phase=lholo::io::MaterialExportPhase::Saving;
+        if(directCase==35){model.materialExport={lholo::io::MaterialExportPhase::Failed,L"C:/fixture/保存先/materials.tsv","Access denied (fixture)",{71,9}};}
+        if(directCase==38){model.materialExport={lholo::io::MaterialExportPhase::Saved,L"C:/fixture/日本語フォルダー/材料一覧.tsv",{},{71,9},bill->source};}
+        if(directCase==37){
+            bill->requirements.clear();bill->available.clear();bill->ignored.clear();
+            for(int i=0;i<50000;++i){bill->requirements.push_back({"材料 "+std::to_string(i),{},"minecraft:block_"+std::to_string(i),"item",64,64,"key_"+std::to_string(i)});bill->available.push_back(32);}
+        }
+    }
     if(directCase>=100) {
         model.page=static_cast<MenuPage>(directCase-100);model.hasLoadedStructure=true;
         model.captureWorldAvailable=true;model.capture.first={true,10,64,10};model.capture.second={true,20,70,20};
@@ -134,6 +155,12 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     if(directCase==17)model.verifierView->errorsOnly=true;
     if(directCase==19)model.schematic.target.reset();
     MenuActions actions;
+    if(directCase>=30 && directCase<40) {
+        actions.requestMaterials=[]{};
+        actions.ignoreMaterial=[](auto,auto const&,bool){};
+        actions.clearIgnoredMaterials=[](auto){};
+        actions.exportMaterials=[](auto){}; // Image fixture never invokes a native save or writes world data.
+    }
     actions.verifySchematic=[&]{model.schematic.phase=schematic::VerificationPhase::Queued;model.schematic.report.reset();};
     actions.cancelVerification=[&]{model.schematic.phase=schematic::VerificationPhase::Cancelled;model.schematic.report.reset();};
     actions.resetVerification=[&]{model.schematic.phase=schematic::VerificationPhase::NotVerified;model.schematic.report.reset();model.schematic.target.reset();};
@@ -162,6 +189,15 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         for(int frame=0;frame<4;++frame){ImGui::SetScrollY(page,page->ScrollMax.y);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
         require(page->Scroll.y>0,"compact verifier scroll reaches lower content");
         require(std::abs(page->Scroll.y-page->ScrollMax.y)<1.f,"compact page reaches actual content bottom after auto-size settles");
+    }
+    if(directCase==36){
+        ImGuiWindow* page{};ImGuiWindow* panel{};
+        for(auto* window:context->Windows){auto name=std::string_view(window->Name);auto const separator=name.find_last_of('/');auto const child=name.substr(separator==std::string_view::npos?0:separator+1);
+            if(child.starts_with("##PageScroll"))page=window;
+            if(child.starts_with("##Materials_") && name.find("MaterialsWorkTable")==std::string_view::npos)panel=window;}
+        require(page && panel,"compact materials card exists");ImGui::SetScrollY(page,panel->Pos.y-page->Pos.y+page->Scroll.y);
+        for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
+        require(panel->Pos.y<page->ClipRect.Max.y,"compact material table reachable");
     }
     if(directCase==20 || directCase==21){
         ImGuiWindow* page{};ImGuiWindow* panel{};
@@ -211,6 +247,17 @@ int main(int argc,char** argv) {
         for(std::size_t page=0;page<lholo::ui::kMenuPageCount;++page) {
             renderCase(dir/("japanese-page-"+std::to_string(page)+"-1280.ppm"),1280,720,1,false,false,100+int(page));
         }
+        renderCase(dir/"materials-all-1920.ppm",1920,1080,1,false,false,30);
+        renderCase(dir/"materials-shortage.ppm",1920,1080,1,false,false,31);
+        renderCase(dir/"materials-ignored.ppm",1920,1080,1,false,false,32);
+        renderCase(dir/"materials-empty.ppm",1920,1080,1,false,false,33);
+        renderCase(dir/"materials-saving.ppm",1920,1080,1,false,false,34);
+        renderCase(dir/"materials-failed.ppm",1920,1080,1,false,false,35);
+        renderCase(dir/"materials-640-controls.ppm",640,480,1,false,false,30);
+        renderCase(dir/"materials-640-table.ppm",640,480,1,false,false,36);
+        renderCase(dir/"materials-large.ppm",1920,1080,1,false,false,37);
+        renderCase(dir/"materials-saved.ppm",1920,1080,1,false,false,38);
+        renderCase(dir/"materials-3840.ppm",3840,2160,2,false,false,30);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

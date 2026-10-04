@@ -1,6 +1,7 @@
 // LHolo - Fluent-style menu pages
 
 #include "ui/MenuPages.h"
+#include "ui/MaterialsPage.h"
 #include "ui/PresentationText.h"
 #include "projection/core/ComparisonStyle.h"
 
@@ -243,9 +244,9 @@ void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetric
         if (!metrics.compact) ImGui::SameLine();
         if (ImGui::Button(i18n::tr(i18n::TextKey::MaterialListTitle))) {
             if (actions.requestMaterials) actions.requestMaterials();
-            // OpenPopup() is deferred to the page scope, where the modal is
-            // rendered, so both calls use the same Dear ImGui ID stack.
-            model.materialPopupRequested = true;
+            // Both the file-page button and the direct route open the same
+            // functional materials work list.
+            model.page = MenuPage::Materials;
         }
         ImGui::Spacing();
         if (model.hasSavedProjection) {
@@ -983,166 +984,12 @@ void renderInterfacePage(MenuModel& model, UiMetrics const& metrics) {
     });
 }
 
-void renderMaterialRows(MenuModel const& model,UiMetrics const& metrics,float popupDensity,float areaHeight=0) {
-    constexpr float itemColumnWeight=.38f,typeColumnWeight=.42f,totalColumnWeight=.20f;
-    auto const rowHeight=(ImGui::GetTextLineHeight()+metrics.gap*.55f)*popupDensity;
-    auto const materialName=[](MaterialRow const& row){return materialDisplayName(row.displayName,row.nameKey);};
-    if (!model.hasLoadedStructure) {
-        ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::StatusNotLoaded));
-    } else {
-        std::uint64_t total{};
-        for (auto const& item : model.materials) {
-            if (std::numeric_limits<std::uint64_t>::max() - total < item.count) {
-                total = std::numeric_limits<std::uint64_t>::max();
-                break;
-            }
-            total += item.count;
-        }
-        ImGui::Text(
-            i18n::tr(i18n::TextKey::LabelMaterialSummary),
-            static_cast<unsigned long long>(total),
-            model.materials.size()
-        );
-        ImGui::Separator();
-        // The popup header and Close button are fixed. Only this child consumes
-        // the wheel; its visual scrollbar stays hidden to match the rest of the
-        // menu, while the non-scrollable parent prevents wheel propagation.
-        auto const materialAreaHeight = areaHeight>0?areaHeight:std::max(1.0f, ImGui::GetContentRegionAvail().y);
-        if (ImGui::BeginChild(
-                "##MaterialList",
-                ImVec2(0.0f, materialAreaHeight),
-                false,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings
-            )) {
-            if (model.materials.empty()) {
-                ImGui::TextDisabled(
-                    "%s", i18n::tr(i18n::TextKey::HintNoPlaceableMaterials)
-                );
-            } else if (ImGui::BeginTable(
-                           "##MaterialTable", 3,
-                           ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg
-                               | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings
-                       )) {
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnItem),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    itemColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnIdentifier),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    typeColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnTotal),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    totalColumnWeight
-                );
-                ImGui::TableHeadersRow();
-                auto renderCenteredCell = [&](char const* text) {
-                    auto const cellWidth = ImGui::GetContentRegionAvail().x;
-                    auto const textSize = ImGui::CalcTextSize(text, nullptr, false, cellWidth);
-                    auto const verticalOffset = std::max(
-                        0.0f,
-                        (rowHeight - textSize.y) * 0.5f
-                    );
-                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalOffset);
-                    if (textSize.y > ImGui::GetTextLineHeight() + 0.5f) {
-                        ImGui::TextWrapped("%s", text);
-                    } else {
-                        ImGui::TextUnformatted(text);
-                    }
-                };
-                for (auto const& item : model.materials) {
-                    ImGui::TableNextRow(
-                        ImGuiTableRowFlags_None,
-                        (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity
-                    );
-                    ImGui::TableSetColumnIndex(0);
-                    renderCenteredCell(materialName(item));
-                    ImGui::TableSetColumnIndex(1);
-                    renderCenteredCell(item.typeName.c_str());
-                    ImGui::TableSetColumnIndex(2);
-                    auto const countText = std::to_string(item.count);
-                    renderCenteredCell(countText.c_str());
-                }
-                ImGui::EndTable();
-            }
-        }
-        ImGui::EndChild();
-    }
-}
-
-void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics const& metrics) {
-    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintMaterialsHowTo));
-    renderSection("##Materials",i18n::tr(i18n::TextKey::MaterialListTitle),metrics,[&]{
-        if(ImGui::Button(i18n::tr(i18n::TextKey::MaterialRefresh)) && actions.requestMaterials)actions.requestMaterials();
-        auto const lines=static_cast<float>(std::min<std::size_t>(model.materials.size(),10)+2);
-        auto const height=std::max(1.f,std::min(ImGui::GetTextLineHeightWithSpacing()*lines,metrics.viewport.y*.45f));
-        renderMaterialRows(model,metrics,1.f,height);
-    });
-    renderSelectedMaterials(model);
-}
-
 void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     auto const popupName = materialPopupName();
     if (!ImGui::IsPopupOpen(popupName.c_str())) return;
-    // The material list has a little more breathing room than the regular
-    // menu: its table is intentionally 1.5x the original logical footprint.
-    constexpr float popupDensity = 1.20f;
-    constexpr float itemColumnWeight = 0.38f;
-    constexpr float typeColumnWeight = 0.42f;
-    constexpr float totalColumnWeight = 0.20f;
-    // Measure the actual table content.  A fixed width multiplier makes a
-    // seven-row list look like a wide banner and leaves unused space below.
-    auto nameWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnItem)).x;
-    auto typeWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnIdentifier)).x;
-    auto countWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnTotal)).x;
-    auto const materialName = [](MaterialRow const& row) {
-        return materialDisplayName(row.displayName, row.nameKey);
-    };
-    for (auto const& item : model.materials) {
-        nameWidth = std::max(nameWidth, ImGui::CalcTextSize(materialName(item)).x);
-        typeWidth = std::max(typeWidth, ImGui::CalcTextSize(item.typeName.c_str()).x);
-        auto const countText = std::to_string(item.count);
-        countWidth = std::max(countWidth, ImGui::CalcTextSize(countText.c_str()).x);
-    }
-    auto const cellPadding = ImGui::GetStyle().CellPadding.x * 2.0f;
-    auto const tableWidth = std::max(
-        (nameWidth + cellPadding) / itemColumnWeight,
-        std::max(
-            (typeWidth + cellPadding) / typeColumnWeight,
-            (countWidth + cellPadding) / totalColumnWeight
-        )
-    );
-    auto const closeLabel = i18n::tr(i18n::TextKey::ButtonClose);
-    auto const closeWidth = ImGui::CalcTextSize(closeLabel).x
-        + ImGui::GetStyle().FramePadding.x * 2.0f;
-    auto const titleWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::MaterialListTitle)).x
-        + closeWidth + metrics.gap;
-    auto const popupWidth = std::min(
-        std::max(tableWidth + metrics.outerPadding * 2.35f, titleWidth + metrics.outerPadding * 2.35f)
-            * popupDensity,
-        metrics.viewport.x * 0.86f
-    );
-
-    auto const line = ImGui::GetTextLineHeightWithSpacing();
-    auto const rowHeight = (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity;
-    auto const listContentHeight = model.materials.empty()
-        ? rowHeight
-        : line + rowHeight * static_cast<float>(model.materials.size());
-    auto const listHeight = model.hasLoadedStructure
-        ? std::min(listContentHeight, metrics.viewport.y * 0.60f)
-        : 0.0f;
-    auto const popupHeight = std::min(
-        listHeight + ImGui::GetTextLineHeight() * 2.0f * popupDensity
-            + metrics.outerPadding * 2.35f * popupDensity + metrics.gap * 3.0f,
-        metrics.viewport.y * 0.84f
-    );
-    auto const popupSize = ImVec2(
-        popupWidth,
-        popupHeight
-    );
+    auto const closeLabel=i18n::tr(i18n::TextKey::ButtonClose);
+    auto const closeWidth=ImGui::CalcTextSize(closeLabel).x+ImGui::GetStyle().FramePadding.x*2;
+    auto const popupSize=ImVec2(std::min(980.f*metrics.scale,metrics.viewport.x*.86f),metrics.viewport.y*.84f);
     ImGui::SetNextWindowSize(popupSize, ImGuiCond_Always);
     if (!ImGui::BeginPopupModal(
             popupName.c_str(),
@@ -1161,7 +1008,7 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
 
-    renderMaterialRows(model,metrics,popupDensity);
+    renderMaterialBill(model,{},metrics,0,false);
     ImGui::EndPopup();
 }
 

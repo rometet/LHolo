@@ -14,6 +14,7 @@
 #include "structure/capture/StructureCapture.h"
 #include "structure/formats/StructureFormatLoaders.h"
 #include "ui/FileDialog.h"
+#include "ui/MaterialSaveDialog.h"
 #include "ui/FluentTheme.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/LHoloMenu.h"
@@ -46,6 +47,7 @@ std::array<char, StructurePathUtf8Capacity> gPathBuffer{};
 bool                   gPathInitialized{};
 MenuPage               gActivePage{MenuPage::Projection};
 auto gVerifierView = std::make_shared<VerifierViewState>();
+auto gMaterialsView = std::make_shared<MaterialsViewState>();
 
 struct HotkeyDefinition { HotkeyId id; i18n::TextKey label; };
 constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
@@ -72,6 +74,8 @@ constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
 MenuModel buildStructureMenuModel(float effectiveUiScale) {
     MenuModel model;
     model.verifierView = gVerifierView;
+    model.materialsView = gMaterialsView;
+    model.materialExport = io::materialExportJob().poll();
     auto& session = structure::detail::StructureSession::getInstance();
     auto const sessionSnapshot = session.snapshot();
     auto const hud = uiState().hud();
@@ -166,14 +170,9 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
             row.conflict=i18n::tr(kHotkeyDefinitions[*conflict].label);
         row.reserved=input::isDirectMenuHotkey(static_cast<std::size_t>(definition.id)) && binding.key==VK_F11;
     }
-    auto const materials = uiState().materialRequirements();
-    model.materials.reserve(materials.size());
-    for (auto const& material : materials) {
-        model.materials.push_back(
-            {material.displayName, material.nameKey, material.typeName,
-             material.count, material.stackSize}
-        );
-    }
+    auto const materials=uiState().materialListView();
+    if(sessionSnapshot.loaded && materials && materials->scope.generation==sessionSnapshot.loaded->generation)
+        model.materialList=materials;
     return model;
 }
 
@@ -353,7 +352,21 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
         structure::saveSettings();
         refreshModel = true;
     };
-    actions.requestMaterials = [] { structure::requestMaterialList(); };
+    actions.requestMaterials = [] { structure::requestMaterialList();uiState().requestMaterialAvailabilityRefresh(); };
+    actions.ignoreMaterial = [&refreshModel](auto scope,auto const& key,bool ignored) {
+        if(uiState().setMaterialIgnored(scope,key,ignored))refreshModel=true;
+    };
+    actions.clearIgnoredMaterials = [&refreshModel](auto scope) {
+        if(uiState().clearMaterialIgnored(scope))refreshModel=true;
+    };
+    actions.exportMaterials = [](io::MaterialExportRequest request) {
+        // Immutable click-time snapshot remains valid if the user loads another blueprint.
+        auto const title=std::string{i18n::tr(i18n::TextKey::MaterialsExport)};
+        auto const count=MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),nullptr,0);
+        std::wstring wide(static_cast<std::size_t>(count),L'\0');
+        MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),wide.data(),count);
+        (void)io::materialExportJob().start(std::move(request),[wide=std::move(wide)] {return saveMaterialFile(wide);});
+    };
     actions.beginHotkeyCapture = [](HotkeyId id) {
         uiState().beginHotkeyCapture(static_cast<std::size_t>(id));
     };

@@ -7,6 +7,8 @@
 #include "input/MenuRoute.h"
 #include "structure/SchematicRuntime.h"
 #include "ui/VerifierViewState.h"
+#include "ui/MaterialsViewState.h"
+#include "io/MaterialExport.h"
 
 #include <array>
 #include <cstddef>
@@ -142,7 +144,10 @@ struct MenuModel {
     bool hudShowExtraBlocks{true};
     bool hudShowProjectedBlockName{true};
 
-    std::vector<MaterialRow> materials;
+    std::vector<MaterialRow> materials; // Legacy popup/test adapter; production acquires an immutable view.
+    std::shared_ptr<structure::detail::MaterialListSnapshot const> materialList;
+    std::shared_ptr<MaterialsViewState> materialsView;
+    io::MaterialExportResult materialExport;
     bool materialPopupRequested{};
     bool materialHudEnabled{};
     int  materialHudPosition{3};
@@ -157,6 +162,9 @@ struct MenuActions {
     std::function<void()> restoreProjection;
     std::function<void()> closeProjection;
     std::function<void()> requestMaterials;
+    std::function<void(structure::detail::MaterialListScope,std::string const&,bool)> ignoreMaterial;
+    std::function<void(structure::detail::MaterialListScope)> clearIgnoredMaterials;
+    std::function<void(io::MaterialExportRequest)> exportMaterials;
     std::function<void(HotkeyId)> beginHotkeyCapture;
     std::function<void(HotkeyId)> clearHotkey;
     std::function<void(HotkeyId)> resetHotkey;

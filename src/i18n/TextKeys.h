@@ -376,7 +376,35 @@
     LHOLO_TEXT_KEY("hint.materialsHowTo", HintMaterialsHowTo, "") \
     LHOLO_TEXT_KEY("hint.hotkeysHowTo", HintHotkeysHowTo, "") \
     LHOLO_TEXT_KEY("hint.hudHowTo", HintHudHowTo, "") \
-    LHOLO_TEXT_KEY("hint.captureHowTo", HintCaptureHowTo, "")
+    LHOLO_TEXT_KEY("hint.captureHowTo", HintCaptureHowTo, "") \
+    LHOLO_TEXT_KEY("materials.all", MaterialsAll, "") \
+    LHOLO_TEXT_KEY("materials.shortage", MaterialsShortage, "") \
+    LHOLO_TEXT_KEY("materials.ignored", MaterialsIgnored, "") \
+    LHOLO_TEXT_KEY("materials.restore", MaterialsRestore, "") \
+    LHOLO_TEXT_KEY("materials.export", MaterialsExport, "") \
+    LHOLO_TEXT_KEY("materials.original", MaterialsOriginal, "") \
+    LHOLO_TEXT_KEY("materials.working", MaterialsWorking, "") \
+    LHOLO_TEXT_KEY("materials.unknownKinds", MaterialsUnknownKinds, "") \
+    LHOLO_TEXT_KEY("materials.scope", MaterialsScope, "") \
+    LHOLO_TEXT_KEY("materials.inventoryHint", MaterialsInventoryHint, "") \
+    LHOLO_TEXT_KEY("materials.counts", MaterialsCounts, "") \
+    LHOLO_TEXT_KEY("materials.required", MaterialsRequired, "") \
+    LHOLO_TEXT_KEY("materials.owned", MaterialsOwned, "") \
+    LHOLO_TEXT_KEY("materials.missing", MaterialsMissing, "") \
+    LHOLO_TEXT_KEY("materials.unknown", MaterialsUnknown, "") \
+    LHOLO_TEXT_KEY("materials.ignore", MaterialsIgnore, "") \
+    LHOLO_TEXT_KEY("materials.loading", MaterialsLoading, "") \
+    LHOLO_TEXT_KEY("materials.empty", MaterialsEmpty, "") \
+    LHOLO_TEXT_KEY("materials.saving", MaterialsSaving, "") \
+    LHOLO_TEXT_KEY("materials.saved", MaterialsSaved, "") \
+    LHOLO_TEXT_KEY("materials.cancelled", MaterialsCancelled, "") \
+    LHOLO_TEXT_KEY("materials.failed", MaterialsFailed, "") \
+    LHOLO_TEXT_KEY("materials.destination", MaterialsDestination, "") \
+    LHOLO_TEXT_KEY("materials.exportHint", MaterialsExportHint, "") \
+    LHOLO_TEXT_KEY("materials.shown", MaterialsShown, "") \
+    LHOLO_TEXT_KEY("materials.ownedUnknown", MaterialsOwnedUnknown, "") \
+    LHOLO_TEXT_KEY("materials.missingUnknown", MaterialsMissingUnknown, "") \
+    LHOLO_TEXT_KEY("materials.source", MaterialsSource, "")
 
 namespace lholo::i18n {
 

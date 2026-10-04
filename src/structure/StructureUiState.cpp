@@ -504,18 +504,71 @@ bool StructureUiState::materialListReady() const {
 }
 
 void StructureUiState::replaceMaterialRequirements(std::vector<MaterialRequirement> materials) {
+    (void)publishMaterialList(std::move(materials), {}, 0, {}, materialListToken());
+}
+std::vector<MaterialRequirement> StructureUiState::materialRequirements() const {
+    auto const snapshot=materialListView();
+    return snapshot ? snapshot->requirements : std::vector<MaterialRequirement>{};
+}
+std::uint64_t StructureUiState::materialListToken() const {
+    std::lock_guard lock(mMaterialMutex); return mMaterialListToken;
+}
+std::shared_ptr<MaterialListSnapshot const> StructureUiState::materialListView() const {
+    std::lock_guard lock(mMaterialMutex); return mMaterialList;
+}
+bool StructureUiState::publishMaterialList(std::vector<MaterialRequirement> materials,
+    std::vector<std::optional<int>> available, std::uint64_t generation, std::string source, std::uint64_t expectedToken) {
+    auto next=std::make_shared<MaterialListSnapshot>();
+    next->scope={generation,expectedToken};next->source=std::move(source);
+    next->requirements=std::move(materials);next->available=std::move(available);
+    std::shared_ptr<MaterialListSnapshot const> retired;
     {
         std::lock_guard lock(mMaterialMutex);
-        mMaterialRequirements = std::move(materials);
+        if(expectedToken!=mMaterialListToken)return false;
+        if(mMaterialList && mMaterialList->scope==next->scope)next->ignored=mMaterialList->ignored;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+        mMaterialListReady.store(true,std::memory_order_release);
     }
-    // Publish readiness only after the complete snapshot is visible. An empty
-    // list is also a valid cached result and must not trigger endless rescans.
-    mMaterialListReady.store(true, std::memory_order_release);
+    return true;
 }
-
-std::vector<MaterialRequirement> StructureUiState::materialRequirements() const {
-    std::lock_guard lock(mMaterialMutex);
-    return mMaterialRequirements;
+bool StructureUiState::setMaterialListAvailability(MaterialListScope scope,std::vector<std::optional<int>> counts) {
+    auto const previous=materialListView();
+    if(!previous || previous->scope!=scope || counts.size()!=previous->requirements.size())return false;
+    if(previous->available==counts)return true;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);next->available=std::move(counts);
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
+}
+bool StructureUiState::setMaterialIgnored(MaterialListScope scope,std::string const& key,bool ignored) {
+    auto const previous=materialListView();
+    if(!previous || !scope.generation || previous->scope!=scope || key.empty())return false;
+    if(std::none_of(previous->requirements.begin(),previous->requirements.end(),[&](auto const& row){return row.key==key;}))return false;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);
+    if(ignored)next->ignored.insert(key);else next->ignored.erase(key);
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
+}
+bool StructureUiState::clearMaterialIgnored(MaterialListScope scope) {
+    auto const previous=materialListView();
+    if(!previous || !scope.generation || previous->scope!=scope)return false;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);next->ignored.clear();
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
 }
 
 std::uint64_t StructureUiState::materialHudRevision() const {
@@ -587,11 +640,13 @@ void StructureUiState::clearMaterialHud() {
 
 void StructureUiState::clearMaterials() {
     mMaterialListRequested.store(false, std::memory_order_release);
+    mMaterialAvailabilityRequested.store(false, std::memory_order_release);
     mMaterialListReady.store(false, std::memory_order_release);
     std::shared_ptr<MaterialHudSnapshot const> retired;
     {
         std::lock_guard lock(mMaterialMutex);
-        mMaterialRequirements.clear();
+        mMaterialList.reset();++mMaterialListToken;
+        mMaterialListReady.store(false,std::memory_order_release);
         retired = std::move(mMaterialHud);
         ++mMaterialHudRevision;
     }
