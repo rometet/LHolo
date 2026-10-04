@@ -112,14 +112,43 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         {VerificationState::Missing,{140,65,-12},"minecraft:stone_bricks","minecraft:air",9},
         {VerificationState::Missing,{141,65,-12},"minecraft:stone_bricks","minecraft:air",16},
         {VerificationState::WrongType,{142,65,-12},"minecraft:oak_planks","minecraft:birch_planks",25},
-        {VerificationState::WrongState,{143,65,-12},"minecraft:oak_stairs [upside_down_bit=false, weirdo_direction=2]","minecraft:oak_stairs [upside_down_bit=true, weirdo_direction=0]",36},
+        {VerificationState::WrongState,{143,65,-12},"minecraft:oak_stairs [upside_down_bit=0b, weirdo_direction=2]","minecraft:oak_stairs [upside_down_bit=1b, weirdo_direction=0]",36},
         {VerificationState::Extra,{144,65,-12},"minecraft:air","minecraft:dirt",49}};
     model.schematic.target=report->mismatches[0];model.schematic.report=report;
     model.schematic.phase=running?schematic::VerificationPhase::Running:schematic::VerificationPhase::Completed;
     report->running=running;report->checked=17200;report->progress=.42f;
     if(directCase==4)report->materials={{"minecraft:stone_bricks",{128,96},160},{"minecraft:oak_stairs",{32,24},16}};
+    if(directCase==10){report->mismatches.clear();report->tally={};report->tally.correct=4096;model.schematic.target.reset();}
+    if(directCase==11 || directCase==18){
+        report->mismatches.clear();report->tally={};report->tally.missing=200000;report->truncated=true;
+        for(int i=0;i<1536;++i)report->mismatches.push_back({VerificationState::Missing,{140+i,65,-12},
+            directCase==18?"minecraft:stone_bricks":"minecraft:block_"+std::to_string(i),"minecraft:air",double(i*i)});
+        model.schematic.target=report->mismatches[0];
+    }
+    if(directCase==12){model.schematic.phase=schematic::VerificationPhase::Queued;model.schematic.report.reset();model.schematic.target.reset();}
+    if(directCase==13){model.schematic.phase=schematic::VerificationPhase::Cancelled;model.schematic.report.reset();model.schematic.target.reset();}
+    if(directCase==14){model.schematic.phase=schematic::VerificationPhase::NotVerified;model.schematic.report.reset();model.schematic.target.reset();}
+    model.verifierView=std::make_shared<VerifierViewState>();
+    if(directCase==15)std::snprintf(model.verifierView->search.data(),model.verifierView->search.size(),"oak upside_down_bit");
+    if(directCase==16)model.schematic.target=report->mismatches[3];
+    if(directCase==17)model.verifierView->errorsOnly=true;
+    if(directCase==19)model.schematic.target.reset();
+    MenuActions actions;
+    actions.verifySchematic=[&]{model.schematic.phase=schematic::VerificationPhase::Queued;model.schematic.report.reset();};
+    actions.cancelVerification=[&]{model.schematic.phase=schematic::VerificationPhase::Cancelled;model.schematic.report.reset();};
+    actions.resetVerification=[&]{model.schematic.phase=schematic::VerificationPhase::NotVerified;model.schematic.report.reset();model.schematic.target.reset();};
+    actions.setMistakeFilter=[&](MistakeFilter filter){model.schematic.filter=filter;model.schematic.target.reset();};
+    actions.selectMistake=[&](auto const& stamp,auto index){
+        schematic::MistakeSelection selection;selection.setFilter(model.schematic.filter);
+        if(selection.select(stamp,report->stamp,report->running,report->mismatches,index))model.schematic.target=report->mismatches[index];
+    };
+    actions.clearMistakeTarget=[&]{model.schematic.target.reset();};
+    actions.cycleMistake=[&](MistakeFilter filter){
+        schematic::MistakeSelection selection;
+        if(selection.cycle(report->stamp,report->running,report->mismatches,filter))model.schematic.target=selection.target(report->stamp)->mismatch;
+    };
     auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
-    for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");require(io.Fonts->TexWidth==atlasWidth && io.Fonts->TexHeight==atlasHeight,"Japanese UI does not resize/reload the atlas");}
+    for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");require(io.Fonts->TexWidth==atlasWidth && io.Fonts->TexHeight==atlasHeight,"Japanese UI does not resize/reload the atlas");}
     if(scroll){
         ImGuiWindow* page{};
         for(auto* window:context->Windows){
@@ -130,8 +159,22 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         }
         require(page && page->ScrollMax.y>0,"compact verifier has page scroll");
         ImGui::SetScrollY(page,page->ScrollMax.y);
-        for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();}
+        for(int frame=0;frame<4;++frame){ImGui::SetScrollY(page,page->ScrollMax.y);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
         require(page->Scroll.y>0,"compact verifier scroll reaches lower content");
+        require(std::abs(page->Scroll.y-page->ScrollMax.y)<1.f,"compact page reaches actual content bottom after auto-size settles");
+    }
+    if(directCase==20 || directCase==21){
+        ImGuiWindow* page{};ImGuiWindow* panel{};
+        for(auto* window:context->Windows){
+            auto name=std::string_view(window->Name);auto const separator=name.find_last_of('/');
+            auto child=name.substr(separator==std::string_view::npos?0:separator+1);
+            if(child.starts_with("##PageScroll"))page=window;
+            if(child.starts_with(directCase==20?"##MismatchList":"##VerifierDetails"))panel=window;
+        }
+        require(page && panel,"compact list/detail panel exists");
+        ImGui::SetScrollY(page,panel->Pos.y-page->Pos.y+page->Scroll.y);
+        for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
+        require(panel->Pos.y < page->ClipRect.Max.y && panel->Pos.y >= page->ClipRect.Min.y-2,"compact panel is reachable at page scroll target");
     }
     saveRender(output,width,height);
     std::printf("Verifier render: %dx%d scale=%.1f running=%d PASS\n",width,height,scale,running);
@@ -147,6 +190,18 @@ int main(int argc,char** argv) {
         renderCase(dir/"verifier-640.ppm",640,480,1,false);
         renderCase(dir/"verifier-640-scrolled.ppm",640,480,1,false,true);
         renderCase(dir/"verifier-progress.ppm",1920,1080,1,true);
+        renderCase(dir/"verifier-empty.ppm",1920,1080,1,false,false,10);
+        renderCase(dir/"verifier-large.ppm",1920,1080,1,false,false,11);
+        renderCase(dir/"verifier-queued.ppm",1920,1080,1,false,false,12);
+        renderCase(dir/"verifier-cancelled.ppm",1920,1080,1,false,false,13);
+        renderCase(dir/"verifier-not-verified.ppm",1920,1080,1,false,false,14);
+        renderCase(dir/"verifier-search.ppm",1920,1080,1,false,false,15);
+        renderCase(dir/"verifier-state-detail.ppm",1920,1080,1,false,false,16);
+        renderCase(dir/"verifier-errors-only.ppm",1920,1080,1,false,false,17);
+        renderCase(dir/"verifier-many-coordinates.ppm",1920,1080,1,false,false,18);
+        renderCase(dir/"verifier-no-selection.ppm",1920,1080,1,false,false,19);
+        renderCase(dir/"verifier-640-list.ppm",640,480,1,false,false,20);
+        renderCase(dir/"verifier-640-detail.ppm",640,480,1,false,false,21);
         renderCase(dir/"direct-hotkeys-1920.ppm",1920,1080,1,false,true,1);
         renderCase(dir/"direct-hotkeys-640.ppm",640,480,1,false,true,2);
         renderCase(dir/"direct-placed-640.ppm",640,480,1,false,false,3);

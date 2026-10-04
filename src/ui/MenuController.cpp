@@ -45,6 +45,7 @@ auto& uiState() {
 std::array<char, StructurePathUtf8Capacity> gPathBuffer{};
 bool                   gPathInitialized{};
 MenuPage               gActivePage{MenuPage::Projection};
+auto gVerifierView = std::make_shared<VerifierViewState>();
 
 struct HotkeyDefinition { HotkeyId id; i18n::TextKey label; };
 constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
@@ -70,6 +71,7 @@ constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
 
 MenuModel buildStructureMenuModel(float effectiveUiScale) {
     MenuModel model;
+    model.verifierView = gVerifierView;
     auto& session = structure::detail::StructureSession::getInstance();
     auto const sessionSnapshot = session.snapshot();
     auto const hud = uiState().hud();
@@ -319,6 +321,8 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
     actions.verifySchematic = [] { structure::schematic::verify(); };
     actions.cancelVerification = [] { structure::schematic::cancelVerification(); };
+    actions.resetVerification = [] { structure::schematic::resetVerification(); };
+    actions.clearMistakeTarget = [] { structure::schematic::clearMistakeTarget(); };
     actions.cycleMistake = [](auto filter) { structure::schematic::cycleMistake(filter); };
     actions.setMistakeFilter = [](auto filter) { structure::schematic::setMistakeFilter(filter); };
     actions.selectMistake = [](auto const& stamp, auto index) { (void)structure::schematic::selectMistake(stamp, index); };

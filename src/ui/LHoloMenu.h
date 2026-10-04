@@ -6,6 +6,7 @@
 #include "input/HotkeyTypes.h"
 #include "input/MenuRoute.h"
 #include "structure/SchematicRuntime.h"
+#include "ui/VerifierViewState.h"
 
 #include <array>
 #include <cstddef>
@@ -147,6 +148,7 @@ struct MenuModel {
     int  materialHudPosition{3};
     bool closeRequested{};
     structure::schematic::Snapshot schematic;
+    std::shared_ptr<VerifierViewState> verifierView;
 };
 
 struct MenuActions {
@@ -164,13 +166,14 @@ struct MenuActions {
     std::function<void(CapturePointId)> usePlayerCapturePosition;
     std::function<void()> clearCapture;
     std::function<void(CaptureDraftModel const&)> exportCapture;
-    std::function<void()> refreshSchematics, importSavedSchematic, verifySchematic, cancelVerification;
+    std::function<void()> refreshSchematics, importSavedSchematic, verifySchematic, cancelVerification, resetVerification;
     std::function<void(std::string const&)> placeSchematic;
     std::function<void(std::uint64_t)> selectPlacement, deletePlacement, movePlacementToFeet;
     std::function<void(structure::SavedPlacement const&,std::uint64_t)> editPlacement;
     std::function<void(structure::MistakeFilter)> cycleMistake;
     std::function<void(structure::MistakeFilter)> setMistakeFilter;
     std::function<void(structure::schematic::ReportStamp const&, std::size_t)> selectMistake;
+    std::function<void()> clearMistakeTarget;
 };
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);

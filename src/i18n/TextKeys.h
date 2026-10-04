@@ -319,6 +319,38 @@
     LHOLO_TEXT_KEY("verifier.shownCount", VerifierShownCount, "") \
     LHOLO_TEXT_KEY("verifier.coordinates", VerifierCoordinates, "") \
     LHOLO_TEXT_KEY("verifier.noRows", VerifierNoRows, "") \
+    LHOLO_TEXT_KEY("verifier.start", VerifierStart, "") \
+    LHOLO_TEXT_KEY("verifier.countHint", VerifierCountHint, "") \
+    LHOLO_TEXT_KEY("verifier.expectedShort", VerifierExpectedShort, "") \
+    LHOLO_TEXT_KEY("verifier.actualShort", VerifierActualShort, "") \
+    LHOLO_TEXT_KEY("verifier.reset", VerifierReset, "") \
+    LHOLO_TEXT_KEY("verifier.idle", VerifierIdle, "") \
+    LHOLO_TEXT_KEY("verifier.waiting", VerifierWaiting, "") \
+    LHOLO_TEXT_KEY("verifier.running", VerifierRunning, "") \
+    LHOLO_TEXT_KEY("verifier.done", VerifierDone, "") \
+    LHOLO_TEXT_KEY("verifier.stopped", VerifierStopped, "") \
+    LHOLO_TEXT_KEY("verifier.all", VerifierAll, "") \
+    LHOLO_TEXT_KEY("verifier.errorsOnly", VerifierErrorsOnly, "") \
+    LHOLO_TEXT_KEY("verifier.totals", VerifierTotals, "") \
+    LHOLO_TEXT_KEY("verifier.missing", VerifierMissing, "") \
+    LHOLO_TEXT_KEY("verifier.wrongType", VerifierWrongType, "") \
+    LHOLO_TEXT_KEY("verifier.wrongState", VerifierWrongState, "") \
+    LHOLO_TEXT_KEY("verifier.extra", VerifierExtra, "") \
+    LHOLO_TEXT_KEY("verifier.correct", VerifierCorrect, "") \
+    LHOLO_TEXT_KEY("verifier.unknown", VerifierUnknown, "") \
+    LHOLO_TEXT_KEY("verifier.summaryOnly", VerifierSummaryOnly, "") \
+    LHOLO_TEXT_KEY("verifier.search", VerifierSearch, "") \
+    LHOLO_TEXT_KEY("verifier.filterStatus", VerifierFilterStatus, "") \
+    LHOLO_TEXT_KEY("verifier.noSearch", VerifierNoSearch, "") \
+    LHOLO_TEXT_KEY("verifier.details", VerifierDetails, "") \
+    LHOLO_TEXT_KEY("verifier.selectHint", VerifierSelectHint, "") \
+    LHOLO_TEXT_KEY("verifier.expectedState", VerifierExpectedState, "") \
+    LHOLO_TEXT_KEY("verifier.actualState", VerifierActualState, "") \
+    LHOLO_TEXT_KEY("verifier.noState", VerifierNoState, "") \
+    LHOLO_TEXT_KEY("verifier.retained", VerifierRetained, "") \
+    LHOLO_TEXT_KEY("verifier.selectionHidden", VerifierSelectionHidden, "") \
+    LHOLO_TEXT_KEY("verifier.clearHighlight", VerifierClearHighlight, "") \
+    LHOLO_TEXT_KEY("verifier.coordinateHint", VerifierCoordinateHint, "") \
     LHOLO_TEXT_KEY("hotkey.openPlaced", HotkeyOpenPlaced, "") \
     LHOLO_TEXT_KEY("hotkey.openFiles", HotkeyOpenFiles, "") \
     LHOLO_TEXT_KEY("hotkey.openVerification", HotkeyOpenVerification, "") \

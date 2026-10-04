@@ -257,7 +257,24 @@ bool ready(BlockSource& source, BlockPos const& pos, Block const& actual) {
 }
 std::string describe(Block const* value) {
     if (!value) return "minecraft:air";
-    return value->mSerializationId.get().toString();
+    // Capture the real native name/states into a stable, value-only display
+    // format. CompoundTag::toString is a debug representation, not a UI schema.
+    std::string result(value->getTypeName());
+    for (auto const& [key, tag] : value->mSerializationId.get()) {
+        if (key != "states" || !tag.hold<CompoundTag>()) continue;
+        auto const& states = tag.get<CompoundTag>();
+        if (states.empty()) break;
+        result += " [";
+        bool first = true;
+        for (auto const& [name, state] : states) {
+            if (!first) result += ", ";
+            first = false;
+            result += name + "=" + state.toSnbt(SnbtFormat::Minimize);
+        }
+        result += "]";
+        break;
+    }
+    return result;
 }
 void retainMismatch(Job& job, Mismatch row) {
     constexpr std::size_t cap = 512;
@@ -483,6 +500,10 @@ void verify(){
 void cancelVerification(){
     std::lock_guard lock(gMutex);
     if(gVerification.busy()){gVerification.cancel();retireReport();}
+}
+void resetVerification(){
+    std::lock_guard lock(gMutex);
+    invalidateVerification();
 }
 bool selectMistake(ReportStamp const& stamp,std::size_t index) {
     auto const structure=detail::StructureSession::getInstance().snapshot();

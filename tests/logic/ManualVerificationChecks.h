@@ -76,5 +76,18 @@ template<class Check> void runManualVerificationChecks(Check check) {
     check(!owner.publishVerificationIfCurrent(current,[&]{++publications;return true;}));
     check(publications==1);
     owner.resetTransform();
+    // Result reset is invalidation, including completed/queued/running work.
+    for (int phase=0;phase<3;++phase) {
+        ManualVerificationControl resetControl;
+        check(resetControl.request(context));
+        auto resetToken=phase?resetControl.start(context):0;
+        if(phase==2)check(resetControl.finish(resetToken,context));
+        resetControl.invalidate();
+        check(resetControl.phase()==VerificationPhase::NotVerified);
+        check(!resetControl.start(context));check(!resetControl.finish(resetToken,context));
+        check(resetControl.request(context));auto newToken=resetControl.start(context);
+        check(newToken && newToken!=resetToken);check(!resetControl.finish(resetToken,context));
+        check(resetControl.finish(newToken,context));
+    }
 }
 } // namespace lholo::tests

@@ -47,6 +47,8 @@ bool edit(SavedPlacement const& placement, std::uint64_t revision);
 bool moveToFeet(std::uint64_t id);
 void verify();
 void cancelVerification();
+// Discard only the scan result/selection. Does not alter placement or projection.
+void resetVerification();
 void cycleMistake(MistakeFilter filter);
 bool selectMistake(ReportStamp const& stamp,std::size_t index);
 void setMistakeFilter(MistakeFilter filter);

@@ -3,7 +3,6 @@
 #include "ui/MenuPages.h"
 #include "ui/PresentationText.h"
 #include "projection/core/ComparisonStyle.h"
-#include "structure/VerificationGroups.h"
 
 #include "structure/LayerDisplayTypes.h"
 #include "structure/capture/CaptureBounds.h"
@@ -223,104 +222,6 @@ void renderSelectedMaterials(MenuModel const& model) {
         for(auto const& row:report->materials){
             ImGui::TextWrapped("%s  %llu / %llu / %llu / %s",row.item.c_str(),static_cast<unsigned long long>(row.count.total),static_cast<unsigned long long>(row.count.correct),static_cast<unsigned long long>(row.count.remaining()),
                 row.inventory?std::to_string(*row.inventory).c_str():tr(i18n::TextKey::SchematicInventoryUnavailable));
-        }
-    }ImGui::EndChild();
-}
-
-void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
-    using namespace structure;
-    using schematic::VerificationPhase;
-    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
-    auto const& snap=model.schematic;
-    if(!snap.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.status).c_str());
-    auto const p=selectedPlacement(snap.session.document);
-    if(p)ImGui::TextWrapped("%s",p->name.c_str());
-    else ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierNoPlacement));
-    bool const busy=snap.phase==VerificationPhase::Queued || snap.phase==VerificationPhase::Running;
-    bool const canVerify=snap.worldAvailable && p && snap.session.writable && snap.activeProjectionAvailable && !busy;
-    ImGui::BeginDisabled(!canVerify);
-    if(ImGui::Button(tr(i18n::TextKey::SchematicVerify)) && canVerify
-        && actions.verifySchematic)actions.verifySchematic();
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!busy);
-    if(ImGui::Button(tr(i18n::TextKey::VerifierCancel)) && busy && actions.cancelVerification)actions.cancelVerification();
-    ImGui::EndDisabled();
-    ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierManualHint));
-    auto const report=snap.report;
-    if(snap.phase==VerificationPhase::Queued){ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierQueued));return;}
-    if(report && report->running){
-        ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicPending));
-        ImGui::Text(tr(i18n::TextKey::VerifierChecked),static_cast<unsigned long long>(report->checked));
-        ImGui::ProgressBar(report->progress,ImVec2(-1,0));
-        return;
-    }
-    if(!report){
-        ImGui::TextWrapped("%s",tr(snap.phase==VerificationPhase::Cancelled?i18n::TextKey::VerifierCancelled:i18n::TextKey::VerifierNotVerified));
-        return;
-    }
-    ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierCompleted));
-    auto const& t=report->tally;
-    ImGui::TextWrapped(tr(i18n::TextKey::SchematicSummary),static_cast<unsigned long long>(t.correct),static_cast<unsigned long long>(t.total()),
-        static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType),static_cast<unsigned long long>(t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
-    constexpr std::array filters{MistakeFilter::Mistakes,MistakeFilter::Missing,MistakeFilter::WrongType,MistakeFilter::WrongState,MistakeFilter::Extra};
-    constexpr std::array keys{i18n::TextKey::SchematicFilterAll,i18n::TextKey::SchematicFilterMissing,i18n::TextKey::SchematicFilterWrongType,i18n::TextKey::SchematicFilterState,i18n::TextKey::SchematicFilterExtra};
-    std::array counts{t.missing+t.wrongType+t.wrongState+t.extra,t.missing,t.wrongType,t.wrongState,t.extra};
-    auto filter=snap.filter;
-    bool filterChanged{};
-    for(std::size_t i=0;i<filters.size();++i){
-        auto label=std::string{tr(keys[i])}+" ("+std::to_string(counts[i])+")";
-        auto const width=ImGui::CalcTextSize(label.c_str()).x+ImGui::GetStyle().FramePadding.x*2;
-        if(i && ImGui::GetItemRectMax().x+metrics.gap+width<=ImGui::GetWindowPos().x+ImGui::GetWindowContentRegionMax().x)ImGui::SameLine(0,metrics.gap);
-        ImGui::PushID(static_cast<int>(filters[i]));
-        if(ImGui::Selectable(label.c_str(),filter==filters[i],0,ImVec2(width,ImGui::GetFrameHeight()))){
-            filter=filters[i];filterChanged=true;
-            if(actions.setMistakeFilter)actions.setMistakeFilter(filter);
-        }
-        ImGui::PopID();
-    }
-    if(ImGui::Button(tr(i18n::TextKey::SchematicNearest)) && actions.cycleMistake)actions.cycleMistake(filter);
-    ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicHighlightHint));
-    if(report->truncated)ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicTruncated));
-    auto groups=schematic::groupMismatches(report->mismatches,filter);
-    if(groups.empty()){ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierNoRows));return;}
-    std::size_t selectedGroup{};
-    if(!filterChanged && snap.target)for(std::size_t i=0;i<groups.size();++i){
-        auto const& row=report->mismatches[groups[i].indices.front()];
-        if(row.kind==snap.target->kind && row.expected==snap.target->expected && row.actual==snap.target->actual)selectedGroup=i;
-    }
-    if(ImGui::BeginChild("##MismatchList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*9),ImGuiChildFlags_Borders)){
-        if(ImGui::BeginTable("##VerifierPairs",3,ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_RowBg|ImGuiTableFlags_ScrollY|ImGuiTableFlags_Resizable,ImVec2(0,0))){
-            ImGui::TableSetupColumn(tr(i18n::TextKey::VerifierExpected),ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn(tr(i18n::TextKey::VerifierActual),ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn(tr(i18n::TextKey::VerifierShownCount),ImGuiTableColumnFlags_WidthFixed,ImGui::CalcTextSize(tr(i18n::TextKey::VerifierShownCount)).x+metrics.gap);
-            ImGui::TableSetupScrollFreeze(0,1);ImGui::TableHeadersRow();
-            for(std::size_t i=0;i<groups.size();++i){
-                auto const& group=groups[i];auto const& row=report->mismatches[group.indices.front()];
-                ImGui::PushID(static_cast<int>(group.indices.front()));ImGui::TableNextRow();ImGui::TableSetColumnIndex(0);
-                float const wrap=std::max(1.f,ImGui::GetContentRegionAvail().x);
-                ImGui::TableSetColumnIndex(1);
-                float const actualWrap=std::max(1.f,ImGui::GetContentRegionAvail().x);
-                auto const height=std::max(ImGui::CalcTextSize(row.expected.c_str(),nullptr,false,wrap).y,ImGui::CalcTextSize(row.actual.c_str(),nullptr,false,actualWrap).y);
-                ImGui::TableSetColumnIndex(0);
-                bool const selected=!filterChanged && snap.target && row.kind==snap.target->kind && row.expected==snap.target->expected && row.actual==snap.target->actual;
-                if(ImGui::Selectable("##MismatchRow",selected,ImGuiSelectableFlags_SpanAllColumns,ImVec2(0,height)) && actions.selectMistake)actions.selectMistake(report->stamp,group.indices.front());
-                auto const min=ImGui::GetItemRectMin();ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(),ImGui::GetFontSize(),min,ImGui::GetColorU32(ImGuiCol_Text),row.expected.c_str(),nullptr,wrap);
-                ImGui::TableSetColumnIndex(1);ImGui::TextWrapped("%s",row.actual.c_str());
-                ImGui::TableSetColumnIndex(2);ImGui::Text("%zu",group.indices.size());
-                ImGui::PopID();
-            }
-            ImGui::EndTable();
-        }
-    }ImGui::EndChild();
-    ImGui::TextUnformatted(tr(i18n::TextKey::VerifierCoordinates));
-    if(ImGui::BeginChild("##VerifierCoordinates",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*6),ImGuiChildFlags_Borders)){
-        for(auto index:groups[selectedGroup].indices){
-            auto const& row=report->mismatches[index];ImGui::PushID(static_cast<int>(index));
-            char label[160]{};std::snprintf(label,sizeof(label),"%lld, %lld, %lld   (%.1f)",row.world.x,row.world.y,row.world.z,std::sqrt(row.distanceSquared));
-            bool const selected=!filterChanged && snap.target && schematic::sameMismatch(*snap.target,row);
-            if(ImGui::Selectable(label,selected) && actions.selectMistake)actions.selectMistake(report->stamp,index);
-            ImGui::PopID();
         }
     }ImGui::EndChild();
 }

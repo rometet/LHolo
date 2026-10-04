@@ -131,20 +131,19 @@ void testVerifierControls() {
     model.schematic.session.document.placements={placement};model.schematic.session.document.selected=1;
     auto report=std::make_shared<schematic::Report>();
     report->stamp.worldEpoch=11;report->stamp.placementId=1;report->stamp.loadedGeneration=2;report->stamp.reportRevision=3;
-    report->mismatches={{VerificationState::Missing,{1,2,3},"expected","actual",1},
-        {VerificationState::WrongType,{4,5,6},"minecraft:stone","minecraft:dirt",2},
-        {VerificationState::WrongState,{7,8,9},"facing south","facing north",3},
-        {VerificationState::Extra,{10,11,12},"minecraft:air","minecraft:stone",4}};
+    report->mismatches={{VerificationState::Missing,{1,2,3},"minecraft:stone","minecraft:air",9},
+        {VerificationState::WrongType,{4,5,6},"minecraft:stone","minecraft:birch_planks",4},
+        {VerificationState::WrongState,{7,8,9},"minecraft:oak_stairs [facing=south]","minecraft:oak_stairs [facing=north]",3},
+        {VerificationState::Extra,{10,11,12},"minecraft:air","minecraft:stone",4},
+        {VerificationState::Missing,{2,2,3},"minecraft:stone","minecraft:air",1}};
     report->tally.missing=21;report->tally.wrongType=22;report->tally.wrongState=23;report->tally.extra=24;
-    model.schematic.report=report;
-    model.schematic.phase=schematic::VerificationPhase::Completed;
+    model.schematic.report=report;model.schematic.phase=schematic::VerificationPhase::Completed;
     schematic::MistakeSelection selection;
-    std::size_t rowCalls{},filterCalls{};
+    std::size_t rowCalls{},filterCalls{},verifyCalls{},cancelCalls{},resetCalls{},clearCalls{};
     MenuActions actions;
     actions.selectMistake=[&](schematic::ReportStamp const& stamp,std::size_t index){
-        ++rowCalls;
-        check(stamp==report->stamp,"UI forwards exact immutable report stamp");
-        check(selection.select(stamp,report->stamp,false,report->mismatches,index),"UI forwards selectable row index");
+        ++rowCalls;check(stamp==report->stamp,"UI forwards exact immutable report stamp");
+        check(selection.select(stamp,report->stamp,false,report->mismatches,index),"UI forwards selectable source index");
         model.schematic.target=selection.target(report->stamp)->mismatch;
     };
     actions.setMistakeFilter=[&](MistakeFilter filter){
@@ -153,6 +152,11 @@ void testVerifierControls() {
         auto next=std::make_shared<schematic::Report>(*report);++next->stamp.filterRevision;
         report=std::move(next);model.schematic.report=report;
     };
+    actions.verifySchematic=[&]{++verifyCalls;};
+    actions.cancelVerification=[&]{++cancelCalls;};
+    actions.resetVerification=[&]{++resetCalls;model.schematic.report.reset();model.schematic.target.reset();
+        model.schematic.phase=schematic::VerificationPhase::NotVerified;selection.clear();};
+    actions.clearMistakeTarget=[&]{++clearCalls;selection.clear();model.schematic.target.reset();};
     auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
     auto frame=[&]{
         ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({1200,3400});
@@ -165,52 +169,86 @@ void testVerifierControls() {
     };
     frame();frame();
     auto* rows=windowContaining("##MismatchList");check(rows!=nullptr,"Verifier list exists");
-    auto selectRow=[&](int index){
-        auto* table=context->Tables.GetByKey(rows->GetID("##VerifierPairs"));
-        check(table!=nullptr,"Verifier expected/actual table exists");
+    auto selectRow=[&](VerificationState kind,int index){
+        auto id=ImHashStr("##VerifierPairs",0,rows->GetID(static_cast<int>(kind)));
+        auto* table=context->Tables.GetByKey(id);check(table!=nullptr,"Verifier category pair table exists");
         auto const seed=ImHashData(&index,sizeof(index),ImGui::TableGetInstanceID(table,0));
         context->NavNextActivateId=ImHashStr("##MismatchRow",0,seed);
-        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();frame();
     };
-    selectRow(1);
-    check(rowCalls==1 && model.schematic.target && model.schematic.target->world==Cell{4,5,6},"WrongType row selection");
-    selectRow(3);
-    check(rowCalls==2 && model.schematic.target && model.schematic.target->kind==VerificationState::Extra,"Extra row reselection");
-    auto chooseFilter=[&](lholo::i18n::TextKey key,int index){
+    selectRow(VerificationState::WrongType,1);
+    check(rowCalls==1 && model.schematic.target->world==Cell{4,5,6},"WrongType row selects highlight target");
+    selectRow(VerificationState::Extra,3);
+    check(rowCalls==2 && model.schematic.target->kind==VerificationState::Extra,"Extra row reselection");
+    auto chooseFilter=[&](lholo::i18n::TextKey key){
         auto* window=ImGui::FindWindowByName("VerifierControlTest");
-        auto const count=index==4?report->tally.wrongType:report->tally.extra;
-        auto label=std::string{lholo::i18n::tr(key)}+" ("+std::to_string(count)+")";
-        context->NavNextActivateId=ImHashStr(label.c_str(),0,window->GetID(index));
+        context->NavNextActivateId=window->GetID("##VerifierCategoryFilter");
         context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+        auto* popup=windowContaining("##Combo_");check(popup && popup->Active,"category combo opens");
+        context->NavNextActivateId=popup->GetID(lholo::i18n::tr(key));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();frame();
     };
-    chooseFilter(lholo::i18n::TextKey::SchematicFilterWrongType,4);
-    check(filterCalls==1 && model.schematic.filter==MistakeFilter::WrongType && !model.schematic.target,"WrongType filter clears target");
-    selectRow(3);check(rowCalls==2,"Hidden Extra row cannot select under WrongType filter");
-    selectRow(1);check(rowCalls==3 && model.schematic.target,"Filtered WrongType row selects");
-    chooseFilter(lholo::i18n::TextKey::SchematicFilterExtra,5);
-    check(filterCalls==2 && model.schematic.filter==MistakeFilter::Extra && !model.schematic.target,"Extra filter clears target");
-    selectRow(3);check(rowCalls==4 && model.schematic.target->kind==VerificationState::Extra,"Filtered Extra row selects");
-    std::size_t verifyCalls{},cancelCalls{};
-    actions.verifySchematic=[&]{++verifyCalls;};
-    actions.cancelVerification=[&]{++cancelCalls;};
+    chooseFilter(lholo::i18n::TextKey::VerifierWrongType);
+    check(filterCalls==1 && model.schematic.filter==MistakeFilter::WrongType && !model.schematic.target,"category filter clears selection");
+    selectRow(VerificationState::Extra,3);check(rowCalls==2,"hidden category cannot select through stale navigation ID");
+    selectRow(VerificationState::WrongType,1);check(rowCalls==3,"filtered category row selects");
+    chooseFilter(lholo::i18n::TextKey::SchematicFilterAll);
+    selectRow(VerificationState::Missing,4);
+    check(model.schematic.target->world==Cell{2,2,3},"aggregate row selects nearest original source index");
+    check(model.verifierView->groups.front().indices==std::vector<std::size_t>({4,0}),"coordinate list is ordered nearest first");
     auto activateButton=[&](lholo::i18n::TextKey key){
         context->NavNextActivateId=ImGui::FindWindowByName("VerifierControlTest")->GetID(lholo::i18n::tr(key));
         context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
     };
+    auto* details=windowContaining("##VerifierDetails");check(details && details->Active,"selected detail panel exists");
+    context->NavNextActivateId=details->GetID(lholo::i18n::tr(lholo::i18n::TextKey::VerifierClearHighlight));
+    frame();check(clearCalls==1 && !model.schematic.target,"clear uses existing highlight action");
+    auto* window=ImGui::FindWindowByName("VerifierControlTest");
+    auto searchId=window->GetID("##VerifierSearch");
+    context->NavNextActivateId=searchId;context->NavNextActivateFlags=ImGuiActivateFlags_PreferInput;frame();
+    check(context->ActiveId==searchId,"search receives keyboard focus");
+    io.AddInputCharactersUTF8("BIRCH");frame();
+    check(std::string_view(model.verifierView->search.data())=="BIRCH","search input persists");
+    check(model.verifierView->categories[static_cast<int>(VerificationState::Missing)].empty(),"search hides nonmatching category");
+    check(model.verifierView->categories[static_cast<int>(VerificationState::WrongType)].size()==1,"search matches actual block ignoring case");
+    io.AddKeyEvent(ImGuiKey_Escape,true);frame();io.AddKeyEvent(ImGuiKey_Escape,false);frame();
+    check(context->ActiveId!=searchId,"escape releases search focus");
+    auto const rebuilds=model.verifierView->rebuilds;for(int i=0;i<20;++i)frame();
+    check(model.verifierView->rebuilds==rebuilds,"unchanged immutable results do not regroup every frame");
+    model.verifierView->search.fill(0);frame();
+    auto next=std::make_shared<schematic::Report>(*report);++next->stamp.loadedGeneration;
+    model.verifierView->search[0]='x';model.schematic.report=next;frame();
+    check(model.verifierView->search[0]==0,"reprojection clears old context search");
+    model.schematic.report=report;frame();
     model.schematic.activeProjectionAvailable=false;
-    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==0,"update disabled until selected projection is active");
+    activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==0,"start disabled without active selected projection");
     model.schematic.activeProjectionAvailable=true;
-    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"manual update action");
+    activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==1,"manual scan action");
     report->running=true;report->checked=256;report->progress=.25f;
     model.schematic.phase=schematic::VerificationPhase::Running;frame();
-    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"update disabled while running");
-    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==1,"running scan can cancel");
-    model.schematic.report.reset();model.schematic.phase=schematic::VerificationPhase::Queued;frame();
-    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==1,"update disabled while queued");
-    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"queued scan can cancel");
+    activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==1,"start disabled while running");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==1,"running scan can stop");
+    activateButton(lholo::i18n::TextKey::VerifierReset);check(resetCalls==1 && !model.schematic.report && !model.schematic.target,"reset discards result and selection");
+    frame();check(model.verifierView->groups.empty(),"reset clears cached rows on the next snapshot");
+    model.schematic.phase=schematic::VerificationPhase::Queued;frame();
+    activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==1,"queued scan cannot start twice");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"queued scan can stop");
     model.schematic.phase=schematic::VerificationPhase::Cancelled;frame();
-    activateButton(lholo::i18n::TextKey::SchematicVerify);check(verifyCalls==2,"cancelled scan allows new manual update");
-    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"cancel disabled while idle");
+    activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==2,"stopped scan allows manual restart");
+    activateButton(lholo::i18n::TextKey::VerifierCancel);check(cancelCalls==2,"stop disabled while idle");
+    auto empty=std::make_shared<schematic::Report>();empty->stamp=report->stamp;empty->tally.correct=100;
+    model.schematic.phase=schematic::VerificationPhase::Completed;model.schematic.report=empty;frame();frame();
+    check(model.verifierView->groups.empty(),"empty result renders without phantom selection");
+    auto large=std::make_shared<schematic::Report>(*empty);
+    for(int i=0;i<50000;++i)large->mismatches.push_back({VerificationState::Missing,{i,64,0},"minecraft:block_"+std::to_string(i),"minecraft:air",double(i)});
+    large->tally.missing=50000;large->truncated=true;model.schematic.report=large;frame();frame();
+    check(model.verifierView->groups.size()==50000,"large fixture retains distinct real pairs");
+    check(ImGui::GetDrawData()->TotalVtxCount<30000,"clipper bounds draw work for large results");
+    auto const largeRebuilds=model.verifierView->rebuilds;frame();
+    check(model.verifierView->rebuilds==largeRebuilds,"large unchanged report reuses aggregation cache");
+    check(verifierMatchesSearch(report->mismatches[2],"OAK facing=north"),"search includes full actual states and all tokens");
+    check(!verifierMatchesSearch(report->mismatches[2],"oak birch"),"all search tokens must match");
+    check(verifierBlockParts(report->mismatches[2].expected).second=="[facing=south]","detail splits preserved native states");
     resetFluentTheme();ImGui::DestroyContext(context);
 }
 
