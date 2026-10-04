@@ -34,6 +34,7 @@ public:
     bool load();
     bool enable();
     bool disable();
+    bool unload();
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const;
 

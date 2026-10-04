@@ -401,6 +401,7 @@
     LHOLO_TEXT_KEY("materials.failed", MaterialsFailed, "") \
     LHOLO_TEXT_KEY("materials.destination", MaterialsDestination, "") \
     LHOLO_TEXT_KEY("materials.exportHint", MaterialsExportHint, "") \
+    LHOLO_TEXT_KEY("materials.exportStopping", MaterialsExportStopping, "") \
     LHOLO_TEXT_KEY("materials.shown", MaterialsShown, "") \
     LHOLO_TEXT_KEY("materials.ownedUnknown", MaterialsOwnedUnknown, "") \
     LHOLO_TEXT_KEY("materials.missingUnknown", MaterialsMissingUnknown, "") \

@@ -58,6 +58,13 @@ lholo::io::MaterialExportRequest request() {
     value.snapshot=StructureUiState::getInstance().materialListView();value.filter=MaterialFilter::All;
     value.names={"日本語\t欄\n改行\"引用\"","=SUM(1,2)","同名","水"};value.capturedAt="fixture UTC";return value;
 }
+void waitForExport(lholo::io::MaterialExportJob& job) {
+    auto const deadline=std::chrono::steady_clock::now()+std::chrono::seconds{10};
+    while(job.poll().phase==lholo::io::MaterialExportPhase::Saving) {
+        if(std::chrono::steady_clock::now()>deadline)throw std::runtime_error("fixture export deadline");
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+}
 void testExport(std::filesystem::path const& dir) {
     using namespace lholo::io;
     auto path=dir/L"日本語の材料.tsv";auto captured=request();writeMaterialTsv(path,captured);auto bytes=read(path);
@@ -67,14 +74,19 @@ void testExport(std::filesystem::path const& dir) {
     check(bytes.find("\"liquid:water|item=\"\t\"minecraft:water\"\t\"\"\t8\t\t\tfalse\t8")!=std::string::npos,"unknown counts empty, not zero");
     check(bytes.find("original_total\t184")!=std::string::npos && bytes.find("generation\t103")!=std::string::npos,"original totals and generation metadata");
     MaterialExportJob job;std::atomic_bool release{};auto const owner=std::this_thread::get_id();std::thread::id worker;
-    check(job.start(captured,[&]{worker=std::this_thread::get_id();while(!release.load())std::this_thread::yield();return std::optional{path};}),"start worker");
-    check(job.poll().phase==MaterialExportPhase::Saving && !job.start(captured,[]{return std::optional<std::filesystem::path>{};}),"poll nonblocking and no duplicate job");
-    auto& state=StructureUiState::getInstance();state.clearMaterials();release=true;job.shutdown();
+    check(job.start(captured,[&](auto const&){worker=std::this_thread::get_id();while(!release.load())std::this_thread::yield();return std::optional{path};}),"start worker");
+    check(job.poll().phase==MaterialExportPhase::Saving && !job.start(captured,[](auto const&){return std::optional<std::filesystem::path>{};}),"poll nonblocking and no duplicate job");
+    auto& state=StructureUiState::getInstance();state.clearMaterials();release=true;waitForExport(job);
     check(job.poll().phase==MaterialExportPhase::Saved && job.poll().source==captured.snapshot->source && worker!=owner && read(path)==bytes,"click-time immutable snapshot survives reload; worker owns disk");
-    check(job.start(captured,[]{return std::optional<std::filesystem::path>{};}),"cancel fixture");job.shutdown();
+    check(job.start(captured,[](auto const&){return std::optional<std::filesystem::path>{};}),"cancel fixture");waitForExport(job);
     check(job.poll().phase==MaterialExportPhase::Cancelled && read(path)==bytes,"cancel writes nothing");
-    check(job.start(captured,[&]{return std::optional{dir/"absent"/"cannot.tsv"};}),"failure fixture");job.shutdown();
+    check(job.start(captured,[&](auto const&){return std::optional{dir/"absent"/"cannot.tsv"};}),"failure fixture");waitForExport(job);
     check(job.poll().phase==MaterialExportPhase::Failed && !job.poll().destination.empty() && !job.poll().error.empty(),"failure retains destination and error");
+    check(job.closeAndDrain(std::chrono::milliseconds{0}) && !job.poll().accepting,"completed export drain closes admission");
+    auto cancellation=std::make_shared<MaterialExportCancellation>();cancellation->cancel();
+    check(!writeMaterialTsv(path,captured,cancellation) && read(path)==bytes,"pre-cancelled writer preserves existing file");
+    check(!writeMaterialTsv(dir/"pre-cancel-no-file.tsv",captured,cancellation)
+        && !std::filesystem::exists(dir/"pre-cancel-no-file.tsv"),"pre-cancelled writer creates no output");
     auto const original=read(path);auto invalid=captured;invalid.names.clear();bool failed{};
     try{writeMaterialTsv(path,invalid);}catch(...){failed=true;}
     check(failed && read(path)==original,"invalid output does not truncate existing file");
@@ -118,6 +130,10 @@ void testUi() {
     check(state.materialListView()->isIgnored(0),"checkbox through production state operation");
     activate(lholo::i18n::TextKey::MaterialsIgnored);check(model.materialsView->visible.size()==1,"ignored filter");
     activate(lholo::i18n::TextKey::MaterialsRestore);frame();check(state.materialListView()->ignored.empty(),"restore button real action");
+    model.materialExport.accepting=false;frame();
+    auto const stoppedExports=exports;activate(lholo::i18n::TextKey::MaterialsExport);
+    check(exports==stoppedExports,"closed lifecycle gate disables production export button");
+    model.materialExport.accepting=true;
     auto huge=std::make_shared<MaterialListSnapshot>(*state.materialListView());huge->requirements.clear();huge->available.clear();
     for(int i=0;i<50000;++i)huge->requirements.push_back({"large",{},"block_"+std::to_string(i),"item",1,64,"key_"+std::to_string(i)});
     check(state.publishMaterialList(huge->requirements,{},105,"large",state.materialListToken()),"large result");

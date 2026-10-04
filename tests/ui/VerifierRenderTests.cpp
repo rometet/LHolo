@@ -154,6 +154,7 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     if(directCase==16)model.schematic.target=report->mismatches[3];
     if(directCase==17)model.verifierView->errorsOnly=true;
     if(directCase==19)model.schematic.target.reset();
+    if(directCase==39){model.materialExport.phase=lholo::io::MaterialExportPhase::Saving;model.materialExport.accepting=false;}
     MenuActions actions;
     if(directCase>=30 && directCase<40) {
         actions.requestMaterials=[]{};
@@ -185,10 +186,11 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
             if(child.starts_with("##PageScroll"))page=window;
         }
         require(page && page->ScrollMax.y>0,"compact verifier has page scroll");
-        ImGui::SetScrollY(page,page->ScrollMax.y);
-        for(int frame=0;frame<4;++frame){ImGui::SetScrollY(page,page->ScrollMax.y);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
+        auto const target=directCase==39?180.f:page->ScrollMax.y;
+        ImGui::SetScrollY(page,target);
+        for(int frame=0;frame<4;++frame){ImGui::SetScrollY(page,directCase==39?target:page->ScrollMax.y);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
         require(page->Scroll.y>0,"compact verifier scroll reaches lower content");
-        require(std::abs(page->Scroll.y-page->ScrollMax.y)<1.f,"compact page reaches actual content bottom after auto-size settles");
+        require(std::abs(page->Scroll.y-(directCase==39?target:page->ScrollMax.y))<1.f,"compact page reaches actual scroll target after auto-size settles");
     }
     if(directCase==36){
         ImGuiWindow* page{};ImGuiWindow* panel{};
@@ -258,6 +260,9 @@ int main(int argc,char** argv) {
         renderCase(dir/"materials-large.ppm",1920,1080,1,false,false,37);
         renderCase(dir/"materials-saved.ppm",1920,1080,1,false,false,38);
         renderCase(dir/"materials-3840.ppm",3840,2160,2,false,false,30);
+        renderCase(dir/"materials-stopping-1920.ppm",1920,1080,1,false,false,39);
+        renderCase(dir/"materials-stopping-640.ppm",640,480,1,false,false,39);
+        renderCase(dir/"materials-stopping-640-controls.ppm",640,480,1,false,true,39);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

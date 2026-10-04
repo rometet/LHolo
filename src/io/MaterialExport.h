@@ -4,6 +4,9 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <atomic>
+#include <chrono>
+#include <mutex>
 
 namespace lholo::io {
 struct MaterialExportRequest {
@@ -21,18 +24,33 @@ struct MaterialExportResult {
     std::string error;
     structure::detail::MaterialListScope scope;
     std::string source;
+    bool accepting{true};
 };
-void writeMaterialTsv(std::filesystem::path const&, MaterialExportRequest const&);
-// A single finite job. Save-dialog/filesystem calls execute only on the worker.
-// poll() never waits. shutdown() is called after native callback drain.
+struct MaterialExportCancellation {
+    std::atomic_bool requested{};
+    void cancel() noexcept { requested.store(true, std::memory_order_release); }
+    bool cancelled() const noexcept { return requested.load(std::memory_order_acquire); }
+};
+using MaterialExportCancel = std::shared_ptr<MaterialExportCancellation>;
+bool writeMaterialTsv(std::filesystem::path const&, MaterialExportRequest const&,
+                      MaterialExportCancel const& cancellation = {});
+// Owns the worker until completion. Never detach or discard a running future.
+// closeAndDrain must succeed BEFORE callback teardown or DLL unload. A timeout
+// leaves the owned job resident and admission closed; the loader must refuse
+// disable/unload and retry after cancellation or the outstanding IO completes.
 class MaterialExportJob {
 public:
-    using ChooseDestination = std::function<std::optional<std::filesystem::path>()>;
+    using ChooseDestination = std::function<std::optional<std::filesystem::path>(MaterialExportCancel const&)>;
     bool start(MaterialExportRequest request, ChooseDestination choose);
     MaterialExportResult poll();
-    void shutdown();
+    bool closeAndDrain(std::chrono::milliseconds budget);
+    bool openSession();
 private:
-    std::optional<std::future<MaterialExportResult>> mFuture;
+    void pollLocked();
+    std::mutex mMutex;
+    std::shared_future<MaterialExportResult> mFuture;
+    MaterialExportCancel mCancellation;
+    bool mAccepting{true};
     MaterialExportResult mResult;
 };
 MaterialExportJob& materialExportJob();

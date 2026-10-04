@@ -45,6 +45,7 @@ std::string nowUtc() {
 }
 void exportStatus(io::MaterialExportResult const& result) {
     using io::MaterialExportPhase;
+    if(!result.accepting)ImGui::TextWrapped("%s",textFor(TextKey::MaterialsExportStopping));
     if(result.phase==MaterialExportPhase::Saving)ImGui::TextWrapped("%s",textFor(TextKey::MaterialsSaving));
     if(result.phase==MaterialExportPhase::Saved)ImGui::TextWrapped(textFor(TextKey::MaterialsSaved),result.source.c_str());
     if(result.phase==MaterialExportPhase::Cancelled)ImGui::TextWrapped("%s",textFor(TextKey::MaterialsCancelled));
@@ -135,8 +136,10 @@ void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics c
     ImGui::BeginDisabled(!snapshot || snapshot->ignored.empty() || !actions.clearIgnoredMaterials);
     if(ImGui::Button(textFor(TextKey::MaterialsRestore)) && snapshot && actions.clearIgnoredMaterials)actions.clearIgnoredMaterials(snapshot->scope);
     ImGui::EndDisabled();nextIfFits(textFor(TextKey::MaterialsExport),metrics);
-    ImGui::BeginDisabled(!snapshot || !model.hasLoadedStructure || !actions.exportMaterials || model.materialExport.phase==io::MaterialExportPhase::Saving);
-    if(ImGui::Button(textFor(TextKey::MaterialsExport)) && snapshot && actions.exportMaterials) {
+    bool const canExport=snapshot && model.hasLoadedStructure && actions.exportMaterials
+        && model.materialExport.accepting && model.materialExport.phase!=io::MaterialExportPhase::Saving;
+    ImGui::BeginDisabled(!canExport);
+    if(ImGui::Button(textFor(TextKey::MaterialsExport)) && canExport) {
         io::MaterialExportRequest request;request.snapshot=snapshot;request.filter=view.filter;request.capturedAt=nowUtc();
         request.names.reserve(snapshot->requirements.size());for(auto const& row:snapshot->requirements)request.names.emplace_back(nameFor(row));
         actions.exportMaterials(std::move(request));

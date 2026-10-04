@@ -2,7 +2,6 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "structure/MaterialTracker.h"
-#include "io/MaterialExport.h"
 #include "structure/InventoryContents.h"
 #include "structure/SchematicRuntime.h"
 #include "structure/PlacementTransform.h"
@@ -397,7 +396,7 @@ void tickMaterialTracker(LocalPlayer& player) {
 }
 
 void shutdownMaterialTracker() {
-    io::materialExportJob().shutdown();
+    // AppKernel has already closed and drained export BEFORE callback teardown.
     schematic::shutdown();
     auto& worker = materialHudWorkerState();
     if (worker.inFlight) {

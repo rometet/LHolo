@@ -365,7 +365,7 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
         auto const count=MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),nullptr,0);
         std::wstring wide(static_cast<std::size_t>(count),L'\0');
         MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),wide.data(),count);
-        (void)io::materialExportJob().start(std::move(request),[wide=std::move(wide)] {return saveMaterialFile(wide);});
+        (void)io::materialExportJob().start(std::move(request),[wide=std::move(wide)](auto const& cancellation) {return saveMaterialFile(wide,cancellation);});
     };
     actions.beginHotkeyCapture = [](HotkeyId id) {
         uiState().beginHotkeyCapture(static_cast<std::size_t>(id));

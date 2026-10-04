@@ -18,6 +18,7 @@ public:
     bool load();
     bool enable();
     bool disable();
+    bool unload();
 
 private:
     AppKernel() = default;
