@@ -1,6 +1,7 @@
 // LHolo - Fluent-style menu pages
 
 #include "ui/MenuPages.h"
+#include "ui/PresentationText.h"
 #include "projection/core/ComparisonStyle.h"
 #include "structure/VerificationGroups.h"
 
@@ -148,6 +149,7 @@ void renderSchematicFilesSection(MenuModel& model, MenuActions const& actions, U
     auto const tr = [](i18n::TextKey key){return i18n::tr(key);};
     renderSection("##SchematicFiles",tr(i18n::TextKey::SchematicFiles),metrics,[&] {
         ImGui::TextWrapped("%s",snap.library.c_str());
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintFilesHowTo));
         if(ImGui::Button(tr(i18n::TextKey::SchematicRefresh)) && actions.refreshSchematics)actions.refreshSchematics();
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicImport)) && actions.importSavedSchematic)actions.importSavedSchematic();
@@ -167,9 +169,10 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
     auto const& snap=model.schematic;
     auto const& placements=snap.session.document;
     auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
-    if(!snap.status.empty())ImGui::TextWrapped("%s",snap.status.c_str());
-    if(!snap.session.status.empty())ImGui::TextWrapped("%s",snap.session.status.c_str());
+    if(!snap.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.status).c_str());
+    if(!snap.session.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.session.status).c_str());
     renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintPlacedHowTo));
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicDeselect)) && actions.selectPlacement)actions.selectPlacement(0);
         for(auto const& p:placements.placements){
@@ -184,17 +187,17 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             if(!metrics.compact)ImGui::SameLine();
             if(ImGui::Button(tr(i18n::TextKey::SchematicDelete)) && actions.deletePlacement)actions.deletePlacement(p.id);
             char name[129]{};std::snprintf(name,sizeof(name),"%s",p.name.c_str());
-            renderValueRow("Name",metrics,[&]{if(ImGui::InputText("##PlacementName",name,sizeof(name)))p.name=name;});
+            renderValueRow(tr(i18n::TextKey::LabelPlacementName),metrics,[&]{if(ImGui::InputText("##PlacementName",name,sizeof(name)))p.name=name;});
             auto coordinate = [&](char const* label,char const* id,std::int64_t& value){
                 renderValueRow(label,metrics,[&]{ImGui::InputScalar(id,ImGuiDataType_S64,&value);});
             };
             coordinate("X","##PlacementX",p.origin.x);coordinate("Y","##PlacementY",p.origin.y);coordinate("Z","##PlacementZ",p.origin.z);
-            char const* rotations[]{"0","90","180","270"};char const* mirrors[]{"None","X","Z"};
+            char const* rotations[]{"0","90","180","270"};char const* mirrors[]{tr(i18n::TextKey::ComboMirrorNone),"X","Z"};
             renderValueRow(tr(i18n::TextKey::LabelRotation),metrics,[&]{ImGui::Combo("##PlacementRotation",&p.rotation,rotations,4);});
             renderValueRow(tr(i18n::TextKey::LabelMirror),metrics,[&]{ImGui::Combo("##PlacementMirror",&p.mirror,mirrors,3);});
             renderCheckboxRow("##PlacementVisible",tr(i18n::TextKey::SchematicVisible),p.visible,metrics);
             renderCheckboxRow("##PlacementExtras",tr(i18n::TextKey::SchematicExtras),p.countExtras,metrics);
-            char const* axes[]{"Y (legacy)","X (legacy)","Material", "Bottom -> Top","Top -> Bottom","West -> East","East -> West","North -> South","South -> North"};
+            char const* axes[]{tr(i18n::TextKey::ComboLayerAxisY),tr(i18n::TextKey::ComboLayerAxisX),tr(i18n::TextKey::ComboLayerAxisMaterial),tr(i18n::TextKey::LayerBottomToTop),tr(i18n::TextKey::LayerTopToBottom),tr(i18n::TextKey::LayerWestToEast),tr(i18n::TextKey::LayerEastToWest),tr(i18n::TextKey::LayerNorthToSouth),tr(i18n::TextKey::LayerSouthToNorth)};
             int axis=toInt(p.layerAxis),mode=toInt(p.layerMode);
             char const* modes[]{tr(i18n::TextKey::ComboRangeAll),tr(i18n::TextKey::ComboRangeSingle),tr(i18n::TextKey::ComboRangeUpToCurrent),tr(i18n::TextKey::ComboRangeFromCurrent)};
             renderValueRow(tr(i18n::TextKey::LabelLayerAxis),metrics,[&]{ImGui::Combo("##PlacementLayerAxis",&axis,axes,9);});p.layerAxis=layerAxisFromInt(axis);
@@ -229,7 +232,7 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
     using schematic::VerificationPhase;
     auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
     auto const& snap=model.schematic;
-    if(!snap.status.empty())ImGui::TextWrapped("%s",snap.status.c_str());
+    if(!snap.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.status).c_str());
     auto const p=selectedPlacement(snap.session.document);
     if(p)ImGui::TextWrapped("%s",p->name.c_str());
     else ImGui::TextWrapped("%s",tr(i18n::TextKey::VerifierNoPlacement));
@@ -417,6 +420,7 @@ bool renderCapturePoint(
 }
 
 void renderCreateStructurePage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintCaptureHowTo));
     renderSection(
         "##CaptureSource", i18n::tr(i18n::TextKey::SectionCaptureSource), metrics, [&] {
         model.capture.mode = 0;
@@ -701,6 +705,7 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
 
 void renderTransformPage(MenuModel& model, UiMetrics const& metrics) {
     renderSection("##Transform", i18n::tr(i18n::TextKey::SectionTransform), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintTransformHowTo));
         static char const* rotationNames[]{"0°", "90°", "180°", "270°"};
         char const* mirrorNames[]{
             i18n::tr(i18n::TextKey::ComboMirrorNone), "X", "Z"
@@ -747,7 +752,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             i18n::tr(i18n::TextKey::ComboLayerAxisY),
             i18n::tr(i18n::TextKey::ComboLayerAxisX),
             i18n::tr(i18n::TextKey::ComboLayerAxisMaterial),
-            "Bottom -> Top", "Top -> Bottom", "West -> East", "East -> West", "North -> South", "South -> North"
+            i18n::tr(i18n::TextKey::LayerBottomToTop), i18n::tr(i18n::TextKey::LayerTopToBottom), i18n::tr(i18n::TextKey::LayerWestToEast), i18n::tr(i18n::TextKey::LayerEastToWest), i18n::tr(i18n::TextKey::LayerNorthToSouth), i18n::tr(i18n::TextKey::LayerSouthToNorth)
         };
         char const* layerModeNames[]{
             i18n::tr(i18n::TextKey::ComboRangeAll),
@@ -797,7 +802,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             ImGui::TextDisabled(
                 i18n::tr(i18n::TextKey::HintLayerZeroBased),
                 maxLayer(model),
-                structure::layerAxisLabel(structure::layerAxisFromInt(model.layerAxis))
+                layerAxisDisplayName(model.layerAxis)
             );
         }
         ImGui::PopTextWrapPos();
@@ -887,6 +892,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
 
 void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     renderSection("##Hotkeys", i18n::tr(i18n::TextKey::SectionHotkeys), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintHotkeysHowTo));
         auto maxLabelWidth = 0.0f;
         auto maxBindingWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::HintPressKeys)).x;
         for (auto const& hotkey : model.hotkeys) {
@@ -963,6 +969,7 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
 
 void renderHudPage(MenuModel& model, UiMetrics const& metrics) {
     renderSection("##Hud", i18n::tr(i18n::TextKey::SectionHud), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintHudHowTo));
         renderCheckboxRow(
             "##HudEnabled", i18n::tr(i18n::TextKey::CheckboxHudEnabled), model.hudEnabled, metrics
         );
@@ -1166,6 +1173,7 @@ void renderMaterialRows(MenuModel const& model,UiMetrics const& metrics,float po
 }
 
 void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics const& metrics) {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintMaterialsHowTo));
     renderSection("##Materials",i18n::tr(i18n::TextKey::MaterialListTitle),metrics,[&]{
         if(ImGui::Button(i18n::tr(i18n::TextKey::MaterialRefresh)) && actions.requestMaterials)actions.requestMaterials();
         auto const lines=static_cast<float>(std::min<std::size_t>(model.materials.size(),10)+2);

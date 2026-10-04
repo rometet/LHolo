@@ -329,7 +329,22 @@
     LHOLO_TEXT_KEY("page.files", PageFiles, "") \
     LHOLO_TEXT_KEY("page.placed", PagePlaced, "") \
     LHOLO_TEXT_KEY("page.materials", PageMaterials, "") \
-    LHOLO_TEXT_KEY("material.refresh", MaterialRefresh, "")
+    LHOLO_TEXT_KEY("material.refresh", MaterialRefresh, "") \
+    LHOLO_TEXT_KEY("menu.tagline", MenuTagline, "") \
+    LHOLO_TEXT_KEY("label.placementName", LabelPlacementName, "") \
+    LHOLO_TEXT_KEY("layer.bottomToTop", LayerBottomToTop, "") \
+    LHOLO_TEXT_KEY("layer.topToBottom", LayerTopToBottom, "") \
+    LHOLO_TEXT_KEY("layer.westToEast", LayerWestToEast, "") \
+    LHOLO_TEXT_KEY("layer.eastToWest", LayerEastToWest, "") \
+    LHOLO_TEXT_KEY("layer.northToSouth", LayerNorthToSouth, "") \
+    LHOLO_TEXT_KEY("layer.southToNorth", LayerSouthToNorth, "") \
+    LHOLO_TEXT_KEY("hint.filesHowTo", HintFilesHowTo, "") \
+    LHOLO_TEXT_KEY("hint.placedHowTo", HintPlacedHowTo, "") \
+    LHOLO_TEXT_KEY("hint.transformHowTo", HintTransformHowTo, "") \
+    LHOLO_TEXT_KEY("hint.materialsHowTo", HintMaterialsHowTo, "") \
+    LHOLO_TEXT_KEY("hint.hotkeysHowTo", HintHotkeysHowTo, "") \
+    LHOLO_TEXT_KEY("hint.hudHowTo", HintHudHowTo, "") \
+    LHOLO_TEXT_KEY("hint.captureHowTo", HintCaptureHowTo, "")
 
 namespace lholo::i18n {
 

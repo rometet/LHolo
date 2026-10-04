@@ -31,6 +31,7 @@
 #include "structure/StructureUiState.h"
 #include "overlay/CompanionBridge.h"
 #include "ui/HudSummaryPolicy.h"
+#include "ui/PresentationText.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/MenuController.h"
 #include "structure/capture/StructureCapture.h"
@@ -883,20 +884,20 @@ void renderHud() {
                 i18n::tr(i18n::TextKey::HudCurrentLayer),
                 currentLayer,
                 maxLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
         } else if (showLayer && layerMode == LayerDisplayMode::UpToCurrent) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeFromZero),
                 currentLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
         } else if (showLayer) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeBetween),
                 currentLayer,
                 maxLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
         }
         if(showLayer) {

@@ -45,7 +45,7 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
             ImGui::TextUnformatted("LHolo");
             ImGui::PopStyleColor();
             ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("PROJECTION CLIENT");
+            ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::MenuTagline));
             ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
             ImGui::Separator();

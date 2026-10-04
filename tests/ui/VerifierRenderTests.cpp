@@ -10,6 +10,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <cstdio>
+#include "JapaneseUiText.inc"
 
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -51,8 +52,35 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     require(io.Fonts->Build(),"actual Windows font atlas");
     require(io.Fonts->Fonts[0]->FindGlyphNoFallback(0x691c)!=nullptr,"Japanese verification glyph");
     require(lholo::i18n::setLanguageByCode("ja_JP"),"Japanese UI");
+    auto const atlasWidth=io.Fonts->TexWidth,atlasHeight=io.Fonts->TexHeight;
+    require(atlasWidth==8192 && atlasHeight<=16384,"existing atlas dimensions stay within the accepted budget");
+    for(std::size_t key=1;key<lholo::i18n::kTextKeyCount;++key) {
+        auto* text=lholo::i18n::tr(static_cast<lholo::i18n::TextKey>(key));
+        while(*text) {
+            unsigned int character{};int const bytes=ImTextCharFromUtf8(&character,text,nullptr);
+            require(bytes>0,"valid UTF-8 Japanese catalog");text+=bytes;
+            if(character<32)continue;
+            if(!io.Fonts->Fonts[0]->FindGlyphNoFallback(static_cast<ImWchar>(character))) {
+                std::fprintf(stderr,"Missing LHolo Japanese glyph U+%04X key=%zu\n",character,key);
+                require(false,"Japanese catalog uses the existing actual font glyphs");
+            }
+        }
+    }
+    std::printf("Japanese LHolo atlas %dx%d fonts=%d sources=%d\n",atlasWidth,atlasHeight,io.Fonts->Fonts.Size,io.Fonts->Sources.Size);
+    for(auto* text:japaneseDisplayCorpus)while(*text) {
+        unsigned int character{};int const bytes=ImTextCharFromUtf8(&character,text,nullptr);
+        require(bytes>0,"valid UTF-8 in Japanese API/status display");text+=bytes;
+        if(character<32)continue;
+        require(io.Fonts->Fonts[0]->FindGlyphNoFallback(static_cast<ImWchar>(character))!=nullptr,
+                "Japanese API/status text uses existing actual font glyphs");
+    }
     MenuModel model;model.page=MenuPage::Verification;
-    if(directCase==1 || directCase==2) {
+    if(directCase>=100) {
+        model.page=static_cast<MenuPage>(directCase-100);model.hasLoadedStructure=true;
+        model.captureWorldAvailable=true;model.capture.first={true,10,64,10};model.capture.second={true,20,70,20};
+        model.pathBuffer=nullptr;model.pathBufferSize=0;
+    }
+    if(directCase==1 || directCase==2 || model.page==MenuPage::Hotkeys) {
         model.page=MenuPage::Hotkeys;
         std::array<lholo::i18n::TextKey,16> labels{
             lholo::i18n::TextKey::HotkeyOpenMenu,lholo::i18n::TextKey::HotkeyMoveLeft,lholo::i18n::TextKey::HotkeyMoveRight,
@@ -74,6 +102,7 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         model.materials={{"Stone bricks",{},"minecraft:stone_bricks",128,64},{"Oak stairs",{},"minecraft:oak_stairs",32,64}};
     }
     model.schematic.worldAvailable=true;model.schematic.session.writable=true;
+    model.schematic.files={"建築サンプル.mcstructure","建築サンプル.litematic"};
     model.schematic.activeProjectionAvailable=true;
     SavedPlacement p;p.id=1;p.name="検証サンプル / 共有フォント・テーマ";p.file="sample.mcstructure";
     model.schematic.session.document.placements={p};model.schematic.session.document.selected=1;
@@ -90,7 +119,7 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     report->running=running;report->checked=17200;report->progress=.42f;
     if(directCase==4)report->materials={{"minecraft:stone_bricks",{128,96},160},{"minecraft:oak_stairs",{32,24},16}};
     auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
-    for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");}
+    for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,{},metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");require(io.Fonts->TexWidth==atlasWidth && io.Fonts->TexHeight==atlasHeight,"Japanese UI does not resize/reload the atlas");}
     if(scroll){
         ImGuiWindow* page{};
         for(auto* window:context->Windows){
@@ -124,6 +153,9 @@ int main(int argc,char** argv) {
         renderCase(dir/"direct-materials-1920.ppm",1920,1080,1,false,false,4);
         renderCase(dir/"direct-placed-1920.ppm",1920,1080,1,false,false,5);
         renderCase(dir/"direct-files-1920.ppm",1920,1080,1,false,false,6);
+        for(std::size_t page=0;page<lholo::ui::kMenuPageCount;++page) {
+            renderCase(dir/("japanese-page-"+std::to_string(page)+"-1280.ppm"),1280,720,1,false,false,100+int(page));
+        }
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

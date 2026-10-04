@@ -30,10 +30,10 @@ uint32_t __cdecl readHotkey(uint32_t id,HudControlHotkeyV1* out) {
         auto v=State::getInstance().hotkey(id);
         // Slots 12..15 follow the parent's read-only directroute candidate
         // (OpenPlaced, OpenFiles, OpenVerification, OpenMaterials), all appended.
-        constexpr char const* names[]{"Open menu","Move left","Move right","Move forward","Move backward","Move up","Move down","Layer increase","Layer decrease","Load projection","Close projection","Toggle manual placement","Open placed","Open files","Open verification","Open materials"};
+        constexpr char const* names[]{"メニューを開く","左へ移動","右へ移動","前へ移動","後ろへ移動","上へ移動","下へ移動","レイヤーを上げる","レイヤーを下げる","投影を読み込む","投影を閉じる","手動設置を切替","配置一覧を開く","ファイルを開く","検証を開く","材料を開く"};
         HudControlHotkeyV1 next{};next.size=sizeof(next);next.id=id;next.key=v.key;next.modifiers=v.modifiers;next.contexts=id==0||id>=12?3:1;
         if(id<sizeof(names)/sizeof(names[0]))std::snprintf(next.label,sizeof(next.label),"%s",names[id]);
-        else {next.contexts=3;std::snprintf(next.label,sizeof(next.label),"Navigation action %u (metadata pending)",id);}
+        else {next.contexts=3;std::snprintf(next.label,sizeof(next.label),"画面操作 %u (説明未登録)",id);}
         *out=next;return 1;
     }catch(...){return 0;}
 }

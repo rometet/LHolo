@@ -267,5 +267,20 @@
   "page.files": "檔案",
   "page.placed": "配置",
   "page.materials": "材料",
-  "material.refresh": "重新整理材料"
+  "material.refresh": "重新整理材料",
+  "menu.tagline": "PROJECTION CLIENT",
+  "label.placementName": "Name",
+  "layer.bottomToTop": "Bottom -> Top",
+  "layer.topToBottom": "Top -> Bottom",
+  "layer.westToEast": "West -> East",
+  "layer.eastToWest": "East -> West",
+  "layer.northToSouth": "North -> South",
+  "layer.southToNorth": "South -> North",
+  "hint.filesHowTo": "In a world: Browse and Load a file, or refresh the library and place a listed file at your feet. Select the created placement on Placed.",
+  "hint.placedHowTo": "Select a placement to edit its position, rotation and mirror. Visibility hides it. Deleting a placement retains its source file.",
+  "hint.transformHowTo": "X is east/west, Y is height, Z is north/south. Edit numbers or use +/-. Default movement: Ctrl+arrows horizontally, Shift+Up/Down vertically. Alt+wheel moves the projection forward/backward.",
+  "hint.materialsHowTo": "Select a placement and refresh materials. Counts are total / correct / remaining / inventory. Unavailable inventory is not zero. Results belong to the last manual update.",
+  "hint.hotkeysHowTo": "Click a binding and press the new key. Esc cancels; Delete/Backspace or Clear unbinds; Reset restores defaults. --- means unbound. Gameplay actions require free game input; menu/direct-page bindings also work in mod menus.",
+  "hint.hudHowTo": "Schematic HUD defaults on; material HUD defaults off. Choose fields and corner. Praxis HUD Layout supports detailed placement and scale. Unavailable information remains unavailable.",
+  "hint.captureHowTo": "In a world, set both points using coordinates or player position, then export .mcstructure. Only loaded regions can be saved."
 }
