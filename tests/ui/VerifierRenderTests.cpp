@@ -155,6 +155,8 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     if(directCase==17)model.verifierView->errorsOnly=true;
     if(directCase==19)model.schematic.target.reset();
     if(directCase==39){model.materialExport.phase=lholo::io::MaterialExportPhase::Saving;model.materialExport.accepting=false;}
+    if(directCase==42)model.schematic.activeProjectionAvailable=false;
+    std::size_t verifyCalls{},cancelCalls{},resetCalls{};
     MenuActions actions;
     if(directCase>=30 && directCase<40) {
         actions.requestMaterials=[]{};
@@ -162,9 +164,9 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         actions.clearIgnoredMaterials=[](auto){};
         actions.exportMaterials=[](auto){}; // Image fixture never invokes a native save or writes world data.
     }
-    actions.verifySchematic=[&]{model.schematic.phase=schematic::VerificationPhase::Queued;model.schematic.report.reset();};
-    actions.cancelVerification=[&]{model.schematic.phase=schematic::VerificationPhase::Cancelled;model.schematic.report.reset();};
-    actions.resetVerification=[&]{model.schematic.phase=schematic::VerificationPhase::NotVerified;model.schematic.report.reset();model.schematic.target.reset();};
+    actions.verifySchematic=[&]{++verifyCalls;model.schematic.phase=schematic::VerificationPhase::Queued;model.schematic.report.reset();};
+    actions.cancelVerification=[&]{++cancelCalls;model.schematic.phase=schematic::VerificationPhase::Cancelled;model.schematic.report.reset();};
+    actions.resetVerification=[&]{++resetCalls;model.schematic.phase=schematic::VerificationPhase::NotVerified;model.schematic.report.reset();model.schematic.target.reset();};
     actions.setMistakeFilter=[&](MistakeFilter filter){model.schematic.filter=filter;model.schematic.target.reset();};
     actions.selectMistake=[&](auto const& stamp,auto index){
         schematic::MistakeSelection selection;selection.setFilter(model.schematic.filter);
@@ -177,6 +179,13 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
     };
     auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
     for(int frame=0;frame<3;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();require(context->ErrorCountCurrentFrame==0,"ImGui diagnostics");require(io.Fonts->TexWidth==atlasWidth && io.Fonts->TexHeight==atlasHeight,"Japanese UI does not resize/reload the atlas");}
+    auto windowWithChild=[&](char const* child){
+        for(auto* window:context->Windows){auto const name=std::string_view(window->Name);auto const at=name.find_last_of('/');
+            if(name.substr(at==name.npos?0:at+1).starts_with(child))return window;}
+        return static_cast<ImGuiWindow*>(nullptr);
+    };
+    auto* toolbar=windowWithChild("##VerificationToolbar");
+    auto const toolbarPos=toolbar?toolbar->Pos:ImVec2{};
     if(scroll){
         ImGuiWindow* page{};
         for(auto* window:context->Windows){
@@ -191,6 +200,10 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         for(int frame=0;frame<4;++frame){ImGui::SetScrollY(page,directCase==39?target:page->ScrollMax.y);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
         require(page->Scroll.y>0,"compact verifier scroll reaches lower content");
         require(std::abs(page->Scroll.y-(directCase==39?target:page->ScrollMax.y))<1.f,"compact page reaches actual scroll target after auto-size settles");
+        if(model.page==MenuPage::Verification) {
+            require(toolbar && toolbar->Pos.x==toolbarPos.x && toolbar->Pos.y==toolbarPos.y,
+                "manual controls keep their screen position when body scrolls");
+        }
     }
     if(directCase==36){
         ImGuiWindow* page{};ImGuiWindow* panel{};
@@ -215,6 +228,26 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         require(panel->Pos.y < page->ClipRect.Max.y && panel->Pos.y >= page->ClipRect.Min.y-2,"compact panel is reachable at page scroll target");
     }
     saveRender(output,width,height);
+    require(verifyCalls==0 && cancelCalls==0 && resetCalls==0,"opening and scrolling a page never invokes scan controls");
+    if(directCase>=40 && directCase<=43) {
+        require(toolbar && toolbar->Active,"pinned toolbar remains active");
+        auto const widthFor=[](lholo::i18n::TextKey key){return ImGui::CalcTextSize(lholo::i18n::tr(key)).x+ImGui::GetStyle().FramePadding.x*2;};
+        auto const startWidth=widthFor(lholo::i18n::TextKey::VerifierStart);
+        auto const cancelWidth=widthFor(lholo::i18n::TextKey::VerifierCancel);
+        auto point=toolbar->DC.CursorStartPos;
+        point.y+=ImGui::GetFrameHeight()*.5f;
+        if(directCase==41)point.x+=startWidth+metrics.gap+cancelWidth*.5f;
+        else if(directCase==43)point.x+=startWidth+cancelWidth+metrics.gap*2+widthFor(lholo::i18n::TextKey::VerifierReset)*.5f;
+        else point.x+=startWidth*.5f;
+        require(toolbar->ClipRect.Contains(point),"manual control is within visible toolbar bounds");
+        io.AddMousePosEvent(point.x,point.y);
+        for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
+        io.AddMouseButtonEvent(0,true);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();
+        io.AddMouseButtonEvent(0,false);ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();
+        require(context->ErrorCountCurrentFrame==0,"mouse activation keeps UI scopes balanced");
+        require(verifyCalls==(directCase==40?1:0) && cancelCalls==(directCase==41?1:0) && resetCalls==(directCase==43?1:0),
+            "visible manual control forwards exactly one authorized action, disabled start forwards none");
+    }
     std::printf("Verifier render: %dx%d scale=%.1f running=%d PASS\n",width,height,scale,running);
     resetFluentTheme();ImGui::DestroyContext(context);
 }
@@ -240,6 +273,11 @@ int main(int argc,char** argv) {
         renderCase(dir/"verifier-no-selection.ppm",1920,1080,1,false,false,19);
         renderCase(dir/"verifier-640-list.ppm",640,480,1,false,false,20);
         renderCase(dir/"verifier-640-detail.ppm",640,480,1,false,false,21);
+        renderCase(dir/"verifier-pinned-start-640.ppm",640,480,1,false,true,40);
+        renderCase(dir/"verifier-pinned-cancel-640.ppm",640,480,1,true,false,41);
+        renderCase(dir/"verifier-disabled-start-640.ppm",640,480,1,false,true,42);
+        renderCase(dir/"verifier-pinned-reset-1920.ppm",1920,1080,1,false,false,43);
+        renderCase(dir/"verifier-pinned-start-1280-scale2.ppm",1280,720,2,false,true,40);
         renderCase(dir/"direct-hotkeys-1920.ppm",1920,1080,1,false,true,1);
         renderCase(dir/"direct-hotkeys-640.ppm",640,480,1,false,true,2);
         renderCase(dir/"direct-placed-640.ppm",640,480,1,false,false,3);

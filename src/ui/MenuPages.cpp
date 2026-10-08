@@ -218,6 +218,9 @@ void renderSelectedMaterials(MenuModel const& model) {
     auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
     auto const report=snap.report;
     if(!report || report->running)return;
+    ImGui::Separator();
+    ImGui::TextUnformatted(tr(i18n::TextKey::MaterialsPlacementTitle));
+    ImGui::TextWrapped("%s",tr(i18n::TextKey::MaterialsPlacementHint));
     ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));
     if(ImGui::BeginChild("##SelectedMaterials",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*6),ImGuiChildFlags_Borders)){
         for(auto const& row:report->materials){
@@ -1012,7 +1015,7 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     ImGui::EndPopup();
 }
 
-void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
+void renderNavigation(MenuModel& model, UiMetrics const& metrics, bool compact) {
     ImVec2 indicatorMin{};
     ImVec2 indicatorMax{};
     // Display frequent schematic routes together; enum values and widget IDs
@@ -1022,6 +1025,15 @@ void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
         MenuPage::CreateStructure,MenuPage::Render,
         MenuPage::Hud,MenuPage::Hotkeys,MenuPage::Interface,MenuPage::Experimental};
     static_assert(navigation.size()+1==kMenuPageCount); // Transform is included in Placed.
+    if (compact) {
+        if (ImGui::BeginCombo("##PageNavigation", pageName(model.page))) {
+            for (auto const page : navigation) {
+                if (ImGui::Selectable(pageName(page), model.page == page)) model.page = page;
+            }
+            ImGui::EndCombo();
+        }
+        return;
+    }
     for (std::size_t index = 0; index < navigation.size(); ++index) {
         auto const page = navigation[index];
         auto const* name = pageName(page);

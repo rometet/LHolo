@@ -343,5 +343,15 @@
   "materials.shown": "Visible: %zu / %zu kinds",
   "materials.ownedUnknown": "Owned unknown",
   "materials.missingUnknown": "Short unknown",
-  "materials.source": "Blueprint: %s"
+  "materials.source": "Blueprint: %s",
+  "menu.target": "Target placement",
+  "menu.noTarget": "None selected",
+  "verifier.help": "Controls and counts",
+  "verifier.stateProperty": "Property",
+  "verifier.fullStates": "Show all states",
+  "materials.totalTitle": "Whole-schematic requirements",
+  "materials.totalHint": "Required counts cover the whole schematic, not unplaced blocks. Unknown inventory is not zero.",
+  "materials.placementTitle": "Selected-placement verification",
+  "materials.placementHint": "Placed and remaining counts are from the last manual verification. Use Start verification to check again.",
+  "materials.help": "Inventory, exclusions and export"
 }

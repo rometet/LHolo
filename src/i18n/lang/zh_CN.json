@@ -343,5 +343,15 @@
   "materials.shown": "Visible: %zu / %zu kinds",
   "materials.ownedUnknown": "Owned unknown",
   "materials.missingUnknown": "Short unknown",
-  "materials.source": "Blueprint: %s"
+  "materials.source": "Blueprint: %s",
+  "menu.target": "目标放置",
+  "menu.noTarget": "未选择",
+  "verifier.help": "操作与计数说明",
+  "verifier.stateProperty": "属性",
+  "verifier.fullStates": "显示全部状态",
+  "materials.totalTitle": "整个原理图所需材料",
+  "materials.totalHint": "所需数量涵盖整个原理图，并非尚未放置的数量。未知库存不等于零。",
+  "materials.placementTitle": "所选放置的验证结果",
+  "materials.placementHint": "已放置和剩余数量来自上次手动验证。请使用开始验证再次检查。",
+  "materials.help": "库存、排除与导出说明"
 }

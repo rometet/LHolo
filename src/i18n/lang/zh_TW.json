@@ -343,5 +343,15 @@
   "materials.shown": "Visible: %zu / %zu kinds",
   "materials.ownedUnknown": "Owned unknown",
   "materials.missingUnknown": "Short unknown",
-  "materials.source": "Blueprint: %s"
+  "materials.source": "Blueprint: %s",
+  "menu.target": "目標放置",
+  "menu.noTarget": "未選取",
+  "verifier.help": "操作與計數說明",
+  "verifier.stateProperty": "屬性",
+  "verifier.fullStates": "顯示全部狀態",
+  "materials.totalTitle": "整個結構圖所需材料",
+  "materials.totalHint": "所需數量涵蓋整個結構圖，並非尚未放置的數量。未知庫存不等於零。",
+  "materials.placementTitle": "所選放置的驗證結果",
+  "materials.placementHint": "已放置和剩餘數量來自上次手動驗證。請使用開始驗證再次檢查。",
+  "materials.help": "庫存、排除與匯出說明"
 }

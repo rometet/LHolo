@@ -405,7 +405,17 @@
     LHOLO_TEXT_KEY("materials.shown", MaterialsShown, "") \
     LHOLO_TEXT_KEY("materials.ownedUnknown", MaterialsOwnedUnknown, "") \
     LHOLO_TEXT_KEY("materials.missingUnknown", MaterialsMissingUnknown, "") \
-    LHOLO_TEXT_KEY("materials.source", MaterialsSource, "")
+    LHOLO_TEXT_KEY("materials.source", MaterialsSource, "") \
+    LHOLO_TEXT_KEY("menu.target", MenuTarget, "") \
+    LHOLO_TEXT_KEY("menu.noTarget", MenuNoTarget, "") \
+    LHOLO_TEXT_KEY("verifier.help", VerifierHelp, "") \
+    LHOLO_TEXT_KEY("verifier.stateProperty", VerifierStateProperty, "") \
+    LHOLO_TEXT_KEY("verifier.fullStates", VerifierFullStates, "") \
+    LHOLO_TEXT_KEY("materials.totalTitle", MaterialsTotalTitle, "") \
+    LHOLO_TEXT_KEY("materials.totalHint", MaterialsTotalHint, "") \
+    LHOLO_TEXT_KEY("materials.placementTitle", MaterialsPlacementTitle, "") \
+    LHOLO_TEXT_KEY("materials.placementHint", MaterialsPlacementHint, "") \
+    LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "")
 
 namespace lholo::i18n {
 

@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <map>
+#include <optional>
 #include <utility>
 
 namespace lholo::ui {
@@ -30,6 +32,57 @@ inline bool verifierMatchesSearch(structure::Mismatch const& row, std::string_vi
 inline std::pair<std::string_view, std::string_view> verifierBlockParts(std::string_view value) {
     auto const split = value.find(" [");
     return {value.substr(0, split), split == value.npos ? std::string_view{} : value.substr(split + 1)};
+}
+
+struct VerifierStateChange {
+    std::string name;
+    std::optional<std::string> actual, expected;
+};
+inline std::vector<VerifierStateChange> verifierStateChanges(std::string_view expected, std::string_view actual) {
+    auto const parse = [](std::string_view block) {
+        std::map<std::string, std::string> values;
+        auto state = verifierBlockParts(block).second;
+        if (state.starts_with('[')) state.remove_prefix(1);
+        if (state.ends_with(']')) state.remove_suffix(1);
+        auto const trim = [](std::string_view value) {
+            auto const first = value.find_first_not_of(" \t");
+            if (first == value.npos) return std::string_view{};
+            return value.substr(first, value.find_last_not_of(" \t") - first + 1);
+        };
+        while (!state.empty()) {
+            // Native values are SNBT. A comma inside a quoted string or a
+            // nested value is part of that value, not a property separator.
+            std::size_t comma = state.npos;
+            char quote{};
+            bool escaped{};
+            int depth{};
+            for (std::size_t i = 0; i < state.size(); ++i) {
+                auto const c = state[i];
+                if (quote) {
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == quote) quote = 0;
+                } else if (c == '"' || c == '\'') quote = c;
+                else if (c == '[' || c == '{') ++depth;
+                else if (c == ']' || c == '}') --depth;
+                else if (c == ',' && depth == 0) { comma = i; break; }
+            }
+            auto const part = trim(state.substr(0, comma));
+            auto const equal = part.find('=');
+            if (equal != part.npos && !trim(part.substr(0, equal)).empty())
+                values.emplace(trim(part.substr(0, equal)), trim(part.substr(equal + 1)));
+            if (comma == state.npos) break;
+            state.remove_prefix(comma + 1);
+        }
+        return values;
+    };
+    auto const wanted = parse(expected), found = parse(actual);
+    std::map<std::string, VerifierStateChange> changes;
+    for (auto const& [name, value] : wanted) changes[name] = {name, {}, value};
+    for (auto const& [name, value] : found) { auto& change = changes[name]; change.name = name; change.actual = value; }
+    std::vector<VerifierStateChange> result;
+    for (auto const& [name, change] : changes) if (change.actual != change.expected) result.push_back(change);
+    return result;
 }
 
 // UI-owned transient state. No native pointers, world reads or scan requests.

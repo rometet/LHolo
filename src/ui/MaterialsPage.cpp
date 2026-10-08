@@ -122,8 +122,12 @@ void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics c
     if(!model.materialsView)model.materialsView=std::make_shared<MaterialsViewState>();
     auto& view=*model.materialsView;view.update(model.materialList);
     if(model.materialList)ImGui::TextWrapped(textFor(TextKey::MaterialsSource),model.materialList->source.c_str());
-    ImGui::TextWrapped("%s",textFor(TextKey::MaterialsScope));
-    ImGui::TextWrapped("%s",textFor(TextKey::MaterialsInventoryHint));
+    ImGui::TextWrapped("%s",textFor(TextKey::MaterialsTotalHint));
+    if(ImGui::CollapsingHeader(textFor(TextKey::MaterialsHelp))) {
+        ImGui::TextWrapped("%s",textFor(TextKey::MaterialsScope));
+        ImGui::TextWrapped("%s",textFor(TextKey::MaterialsInventoryHint));
+        ImGui::TextWrapped("%s",textFor(TextKey::MaterialsExportHint));
+    }
     constexpr std::array keys{TextKey::MaterialsAll,TextKey::MaterialsShortage,TextKey::MaterialsIgnored};
     for(int filter=0;filter<3;++filter) {
         if(filter)nextIfFits(textFor(keys[filter]),metrics,true);
@@ -144,13 +148,12 @@ void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics c
         request.names.reserve(snapshot->requirements.size());for(auto const& row:snapshot->requirements)request.names.emplace_back(nameFor(row));
         actions.exportMaterials(std::move(request));
     }
-    ImGui::EndDisabled();ImGui::TextWrapped("%s",textFor(TextKey::MaterialsExportHint));
+    ImGui::EndDisabled();
     exportStatus(model.materialExport);
-    renderSection("##Materials",textFor(TextKey::MaterialListTitle),metrics,[&] {
+    renderSection("##Materials",textFor(TextKey::MaterialsTotalTitle),metrics,[&] {
         renderMaterialBill(model,actions,metrics,metrics.viewport.y*.42f,true);
     });
-    // The existing selected-placement/Verifier material details retain their
-    // separate meaning and are rendered unchanged below the work bill.
+    // The selected-placement report is a separate manual-verification snapshot.
     renderSelectedMaterials(model);
 }
 }

@@ -10,6 +10,30 @@
 #include <algorithm>
 
 namespace lholo::ui {
+namespace {
+void renderTarget(MenuModel const& model) {
+    auto const* placement = structure::selectedPlacement(model.schematic.session.document);
+    auto const label = std::string{i18n::tr(i18n::TextKey::MenuTarget)} + ": "
+        + (placement ? placement->name : i18n::tr(i18n::TextKey::MenuNoTarget));
+    auto visible = label;
+    auto const width = ImGui::GetContentRegionAvail().x;
+    if (ImGui::CalcTextSize(visible.c_str()).x > width) {
+        while (!visible.empty() && ImGui::CalcTextSize((visible + "...").c_str()).x > width) {
+            auto at = visible.size() - 1;
+            while (at && (static_cast<unsigned char>(visible[at]) & 0xC0) == 0x80) --at;
+            visible.erase(at);
+        }
+        visible += "...";
+    }
+    ImGui::TextDisabled("%s", visible.c_str());
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(label.c_str());
+        if (placement) ImGui::TextUnformatted(placement->file.c_str());
+        ImGui::EndTooltip();
+    }
+}
+} // namespace
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     bool open = true;
@@ -27,51 +51,68 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNavFocus
                 | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar
         )) {
-        auto const available = ImGui::GetContentRegionAvail();
-        auto navText = 0.0f;
-        for (std::size_t page = 0; page < kMenuPageCount; ++page) {
-            navText = std::max(
-                navText,
-                ImGui::CalcTextSize(pageName(static_cast<MenuPage>(page))).x
-            );
+        if (!metrics.compact) {
+            auto const available = ImGui::GetContentRegionAvail();
+            auto navText = 0.0f;
+            for (std::size_t page = 0; page < kMenuPageCount; ++page) {
+                navText = std::max(
+                    navText,
+                    ImGui::CalcTextSize(pageName(static_cast<MenuPage>(page))).x
+                );
+            }
+            auto navWidth = std::max(navText + metrics.outerPadding * 2.2f, available.x * 0.22f);
+            navWidth = std::min(navWidth, available.x * 0.36f);
+            if (ImGui::BeginChild(
+                    "##Navigation", ImVec2(navWidth, 0.0f), ImGuiChildFlags_Borders,
+                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar
+                )) {
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+                ImGui::TextUnformatted("LHolo");
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::MenuTagline));
+                ImGui::PopStyleColor();
+                ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
+                ImGui::Separator();
+                ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
+                renderNavigation(model, metrics);
+            }
+            ImGui::EndChild();
+            ImGui::SameLine(0.0f, metrics.gap);
         }
-        auto navWidth = std::max(navText + metrics.outerPadding * 2.2f, available.x * 0.22f);
-        navWidth = std::min(navWidth, available.x * 0.36f);
-        if (ImGui::BeginChild(
-                "##Navigation", ImVec2(navWidth, 0.0f), ImGuiChildFlags_Borders,
-                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar
-            )) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
-            ImGui::TextUnformatted("LHolo");
-            ImGui::PopStyleColor();
-            ImGui::PushStyleColor(ImGuiCol_Text,ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::MenuTagline));
-            ImGui::PopStyleColor();
-            ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
-            ImGui::Separator();
-            ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
-            renderNavigation(model, metrics);
-        }
-        ImGui::EndChild();
-        ImGui::SameLine(0.0f, metrics.gap);
         if (ImGui::BeginChild(
                 "##MainPanel", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings
             )) {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(pageName(model.page));
-            auto const closeLabel = i18n::tr(i18n::TextKey::MenuClose);
+            auto const closeLabel = i18n::tr(metrics.compact ? i18n::TextKey::ButtonClose : i18n::TextKey::MenuClose);
             auto const closeWidth = ImGui::CalcTextSize(closeLabel).x
                 + ImGui::GetStyle().FramePadding.x * 2.0f;
+            if (metrics.compact) {
+                ImGui::SetNextItemWidth(std::max(1.f, ImGui::GetContentRegionAvail().x - closeWidth - metrics.gap));
+                renderNavigation(model, metrics, true);
+            } else {
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted(pageName(model.page));
+            }
             ImGui::SameLine();
             ImGui::SetCursorPosX(std::max(
                 ImGui::GetCursorPosX(),
                 ImGui::GetWindowContentRegionMax().x - closeWidth
             ));
             if (ImGui::Button(closeLabel)) open = false;
+            renderTarget(model);
             ImGui::Separator();
             ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.25f));
 
+            bool renderBody = true;
+            if (model.page == MenuPage::Verification) {
+                if (ImGui::BeginChild("##VerificationToolbar", ImVec2(0, 0),
+                    ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysAutoResize,
+                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+                    renderBody = renderVerificationToolbar(model, actions, metrics);
+                }
+                ImGui::EndChild();
+            }
             if (ImGui::BeginChild(
                     "##PageScroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
                     ImGuiWindowFlags_NoSavedSettings
@@ -79,7 +120,9 @@ void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& m
                 switch (model.page) {
                 case MenuPage::Projection: renderProjectionPage(model, actions, metrics); break;
                 case MenuPage::Schematics: renderSchematicsPage(model, actions, metrics); break;
-                case MenuPage::Verification: renderVerificationPage(model, actions, metrics); break;
+                case MenuPage::Verification:
+                    if (renderBody) renderVerificationPage(model, actions, metrics, false);
+                    break;
                 case MenuPage::Materials: renderMaterialsPage(model, actions, metrics); break;
                 case MenuPage::CreateStructure: renderCreateStructurePage(model, actions, metrics); break;
                 case MenuPage::Experimental:

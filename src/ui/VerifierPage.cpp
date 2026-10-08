@@ -42,7 +42,7 @@ bool samePair(Mismatch const& a, Mismatch const& b) {
 }
 } // namespace
 
-void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+bool renderVerificationToolbar(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     using schematic::VerificationPhase;
     auto const tr = [](TextKey key) { return i18n::tr(key); };
     auto const& snap = model.schematic;
@@ -51,42 +51,65 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
     auto const report = snap.report; // Immutable snapshot held for this entire frame.
     view.update(report, snap.filter);
     auto const placement = selectedPlacement(snap.session.document);
-    ImGui::TextWrapped("%s", placement ? placement->name.c_str() : tr(TextKey::VerifierNoPlacement));
     bool const busy = snap.phase == VerificationPhase::Queued || snap.phase == VerificationPhase::Running;
     bool const canVerify = snap.worldAvailable && placement && snap.session.writable && snap.activeProjectionAvailable && !busy;
     ImGui::BeginDisabled(!canVerify || !actions.verifySchematic);
     if (ImGui::Button(tr(TextKey::VerifierStart)) && canVerify && actions.verifySchematic) {
-        actions.verifySchematic(); ImGui::EndDisabled(); return;
+        actions.verifySchematic(); ImGui::EndDisabled(); return false;
     }
     ImGui::EndDisabled();
     sameLineIfFits(buttonWidth(tr(TextKey::VerifierCancel)), metrics);
     ImGui::BeginDisabled(!busy || !actions.cancelVerification);
     if (ImGui::Button(tr(TextKey::VerifierCancel)) && busy && actions.cancelVerification) {
-        actions.cancelVerification(); ImGui::EndDisabled(); return;
+        actions.cancelVerification(); ImGui::EndDisabled(); return false;
     }
     ImGui::EndDisabled();
     sameLineIfFits(buttonWidth(tr(TextKey::VerifierReset)), metrics);
     ImGui::BeginDisabled(!actions.resetVerification || (!report && snap.phase == VerificationPhase::NotVerified));
     if (ImGui::Button(tr(TextKey::VerifierReset)) && actions.resetVerification) {
         actions.resetVerification(); view.search.fill(0); view.cachedReport.reset();
-        ImGui::EndDisabled(); return;
+        ImGui::EndDisabled(); return false;
     }
     ImGui::EndDisabled();
     constexpr std::array phaseKeys{TextKey::VerifierIdle, TextKey::VerifierWaiting, TextKey::VerifierRunning,
         TextKey::VerifierDone, TextKey::VerifierStopped};
     auto const phaseLabel = tr(phaseKeys[static_cast<std::size_t>(snap.phase)]);
-    sameLineIfFits(ImGui::CalcTextSize(phaseLabel).x + 180.f * metrics.scale, metrics);
+    sameLineIfFits(busy ? 160.f * metrics.scale : ImGui::CalcTextSize(phaseLabel).x, metrics);
     if (busy && report) {
         char progress[80]{}; std::snprintf(progress, sizeof(progress), "%s %.0f%%", phaseLabel,
             std::clamp(report->progress, 0.f, 1.f) * 100.f);
         ImGui::ProgressBar(std::clamp(report->progress, 0.f, 1.f), ImVec2(-1, 0), progress);
     } else ImGui::TextUnformatted(phaseLabel);
-    ImGui::TextWrapped("%s", tr(TextKey::VerifierManualHint));
+    return true;
+}
+
+void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics, bool includeToolbar) {
+    using schematic::VerificationPhase;
+    auto const tr = [](TextKey key) { return i18n::tr(key); };
+    if (includeToolbar && !renderVerificationToolbar(model, actions, metrics)) return;
+    auto const& snap = model.schematic;
+    if (!model.verifierView) model.verifierView = std::make_shared<VerifierViewState>();
+    auto& view = *model.verifierView;
+    auto const report = snap.report; // Immutable snapshot held for this entire frame.
+    view.update(report, snap.filter);
+    bool const busy = snap.phase == VerificationPhase::Queued || snap.phase == VerificationPhase::Running;
     if (!snap.status.empty()) ImGui::TextWrapped("%s", presentationStatus(snap.status).c_str());
-    ImGui::Separator();
     if (ImGui::RadioButton(tr(TextKey::VerifierAll), !view.errorsOnly)) view.errorsOnly = false;
     sameLineIfFits(buttonWidth(tr(TextKey::VerifierErrorsOnly)), metrics);
     if (ImGui::RadioButton(tr(TextKey::VerifierErrorsOnly), view.errorsOnly)) view.errorsOnly = true;
+    sameLineIfFits(buttonWidth("?"), metrics);
+    if (ImGui::Button("?##VerifierHelp")) ImGui::OpenPopup("##VerifierHelpPopup");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(TextKey::VerifierHelp));
+    if (ImGui::BeginPopup("##VerifierHelpPopup")) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::min(440.f * metrics.scale, metrics.viewport.x * .7f));
+        ImGui::TextUnformatted(tr(TextKey::VerifierHelp));
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", tr(TextKey::VerifierManualHint));
+        ImGui::TextWrapped("%s", tr(TextKey::VerifierCountHint));
+        ImGui::TextWrapped("%s", tr(TextKey::VerifierCoordinateHint));
+        ImGui::PopTextWrapPos();
+        ImGui::EndPopup();
+    }
     if (busy) {
         if (report) ImGui::Text(tr(TextKey::VerifierChecked), static_cast<unsigned long long>(report->checked));
         ImGui::TextWrapped("%s", tr(snap.phase == VerificationPhase::Queued ? TextKey::VerifierQueued : TextKey::SchematicPending));
@@ -102,34 +125,37 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         static_cast<unsigned long long>(tally.correct), static_cast<unsigned long long>(tally.unknown + tally.unknownAir));
     constexpr std::array filters{MistakeFilter::Mistakes, MistakeFilter::Missing, MistakeFilter::WrongType, MistakeFilter::WrongState, MistakeFilter::Extra};
     constexpr std::array filterKeys{TextKey::SchematicFilterAll, TextKey::VerifierMissing, TextKey::VerifierWrongType, TextKey::VerifierWrongState, TextKey::VerifierExtra};
-    auto filter = snap.filter;
+    auto const filter = snap.filter;
     char const* filterLabel = tr(TextKey::SchematicFilterWrong);
     for (std::size_t i = 0; i < filters.size(); ++i) if (filter == filters[i]) filterLabel = tr(filterKeys[i]);
-    ImGui::SetNextItemWidth(metrics.compact ? -FLT_MIN : 230.f * metrics.scale);
+    std::array counts{errors, tally.missing, tally.wrongType, tally.wrongState, tally.extra};
     ImGui::BeginDisabled(!actions.setMistakeFilter);
-    if (ImGui::BeginCombo("##VerifierCategoryFilter", filterLabel)) {
-        for (std::size_t i = 0; i < filters.size(); ++i) {
-            if (ImGui::Selectable(tr(filterKeys[i]), filter == filters[i]) && actions.setMistakeFilter) {
-                actions.setMistakeFilter(filters[i]); filter = filters[i];
-            }
+    for (std::size_t i = 0; i < filters.size(); ++i) {
+        auto const label = std::string{tr(filterKeys[i])} + " (" + std::to_string(counts[i]) + ")";
+        if (i) sameLineIfFits(buttonWidth(label.c_str()), metrics);
+        ImGui::PushID(static_cast<int>(filters[i]));
+        if (filter == filters[i]) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_HeaderActive));
+        bool const changed = ImGui::Button(label.c_str());
+        if (filter == filters[i]) ImGui::PopStyleColor();
+        ImGui::PopID();
+        if (changed && actions.setMistakeFilter && filter != filters[i]) {
+            actions.setMistakeFilter(filters[i]);
+            ImGui::EndDisabled();
+            return; // The callback changes the report stamp. No stale row actions.
         }
-        ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-    if (!metrics.compact) ImGui::SameLine();
     ImGui::SetNextItemWidth(-FLT_MIN);
     ImGui::InputTextWithHint("##VerifierSearch", tr(TextKey::VerifierSearch), view.search.data(), view.search.size());
-    // A filter action changes the report stamp. Defer row actions until next snapshot.
-    if (filter != snap.filter) return;
     view.update(report, filter);
     auto const searching = !view.cachedSearch.empty();
-    ImGui::TextWrapped(tr(TextKey::VerifierFilterStatus), tr(view.errorsOnly ? TextKey::VerifierErrorsOnly : TextKey::VerifierAll),
+    if (!metrics.compact || searching) ImGui::TextWrapped(tr(TextKey::VerifierFilterStatus),
+        tr(view.errorsOnly ? TextKey::VerifierErrorsOnly : TextKey::VerifierAll),
         filterLabel, searching ? view.search.data() : tr(TextKey::VerifierNoSearch));
-    ImGui::TextWrapped("%s", tr(TextKey::VerifierCountHint));
     if (report->truncated) ImGui::TextWrapped("%s", tr(TextKey::SchematicTruncated));
     auto const line = ImGui::GetTextLineHeightWithSpacing();
     bool const sideBySide = !metrics.compact && ImGui::GetContentRegionAvail().x >= 800.f * metrics.scale;
-    auto const panelHeight = sideBySide ? std::max(line * 10, ImGui::GetContentRegionAvail().y - metrics.gap) : line * 12;
+    auto const panelHeight = sideBySide ? std::max(line * 8, ImGui::GetContentRegionAvail().y - metrics.gap) : line * 8;
     auto const listWidth = sideBySide ? ImGui::GetContentRegionAvail().x * .58f : 0.f;
     if (ImGui::BeginChild("##MismatchList", ImVec2(listWidth, panelHeight), ImGuiChildFlags_Borders)) {
         if (!view.errorsOnly && filter == MistakeFilter::Mistakes && !searching) {
@@ -205,11 +231,29 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         else {
             auto const& row = report->mismatches[selected->indices.front()];
             ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierExpected), std::string{verifierBlockParts(row.expected).first}.c_str());
-            auto const expectedState = verifierBlockParts(row.expected).second;
-            auto const actualState = verifierBlockParts(row.actual).second;
-            ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierExpectedState), expectedState.empty() ? tr(TextKey::VerifierNoState) : std::string{expectedState}.c_str());
             ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierActual), std::string{verifierBlockParts(row.actual).first}.c_str());
-            ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierActualState), actualState.empty() ? tr(TextKey::VerifierNoState) : std::string{actualState}.c_str());
+            auto const changes = verifierStateChanges(row.expected, row.actual);
+            if (!changes.empty() && ImGui::BeginTable("##VerifierStateChanges", 3,
+                ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn(tr(TextKey::VerifierStateProperty));
+                ImGui::TableSetupColumn(tr(TextKey::VerifierActualShort));
+                ImGui::TableSetupColumn(tr(TextKey::VerifierExpectedShort));
+                ImGui::TableHeadersRow();
+                for (auto const& change : changes) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::TextWrapped("%s", change.name.c_str());
+                    ImGui::TableSetColumnIndex(1); ImGui::TextWrapped("%s", change.actual ? change.actual->c_str() : tr(TextKey::VerifierNoState));
+                    ImGui::TableSetColumnIndex(2); ImGui::TextWrapped("%s", change.expected ? change.expected->c_str() : tr(TextKey::VerifierNoState));
+                }
+                ImGui::EndTable();
+            }
+            // Keep the full source states accessible, including equal properties.
+            if (ImGui::CollapsingHeader(tr(TextKey::VerifierFullStates))) {
+                auto const expectedState = verifierBlockParts(row.expected).second;
+                auto const actualState = verifierBlockParts(row.actual).second;
+                ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierExpectedState), expectedState.empty() ? tr(TextKey::VerifierNoState) : std::string{expectedState}.c_str());
+                ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierActualState), actualState.empty() ? tr(TextKey::VerifierNoState) : std::string{actualState}.c_str());
+            }
             ImGui::Text("%s: %zu", tr(TextKey::VerifierRetained), selected->indices.size());
             if (searching && !verifierMatchesSearch(row, view.cachedSearch)) ImGui::TextWrapped("%s", tr(TextKey::VerifierSelectionHidden));
             ImGui::BeginDisabled(!actions.clearMistakeTarget);
@@ -234,7 +278,6 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         ImGui::BeginDisabled(view.groups.empty() || !actions.cycleMistake);
         if (ImGui::Button(tr(TextKey::SchematicNearest)) && actions.cycleMistake) actions.cycleMistake(filter);
         ImGui::EndDisabled();
-        ImGui::TextWrapped("%s", tr(TextKey::VerifierCoordinateHint));
     }
     ImGui::EndChild();
 }

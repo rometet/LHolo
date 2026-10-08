@@ -13,11 +13,13 @@ namespace lholo::ui {
 std::string materialPopupName();
 char const* pageName(MenuPage page);
 
-void renderNavigation(MenuModel& model, UiMetrics const& metrics);
+void renderNavigation(MenuModel& model, UiMetrics const& metrics, bool compact = false);
 
 void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
-void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
+// False means an action changed the snapshot: do not render its old body this frame.
+bool renderVerificationToolbar(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
+void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics, bool includeToolbar = true);
 void renderMaterialsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);
 void renderSelectedMaterials(MenuModel const& model);
 void renderCreateStructurePage(

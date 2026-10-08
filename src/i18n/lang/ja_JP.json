@@ -343,5 +343,15 @@
   "materials.shown": "表示: %zu / %zu 種類",
   "materials.ownedUnknown": "所持 不明",
   "materials.missingUnknown": "不足 不明",
-  "materials.source": "設計図: %s"
+  "materials.source": "設計図: %s",
+  "menu.target": "対象の配置",
+  "menu.noTarget": "未選択",
+  "verifier.help": "操作・件数の説明",
+  "verifier.stateProperty": "状態",
+  "verifier.fullStates": "状態をすべて表示",
+  "materials.totalTitle": "設計図全体の必要数",
+  "materials.totalHint": "必要数は設計図全体。未設置の数とは異なります。所持数の不明は0ではありません。",
+  "materials.placementTitle": "選択した配置の検証結果",
+  "materials.placementHint": "設置済み・残りは最後の手動検証時点。再確認は「検証開始」から行います。",
+  "materials.help": "所持数・除外・保存の説明"
 }

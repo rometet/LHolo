@@ -118,6 +118,40 @@ void testComparisonControls() {
     resetFluentTheme(); ImGui::DestroyContext(context);
 }
 
+void testCompactNavigation() {
+    using namespace lholo::ui;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={640,480};io.DeltaTime=1.f/60.f;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;io.Fonts->AddFontDefault();io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    MenuModel model;MenuActions actions;std::size_t scans{};
+    actions.verifySchematic=[&]{++scans;};
+    auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
+    auto frame=[&]{ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"compact navigation scopes");};
+    auto windowContaining=[&](char const* name){
+        for(auto* window:context->Windows)if(window->Active && std::string_view(window->Name).find(name)!=std::string_view::npos)return window;
+        return static_cast<ImGuiWindow*>(nullptr);
+    };
+    frame();frame();
+    auto* panel=windowContaining("##MainPanel");check(panel!=nullptr,"compact main panel exists");
+    for(auto page:{MenuPage::Schematics,MenuPage::Verification,MenuPage::Materials,MenuPage::Projection,
+        MenuPage::CreateStructure,MenuPage::Render,MenuPage::Hud,MenuPage::Hotkeys,MenuPage::Interface,MenuPage::Experimental}) {
+        context->NavNextActivateId=panel->GetID("##PageNavigation");
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
+        auto* popup=windowContaining("##Combo_");check(popup!=nullptr,"compact page selector opens");
+        // The settings routes near the bottom must also remain reachable.
+        ImGui::SetScrollY(popup,page==MenuPage::Hotkeys || page==MenuPage::Interface || page==MenuPage::Experimental ? popup->ScrollMax.y : 0);
+        frame();
+        context->NavNextActivateId=popup->GetID(pageName(page));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();frame();
+        check(model.page==page,"compact selector routes to the requested existing page");
+        check(scans==0,"navigation never starts verification");
+    }
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
 void testVerifierControls() {
     using namespace lholo::ui;
     using namespace lholo::structure;
@@ -180,19 +214,17 @@ void testVerifierControls() {
     check(rowCalls==1 && model.schematic.target->world==Cell{4,5,6},"WrongType row selects highlight target");
     selectRow(VerificationState::Extra,3);
     check(rowCalls==2 && model.schematic.target->kind==VerificationState::Extra,"Extra row reselection");
-    auto chooseFilter=[&](lholo::i18n::TextKey key){
+    auto chooseFilter=[&](lholo::i18n::TextKey key,MistakeFilter filter,std::uint64_t count){
         auto* window=ImGui::FindWindowByName("VerifierControlTest");
-        context->NavNextActivateId=window->GetID("##VerifierCategoryFilter");
-        context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();
-        auto* popup=windowContaining("##Combo_");check(popup && popup->Active,"category combo opens");
-        context->NavNextActivateId=popup->GetID(lholo::i18n::tr(key));
+        auto const label=std::string{lholo::i18n::tr(key)}+" ("+std::to_string(count)+")";
+        context->NavNextActivateId=ImHashStr(label.c_str(),0,window->GetID(static_cast<int>(filter)));
         context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();frame();
     };
-    chooseFilter(lholo::i18n::TextKey::VerifierWrongType);
+    chooseFilter(lholo::i18n::TextKey::VerifierWrongType,MistakeFilter::WrongType,22);
     check(filterCalls==1 && model.schematic.filter==MistakeFilter::WrongType && !model.schematic.target,"category filter clears selection");
     selectRow(VerificationState::Extra,3);check(rowCalls==2,"hidden category cannot select through stale navigation ID");
     selectRow(VerificationState::WrongType,1);check(rowCalls==3,"filtered category row selects");
-    chooseFilter(lholo::i18n::TextKey::SchematicFilterAll);
+    chooseFilter(lholo::i18n::TextKey::SchematicFilterAll,MistakeFilter::Mistakes,90);
     selectRow(VerificationState::Missing,4);
     check(model.schematic.target->world==Cell{2,2,3},"aggregate row selects nearest original source index");
     check(model.verifierView->groups.front().indices==std::vector<std::size_t>({4,0}),"coordinate list is ordered nearest first");
@@ -220,6 +252,13 @@ void testVerifierControls() {
     model.verifierView->search[0]='x';model.schematic.report=next;frame();
     check(model.verifierView->search[0]==0,"reprojection clears old context search");
     model.schematic.report=report;frame();
+    auto const rowsBeforeFilter=rowCalls;
+    chooseFilter(lholo::i18n::TextKey::VerifierMissing,MistakeFilter::Missing,21);
+    chooseFilter(lholo::i18n::TextKey::VerifierWrongState,MistakeFilter::WrongState,23);
+    chooseFilter(lholo::i18n::TextKey::VerifierExtra,MistakeFilter::Extra,24);
+    chooseFilter(lholo::i18n::TextKey::SchematicFilterAll,MistakeFilter::Mistakes,90);
+    check(filterCalls==6 && rowCalls==rowsBeforeFilter && verifyCalls==0,
+        "all four counted filters use whole-scan totals and never scan or select stale rows");
     model.schematic.activeProjectionAvailable=false;
     activateButton(lholo::i18n::TextKey::VerifierStart);check(verifyCalls==0,"start disabled without active selected projection");
     model.schematic.activeProjectionAvailable=true;
@@ -246,6 +285,21 @@ void testVerifierControls() {
     check(ImGui::GetDrawData()->TotalVtxCount<30000,"clipper bounds draw work for large results");
     auto const largeRebuilds=model.verifierView->rebuilds;frame();
     check(model.verifierView->rebuilds==largeRebuilds,"large unchanged report reuses aggregation cache");
+    // Reordered equal properties must not appear as changes; missing properties do.
+    auto differences=verifierStateChanges("minecraft:stairs [a=1, facing=south, b=true]",
+        "minecraft:stairs [b=true, a=1, facing=north, extra=2]");
+    check(differences.size()==2,"details list only changed or absent properties");
+    check(differences[0].name=="extra" && differences[0].actual=="2" && !differences[0].expected,
+        "actual-only state retains its exact value");
+    check(differences[1].name=="facing" && differences[1].actual=="north" && differences[1].expected=="south",
+        "detail changes show actual to expected");
+    check(verifierStateChanges("minecraft:stone","minecraft:air").empty(),"stateless blocks have no invented changes");
+    auto quoted=verifierStateChanges("minecraft:test [label=\"a,b\\\"c\", list=[1,2], empty=]",
+        "minecraft:test [list=[1,2], label=\"a,b\\\"d\"]");
+    check(quoted.size()==2 && quoted[0].name=="empty" && quoted[0].expected && !quoted[0].actual,
+        "empty values remain distinct from absent properties");
+    check(quoted[1].name=="label" && quoted[1].actual=="\"a,b\\\"d\"" && quoted[1].expected=="\"a,b\\\"c\"",
+        "state details preserve quoted commas and escaped quotes");
     check(verifierMatchesSearch(report->mismatches[2],"OAK facing=north"),"search includes full actual states and all tokens");
     check(!verifierMatchesSearch(report->mismatches[2],"oak birch"),"all search tokens must match");
     check(verifierBlockParts(report->mismatches[2].expected).second=="[facing=south]","detail splits preserved native states");
@@ -428,6 +482,7 @@ int main() {
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
         testComparisonControls();
+        testCompactNavigation();
         testVerifierControls();
         testDirectMenuRoutes();
         for (std::size_t language = 0; language < lholo::i18n::languages().size(); ++language) {

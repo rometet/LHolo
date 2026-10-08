@@ -343,5 +343,15 @@
   "materials.shown": "Visible: %zu / %zu kinds",
   "materials.ownedUnknown": "Owned unknown",
   "materials.missingUnknown": "Short unknown",
-  "materials.source": "Blueprint: %s"
+  "materials.source": "Blueprint: %s",
+  "menu.target": "Целевое размещение",
+  "menu.noTarget": "Не выбрано",
+  "verifier.help": "Управление и счётчики",
+  "verifier.stateProperty": "Свойство",
+  "verifier.fullStates": "Показать все состояния",
+  "materials.totalTitle": "Материалы всей схемы",
+  "materials.totalHint": "Нужное количество относится ко всей схеме, а не только к неустановленным блокам. Неизвестный запас не равен нулю.",
+  "materials.placementTitle": "Проверка выбранного размещения",
+  "materials.placementHint": "Установлено и осталось — данные последней ручной проверки. Для обновления нажмите «Начать проверку».",
+  "materials.help": "Запасы, исключения и экспорт"
 }
