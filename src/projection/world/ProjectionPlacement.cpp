@@ -45,6 +45,7 @@ namespace lholo::projection::detail {
 namespace {
 
 void pairProjectedChests(BlockSource& region, ProjectionState& state) {
+    ScopedRegionWriteSuppression projectedWrites;
     constexpr std::array<std::pair<int, int>, 4> horizontalNeighbors{{
         {-1, 0},
         {1, 0},

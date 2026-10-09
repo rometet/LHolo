@@ -11,6 +11,7 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
@@ -1440,9 +1441,9 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         auto const source = colors[vertex];
         auto const isWater = liquidKinds[vertex] == PraxisCompatLiquidKind::Water;
         auto const seed = selectPraxisCompatLiquidColorSeed(source, isWater);
-        auto const derived = applyPraxisCompatLiquidAlpha(
-            applyPraxisCompatMissingAbgr(seed.packed),
-            isWater
+        auto const derived = applyLiquidProjectionOpacity(
+            applyPraxisCompatLiquidAlpha(applyPraxisCompatMissingAbgr(seed.packed), isWater),
+            settings.structureOpacity
         );
         compat->derivedColors.push_back(derived);
         if (seed.waterSeedApplied) {
@@ -1605,7 +1606,7 @@ void buildLiquidProxySectionMesh(
             false
         );
         auto const alpha = static_cast<uint>(std::lround(
-            std::clamp(structureOpacity, 0.05f, 1.0f) * 255.0f
+            normalizedLiquidProjectionOpacity(structureOpacity) * 255.0f
         ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
@@ -1713,6 +1714,10 @@ void buildLiquidProxySectionMesh(
             auto const tint = isLava
                 ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
                 : (LiquidWaterTintAbgrRgb | (alpha << 24U));
+            auto const topColor = liquidProxyFaceColor(tint, LiquidProxyFace::Top);
+            auto const bottomColor = liquidProxyFaceColor(tint, LiquidProxyFace::Bottom);
+            auto const nsColor = liquidProxyFaceColor(tint, LiquidProxyFace::NorthSouth);
+            auto const ewColor = liquidProxyFaceColor(tint, LiquidProxyFace::EastWest);
             float const x0 = static_cast<float>(p.x);
             float const y0 = static_cast<float>(p.y);
             float const z0 = static_cast<float>(p.z);
@@ -1727,9 +1732,9 @@ void buildLiquidProxySectionMesh(
                 Vec3 const& p0, float ua, float va,
                 Vec3 const& p1, float ub, float vb,
                 Vec3 const& p2, float uc, float vc,
-                Vec3 const& p3, float ud, float vd
+                Vec3 const& p3, float ud, float vd, std::uint32_t color
             ) {
-                setColorAbgr(tessellator, tint);
+                setColorAbgr(tessellator, color);
                 tessellator.tex2({ua, va}); tessellator.vertex(p0.x, p0.y, p0.z);
                 tessellator.tex2({ub, vb}); tessellator.vertex(p1.x, p1.y, p1.z);
                 tessellator.tex2({uc, vc}); tessellator.vertex(p2.x, p2.y, p2.z);
@@ -1737,14 +1742,18 @@ void buildLiquidProxySectionMesh(
             };
 
             auto const* bottom = neighborEntry(0, -1, 0);
-            bool const bottomIsSolid = bottom && bottom->block && !bottom->block->isAir();
+            // Non-air is not an occluder: slabs, stairs, panes and glass must
+            // not erase this fallback boundary. Use the public SDK full-opaque
+            // type flag conservatively; same-liquid suppression stays separate.
+            bool const bottomIsSolid = bottom && bottom->block && !bottom->block->isAir()
+                && bottom->block->getBlockType().mIsOpaqueFullBlock;
             bool const bottomIsSameLiquid = neighborIsSameLiquid(0, -1, 0);
             if (!bottomIsSolid && !bottomIsSameLiquid) {
                 addQuad(
                     {x0,y0,z1}, u0s,v1s,
                     {x0,y0,z0}, u0s,v0s,
                     {x1,y0,z0}, u1s,v0s,
-                    {x1,y0,z1}, u1s,v1s
+                    {x1,y0,z1}, u1s,v1s, bottomColor
                 );
             }
             if (!neighborIsSameLiquid(0, 1, 0)) {
@@ -1752,13 +1761,13 @@ void buildLiquidProxySectionMesh(
                     {x0,yc00,z0}, u0s,v0s,
                     {x0,yc01,z1}, u0s,v1s,
                     {x1,yc11,z1}, u1s,v1s,
-                    {x1,yc10,z0}, u1s,v0s
+                    {x1,yc10,z0}, u1s,v0s, topColor
                 );
             }
 
             auto addSideFace = [&](
                 float xa, float za, float yca,
-                float xb, float zb, float ycb
+                float xb, float zb, float ycb, std::uint32_t color
             ) {
                 float const ha = std::clamp(yca - y0, 0.0f, 1.0f);
                 float const hb = std::clamp(ycb - y0, 0.0f, 1.0f);
@@ -1766,13 +1775,13 @@ void buildLiquidProxySectionMesh(
                     {xa,y0, za}, u0f,v1f,
                     {xa,yca,za}, u0f,v1f - dvf * ha,
                     {xb,ycb,zb}, u1f,v1f - dvf * hb,
-                    {xb,y0, zb}, u1f,v1f
+                    {xb,y0, zb}, u1f,v1f, color
                 );
             };
-            if (!neighborIsSameLiquid( 0, 0,-1)) addSideFace(x0,z0,yc00,x1,z0,yc10);
-            if (!neighborIsSameLiquid( 0, 0, 1)) addSideFace(x1,z1,yc11,x0,z1,yc01);
-            if (!neighborIsSameLiquid(-1, 0, 0)) addSideFace(x0,z1,yc01,x0,z0,yc00);
-            if (!neighborIsSameLiquid( 1, 0, 0)) addSideFace(x1,z0,yc10,x1,z1,yc11);
+            if (!neighborIsSameLiquid( 0, 0,-1)) addSideFace(x0,z0,yc00,x1,z0,yc10,nsColor);
+            if (!neighborIsSameLiquid( 0, 0, 1)) addSideFace(x1,z1,yc11,x0,z1,yc01,nsColor);
+            if (!neighborIsSameLiquid(-1, 0, 0)) addSideFace(x0,z1,yc01,x0,z0,yc00,ewColor);
+            if (!neighborIsSameLiquid( 1, 0, 0)) addSideFace(x1,z0,yc10,x1,z1,yc11,ewColor);
         }
         state.liquidProxySectionMeshes[section] = std::make_unique<mce::Mesh>(tessellator.end(
             uploadMode,

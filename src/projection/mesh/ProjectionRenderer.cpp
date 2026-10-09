@@ -653,6 +653,7 @@ void submitProjectedBlockActorPass(
     mce::MaterialPtr noForcedMaterial{renderContext.mItemInHandRenderer.mMatBlendBlock.get()};
     noForcedMaterial.mRenderMaterialInfoPtr.reset();
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
+    ScopedRegionWriteSuppression projectedWrites;
     ScopedTessellationBlocks blockActorWorldScope(
         *state.expectedWorldBlocks,
         *state.expectedWorldLiquids,
@@ -786,6 +787,19 @@ void submitProjectionMeshPass(
             }
         );
         if (!nativeLiquidSections.empty()) {
+            // Liquid submissions precede the normal-mesh guard below.
+            // Prime the same actor constants before this native liquid family.
+            if (auto* player = client.getLocalPlayer()) {
+                ActorShaderManager::setupShaderParameters(
+                    renderContext.mScreenContext,
+                    renderContext,
+                    *player,
+                    mce::Color{1.0f, 1.0f, 1.0f, 0.0f},
+                    1.0f,
+                    Brightness::MAX(),
+                    std::nullopt
+                );
+            }
             auto const signText = render::resolveSignTextMaterial(blendMaterial);
             {
                 auto const signTextReady = signText && tryRenderMaterial(*signText) != nullptr;
@@ -875,7 +889,7 @@ void submitProjectionMeshPass(
                                 std::memory_order_acq_rel
                             )) {
                             logger().info(
-                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterVertexAlpha={} lavaVertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha=255 projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
                                         == PraxisLiquidMaterialCandidate::BlendBlock
                                     ? "mMatBlendBlock"
@@ -883,6 +897,7 @@ void submitProjectionMeshPass(
                                 signTextReady ? 1 : 0,
                                 blendMaterialReady ? 1 : 0,
                                 PraxisWaterDerivedAlpha,
+                                unpackAbgr(data.derivedColors.front()).alpha,
                                 telemetry.praxisCompatImmediateSubmitsPerFrame
                             );
                         }
