@@ -197,16 +197,23 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
                         ImGui::TableNextRow(ImGuiTableRowFlags_None,rowHeight); ImGui::TableSetColumnIndex(0);
                         auto const width = ImGui::GetContentRegionAvail().x;
                         bool const selected = snap.target && samePair(*snap.target, row);
-                        if (ImGui::Selectable("##MismatchRow", selected,
+                        auto const expectedPos=ImGui::GetCursorScreenPos();
+                        // Selectable expands its hitbox by half ItemSpacing.
+                        // Table rows use CellPadding instead. Match those bounds
+                        // here so the previous row cannot capture this row's top.
+                        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(ImGui::GetStyle().ItemSpacing.x,ImGui::GetStyle().CellPadding.y*2));
+                        bool const clicked=ImGui::Selectable("##MismatchRow", selected,
                             ImGuiSelectableFlags_SpanAllColumns | (!actions.selectMistake ? ImGuiSelectableFlags_Disabled : 0),
-                            ImVec2(0, iconSize)) && actions.selectMistake)
+                            ImVec2(0, iconSize));
+                        ImGui::PopStyleVar();
+                        if (clicked && actions.selectMistake)
                             actions.selectMistake(report->stamp, group.indices.front());
                         if (ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip(); ImGui::PushTextWrapPos(450.f * metrics.scale);
                             ImGui::TextWrapped("%s: %s\n%s: %s", tr(TextKey::VerifierExpected), row.expected.c_str(), tr(TextKey::VerifierActual), row.actual.c_str());
                             ImGui::PopTextWrapPos(); ImGui::EndTooltip();
                         }
-                        auto const expectedPos=ImGui::GetItemRectMin();
                         auto const shownSize=std::min(iconSize,std::max(1.f,width));
                         drawBlockIcon(model.blockIcons,row.expected,{},expectedPos,shownSize);
                         auto const text = fittedText(blockLabel(row.expected), std::max(1.f,width-shownSize-metrics.gap*.5f));

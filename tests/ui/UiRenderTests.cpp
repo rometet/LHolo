@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <stdexcept>
 
 namespace {
@@ -486,10 +487,167 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
 }
 }
 
+void testVerifierMouseRows(float scale=1,bool actualFonts=false) {
+    using namespace lholo::ui;
+    using namespace lholo::structure;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={3840,2160};io.DeltaTime=1.f/60.f;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;
+    if(actualFonts)lholo::overlay::loadOverlayFonts(*io.Fonts,
+        {"C:/Windows/Fonts/msyh.ttc","C:/Windows/Fonts/meiryo.ttc","C:/Windows/Fonts/seguisym.ttf"});
+    else io.Fonts->AddFontDefault();
+    check(io.Fonts->Build(),"mouse fixture font atlas");
+    lholo::i18n::setLanguageByCode(actualFonts?"ja_JP":"en_US");
+    MenuModel model;
+    auto report=std::make_shared<schematic::Report>();
+    report->stamp.worldEpoch=1;report->stamp.placementId=1;report->stamp.loadedGeneration=1;report->stamp.reportRevision=1;
+    for(int i=0;i<20;++i)report->mismatches.push_back({VerificationState::Missing,{i,64,0},
+        "minecraft:mouse_row_"+std::to_string(i),"minecraft:air",double(i)});
+    report->tally.missing=20;model.schematic.report=report;
+    model.schematic.phase=schematic::VerificationPhase::Completed;
+    struct RowBounds {ImRect rect;std::array<float,3> columns;};
+    std::map<int,RowBounds> bounds;
+    bool readyTexture{};
+    model.blockIcons=[&](std::string_view block,std::string_view) {
+        constexpr std::string_view prefix="minecraft:mouse_row_";
+        if(block.starts_with(prefix) && context->CurrentTable
+            && std::string_view(ImGui::GetCurrentWindow()->Name).find("##MismatchList")!=std::string_view::npos) {
+            auto* table=context->CurrentTable;
+            auto index=std::stoi(std::string{block.substr(prefix.size())});
+            for(auto const& group:model.verifierView->groups)
+                if(report->mismatches[group.indices.front()].expected==block){index=static_cast<int>(group.indices.front());break;}
+            auto const seed=ImHashData(&index,sizeof(index),ImGui::TableGetInstanceID(table,0));
+            auto const id=ImHashStr("##MismatchRow",0,seed);
+            // Only capture the exact row ID and scope, never other UI items.
+            if(context->LastItemData.ID!=id)return BlockIconView{};
+            RowBounds row{context->LastItemData.Rect,{}};
+            for(int column=0;column<3;++column)row.columns[column]=(table->Columns[column].MinX+table->Columns[column].MaxX)*.5f;
+            bounds[index]=row;
+        }
+        return readyTexture?BlockIconView{0xB10C0001,BlockIconStatus::Ready,2.f}:BlockIconView{};
+    };
+    std::size_t selected=~std::size_t{};
+    MenuActions actions;
+    actions.selectMistake=[&](auto const& stamp,std::size_t index) {
+        check(stamp==report->stamp,"mouse selection retains exact stamp");
+        selected=index;model.schematic.target=report->mismatches[index];
+    };
+    auto const metrics=calculateMetrics(io.DisplaySize,scale);applyFluentTheme(metrics);
+    auto frame=[&] {
+        bounds.clear();ImGui::NewFrame();
+        ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({3800,2120});
+        ImGui::Begin("VerifierMouseRowProof");renderVerificationPage(model,actions,metrics);
+        ImGui::End();ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"real mouse fixture scopes");
+    };
+    frame();frame();
+    auto mismatchWindow=[&] {
+        for(auto* window:context->Windows)if(window->Active
+            && std::string_view(window->Name).find("##MismatchList")!=std::string_view::npos)return window;
+        return static_cast<ImGuiWindow*>(nullptr);
+    };
+    if(!bounds.contains(1)) {
+        auto* list=mismatchWindow();auto* parent=ImGui::FindWindowByName("VerifierMouseRowProof");
+        check(list && parent,"large-scale fixture list exists below page controls");
+        ImGui::SetScrollY(parent,parent->Scroll.y+list->Pos.y-parent->Pos.y-20);
+        frame();frame();
+    }
+    check(bounds.contains(0) && bounds.contains(1),"adjacent visible rows for real mouse proof");
+    auto const first=bounds.at(0).rect,second=bounds.at(1).rect;
+    std::printf("Mouse row scale=%.0f nativeFonts=%d first=[%.2f,%.2f] second=[%.2f,%.2f] overlap=%.2f spacing=%.2f padding=%.2f\n",scale,actualFonts,
+        first.Min.y,first.Max.y,second.Min.y,second.Max.y,first.Max.y-second.Min.y,
+        ImGui::GetStyle().ItemSpacing.y,ImGui::GetStyle().CellPadding.y);
+    auto const click=ImVec2{second.Min.x+12.f*scale,second.Min.y+1.f};
+    io.AddMousePosEvent(click.x,click.y);frame();
+    io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    std::printf("Clicked source row=1 at=(%.2f,%.2f), selected source row=%zu\n",click.x,click.y,selected);
+    check(selected==1,"real mouse at second rendered row top selects second source row");
+    auto large=std::make_shared<schematic::Report>(*report);
+    for(int i=20;i<400;++i)large->mismatches.push_back({VerificationState::Missing,{i,64,0},
+        "minecraft:mouse_row_"+std::to_string(i),"minecraft:air",double(i)});
+    large->tally.missing=400;++large->stamp.reportRevision;report=large;model.schematic.report=report;
+    for(std::size_t i=0;i<large->mismatches.size();++i)large->mismatches[i].distanceSquared=double(400-i);
+    large->mismatches.push_back({VerificationState::Missing,{400,64,0},"minecraft:mouse_row_0","minecraft:air",0});
+    large->tally.missing=401;
+    frame();frame();
+    auto* list=mismatchWindow();
+    check(list && list->ScrollMax.y>0,"mouse fixture scrolls the mismatch list itself");
+    std::size_t mouseCases{};
+    for(bool textured:{false,true})for(float fraction:{0.f,.5f,1.f}) {
+        readyTexture=textured;
+        ImGui::SetScrollY(list,list->ScrollMax.y*fraction);frame();frame();
+        std::optional<std::pair<int,RowBounds>> visible;
+        for(auto const& entry:bounds)if(entry.first>0 && entry.second.rect.Min.y>list->InnerClipRect.Min.y+1
+            && entry.second.rect.Max.y<list->InnerClipRect.Max.y-1){visible=entry;break;}
+        check(visible.has_value(),"fully visible row exists after internal scroll");
+        auto const [index,row]=*visible;
+        for(int column=0;column<3;++column)for(int edge:{0,1,2}) {
+            auto const y=edge==0?row.rect.Min.y+1:edge==2?row.rect.Max.y-1:(row.rect.Min.y+row.rect.Max.y)*.5f;
+            auto const pos=ImVec2{row.columns[column],y};
+            selected=~std::size_t{};io.AddMousePosEvent(pos.x,pos.y);frame();
+            io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+            if(selected!=static_cast<std::size_t>(index))std::printf("EDGE FAIL scale=%.0f fonts=%d texture=%d scroll=%.1f index=%d column=%d edge=%d xy=(%.2f,%.2f) selected=%zu\n",
+                scale,actualFonts,textured,fraction,index,column,edge,pos.x,pos.y,selected);
+            check(selected==static_cast<std::size_t>(index),"row edge in each column selects matching source after internal scroll");
+            ++mouseCases;
+        }
+    }
+    ImGui::SetScrollY(list,0);model.verifierView->search.fill(0);
+    std::snprintf(model.verifierView->search.data(),model.verifierView->search.size(),"mouse_row_12");frame();frame();
+    check(bounds.contains(12),"filtered view retains exact original source index");
+    auto const filtered=bounds.at(12);
+    selected=~std::size_t{};io.AddMousePosEvent(filtered.columns[1],(filtered.rect.Min.y+filtered.rect.Max.y)*.5f);frame();
+    io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    check(selected==12,"mouse search selection forwards original index after sorting and clipping");
+    model.schematic.filter=MistakeFilter::WrongType;frame();frame();
+    selected=~std::size_t{};io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    check(selected==~std::size_t{},"hidden category cannot receive previous mouse row selection");
+    model.schematic.filter=MistakeFilter::Mistakes;model.verifierView->search.fill(0);
+    ImGui::SetScrollY(list,0);io.AddMousePosEvent(-100,-100);frame();frame();
+    auto visible=bounds.end();
+    for(auto it=bounds.begin();it!=bounds.end();++it)if(it->second.rect.Min.y>=list->InnerClipRect.Min.y
+        && (visible==bounds.end() || it->second.rect.Min.y<visible->second.rect.Min.y))visible=it;
+    check(visible!=bounds.end(),"keyboard fixture has visible source row");
+    auto const index=visible->first;
+    auto nextVisible=bounds.end();
+    for(auto it=bounds.begin();it!=bounds.end();++it)if(it->second.rect.Min.y>visible->second.rect.Min.y
+        && (nextVisible==bounds.end() || it->second.rect.Min.y<nextVisible->second.rect.Min.y))nextVisible=it;
+    check(nextVisible!=bounds.end(),"keyboard fixture has next visible row");
+    auto const nextIndex=nextVisible->first;
+    check(index==400,"nearest group sort forwards the later original source index");
+    auto const tableId=ImHashStr("##VerifierPairs",0,list->GetID(static_cast<int>(VerificationState::Missing)));
+    auto* table=context->Tables.GetByKey(tableId);check(table!=nullptr,"keyboard category table exists");
+    auto rowId=[&](int source) {
+        auto const seed=ImHashData(&source,sizeof(source),ImGui::TableGetInstanceID(table,0));
+        return ImHashStr("##MismatchRow",0,seed);
+    };
+    auto const focused=visible->second;
+    io.AddMousePosEvent(focused.columns[0],(focused.rect.Min.y+focused.rect.Max.y)*.5f);frame();
+    io.AddMouseButtonEvent(0,true);frame();io.AddMouseButtonEvent(0,false);frame();
+    check(selected==static_cast<std::size_t>(index),"mouse focuses nearest source row before keyboard input");
+    io.AddMousePosEvent(-100,-100);frame();
+    // Mouse input hides ImGui's navigation cursor. Enter navigation through
+    // real arrow events before testing activation; never set NavActivateId.
+    io.AddKeyEvent(ImGuiKey_DownArrow,true);frame();io.AddKeyEvent(ImGuiKey_DownArrow,false);frame();
+    check(context->NavId==rowId(nextIndex),"actual Down arrow focuses next group");
+    io.AddKeyEvent(ImGuiKey_UpArrow,true);frame();io.AddKeyEvent(ImGuiKey_UpArrow,false);frame();
+    check(context->NavId==rowId(index),"actual Up arrow restores nearest group focus");
+    selected=~std::size_t{};io.AddKeyEvent(ImGuiKey_Enter,true);frame();io.AddKeyEvent(ImGuiKey_Enter,false);frame();
+    check(selected==static_cast<std::size_t>(index),"actual Enter key activates navigated row focus");
+    io.AddKeyEvent(ImGuiKey_DownArrow,true);frame();io.AddKeyEvent(ImGuiKey_DownArrow,false);frame();
+    selected=~std::size_t{};io.AddKeyEvent(ImGuiKey_Enter,true);frame();io.AddKeyEvent(ImGuiKey_Enter,false);frame();
+    check(selected==static_cast<std::size_t>(nextIndex),"actual Down and Enter select next visible group with original index");
+    std::printf("Verifier mouse edges scale=%.0f nativeFonts=%d cases=%zu PASS\n",scale,actualFonts,mouseCases);
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
 int main() {
     try {
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
+        testVerifierMouseRows();
+        for(float scale:{1.f,2.f,5.f})testVerifierMouseRows(scale,true);
         testComparisonControls();
         testCompactNavigation();
         testVerifierControls();

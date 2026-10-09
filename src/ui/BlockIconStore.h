@@ -46,6 +46,13 @@ public:
         if(entries.size()>=Capacity && !entries.contains(request.key))entries.erase(entries.begin());
         entries.insert_or_assign(request.key,std::move(pixels));return true;
     }
+    bool retry(Request const& request) {
+        std::lock_guard lock{mutex};
+        if(changing || !enabled || request.generation!=generation)return false;
+        if(!working.erase(request.key))return false;
+        if(std::find(pending.begin(),pending.end(),request.key)==pending.end())pending.push_front(request.key);
+        return true;
+    }
     void beginChange() {std::lock_guard lock{mutex};++changing;++generation;entries.clear();pending.clear();working.clear();}
     void endChange() {std::lock_guard lock{mutex};if(changing)--changing;}
     void reset(bool admit) {std::lock_guard lock{mutex};++generation;enabled=admit;entries.clear();pending.clear();working.clear();}
