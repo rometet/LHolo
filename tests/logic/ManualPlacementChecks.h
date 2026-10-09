@@ -372,5 +372,23 @@ void runManualPlacementChecks(Check check) {
     check(!runtime.applyModes(live)); // A newer explicit choice also wins.
     check(runtime.rangeEnabled());
     runtime.resetWorldSession();
+    runtime.setManualMode(true);
+    auto inputEpoch = runtime.manualInputEpoch();
+    check(runtime.beginManualPress(600, inputEpoch));
+    runtime.setRangeEnabled(true);
+    check(!runtime.manualHeld() && !runtime.manualPlaceRequested());
+    check(runtime.manualInputEpoch() != inputEpoch);
+    check(!runtime.beginManualPress(650, inputEpoch));
+    check(runtime.beginManualPress(700, runtime.manualInputEpoch()));
+    runtime.setRangeEnabled(true); // Idempotent apply must preserve current input.
+    check(runtime.manualHeld() && runtime.manualPressAt() == 700);
+    runtime.setEnabled(true);
+    check(!runtime.manualHeld() && !runtime.manualPlaceRequested());
+    check(runtime.beginManualPress(800, runtime.manualInputEpoch()));
+    auto newMode = runtime.modes();
+    newMode.range = false; // Manual flag unchanged, executor route changes.
+    check(runtime.applyModes(newMode));
+    check(!runtime.manualHeld() && !runtime.manualPlaceRequested());
+    runtime.resetWorldSession();
 }
 } // namespace lholo::tests
