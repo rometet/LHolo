@@ -10,6 +10,8 @@
 #include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/ProjectionTypes.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/mesh/SectionMissingLayerSnapshot.h"
+#include "projection/core/ProjectionMissingLayers.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "overlay/BoundsWireframe.h"
 
@@ -74,6 +76,26 @@ struct ProjectionState {
     std::uint64_t                   activationGeneration{};
     std::unique_ptr<BlockTessellator> blockTessellator;
     std::vector<CorrectionState>    correctionStates;
+    // Component absence from the same bounded correction read; overall
+    // CorrectionState remains the authoritative progress/Verifier result.
+    std::vector<std::uint8_t>       missingLayers;
+    std::optional<SectionMissingLayerSnapshot> sectionMissingLayerSnapshot;
+    bool hasBuildMissingLayers(std::size_t index) const {
+        return sectionMissingLayerSnapshot ? sectionMissingLayerSnapshot->find(index) != nullptr
+            : index < missingLayers.size();
+    }
+    std::uint8_t buildMissingLayers(std::size_t index) const {
+        if (!sectionMissingLayerSnapshot) return missingLayers.at(index);
+        auto const* value = sectionMissingLayerSnapshot->find(index);
+        if (!value) throw std::out_of_range("section missing-layer snapshot missing block");
+        return *value;
+    }
+    bool buildBodyShouldRender(std::size_t index) const {
+        return projectionBodyShouldRender(buildCorrectionState(index), buildMissingLayers(index));
+    }
+    bool buildLiquidShouldRender(std::size_t index) const {
+        return projectionLiquidShouldRender(buildCorrectionState(index), buildMissingLayers(index));
+    }
     // One byte per structure block. This is updated by the existing bounded
     // correction scan, so the HUD never performs its own world-block queries.
     std::vector<uchar>              progressCorrect;

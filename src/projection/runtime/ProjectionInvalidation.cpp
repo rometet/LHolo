@@ -163,6 +163,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             state.correctionStates.end(),
             CorrectionState::Unknown
         );
+        std::fill(state.missingLayers.begin(), state.missingLayers.end(), MissingLayerBoth);
         for (auto& sectionState : state.sections) {
             for (auto& mesh : sectionState.meshes) mesh.reset();
         }

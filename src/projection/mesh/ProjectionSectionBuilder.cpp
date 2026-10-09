@@ -459,7 +459,8 @@ void buildProjectionSection(
         return;
     }
     for (auto const index : state.sectionBlockIndices[section]) {
-        if (index >= blockCount || !state.hasBuildBlockState(index)) {
+        if (index >= blockCount || !state.hasBuildBlockState(index)
+            || !state.hasBuildMissingLayers(index)) {
             logger().error(
                 "Projection section build rejected index {} >= {} in section {}",
                 index,
@@ -507,14 +508,11 @@ void buildProjectionSection(
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correctionState = state.buildCorrectionState(index);
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
         // only their red/yellow outline below. This removes the
         // coincident textured surfaces that caused correction flicker.
-        if (correctionState == CorrectionState::Correct
-            || correctionState == CorrectionState::WrongType
-            || correctionState == CorrectionState::WrongState) {
+        if (!state.buildBodyShouldRender(index)) {
             continue;
         }
         auto const& entry = state.structure->renderBlocks[index];
@@ -855,7 +853,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!entry.liquid || !state.buildLiquidShouldRender(index)) continue;
         candidates.push_back(index);
     }
 
@@ -1229,7 +1227,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!entry.liquid || !state.buildLiquidShouldRender(index)) continue;
         candidates.push_back(index);
     }
     std::vector<std::size_t> succeeded;
@@ -1586,7 +1584,7 @@ void buildLiquidProxySectionMesh(
     std::vector<std::size_t> liquidProxyIndices;
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
-        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!state.buildLiquidShouldRender(index)) continue;
         if (std::binary_search(
                 nativeLiquidSucceeded.begin(),
                 nativeLiquidSucceeded.end(),
@@ -1817,7 +1815,8 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (state.buildCorrectionState(index) != CorrectionState::Missing
+            || (state.buildMissingLayers(index) & MissingLayerBody) == 0) continue;
         if (state.buildActorRendererAvailable(index)) continue;
         blockEntityIndices.push_back(index);
     }

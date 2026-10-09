@@ -244,7 +244,8 @@ CorrectionProgressChanges updateCorrectionTracker(
     // All per-block arrays must be index-aligned with renderBlocks. If a prior
     // allocation or lifecycle fault broke that invariant, skip correction
     // work rather than turning it into an out-of-bounds access.
-    if (state.correctionStates.size() < totalBlocks
+    if (state.missingLayers.size() < totalBlocks
+        || state.correctionStates.size() < totalBlocks
         || state.progressCorrect.size() < totalBlocks
         || state.progressErrorKind.size() < totalBlocks
         || state.blockToSection.size() < totalBlocks) {
@@ -320,6 +321,8 @@ CorrectionProgressChanges updateCorrectionTracker(
             || (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid))) {
             nextState = CorrectionState::WrongState;
         }
+        auto const nextMissingLayers = ready
+            ? projectionMissingLayerMask(bodyMissing, liquidMissing) : MissingLayerBoth;
         auto const nowCorrect = nextState == CorrectionState::Correct;
         auto const wasCorrect = state.progressCorrect[index] != 0;
         if (nowCorrect != wasCorrect) {
@@ -358,8 +361,10 @@ CorrectionProgressChanges updateCorrectionTracker(
         // Retain whole-structure correctness for legacy progress consumers;
         // mistake counts and correction meshes follow the visible range.
         if (!visible) return;
-        if (state.correctionStates[index] != nextState) {
+        if (state.correctionStates[index] != nextState
+            || state.missingLayers[index] != nextMissingLayers) {
             state.correctionStates[index] = nextState;
+            state.missingLayers[index] = nextMissingLayers;
             auto const section = state.blockToSection[index];
             if (sectionStorageContains(state, section)) {
                 markSectionDirty(state, section);

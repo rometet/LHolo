@@ -1,5 +1,6 @@
 // CPU command tags for the verbatim procedural fallback owner. These are not
 // SDK/material/GPU ownership doubles and do not establish native appearance.
+#include "projection/core/ProjectionMissingLayers.h"
 #include <map>
 #include <memory>
 #include <span>
@@ -82,7 +83,7 @@ struct Tessellator {
     void vertex(float x,float y,float z) { vertices.push_back({{x,y,z},uv,packed}); }
     std::vector<VertexCommand> end(UploadMode,char const*,SupplementaryFieldAutoGenerationMode) { return vertices; }
 };
-enum class CorrectionState { Missing, Correct };
+enum class CorrectionState { Missing, Correct, Unknown, WrongType, WrongState };
 struct ProjectionSectionBuildSettings {
     int mirrorMode{},rotationTurns{},offsetX{},offsetY{},offsetZ{},mirror{},rotation{};
     float structureOpacity{1.F}; bool identityTransform{true};
@@ -92,11 +93,13 @@ struct ProjectionState {
     BlockPos anchor;
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
     std::vector<CorrectionState> corrections;
+    std::vector<std::uint8_t> missingLayers;
     std::shared_ptr<std::map<std::tuple<int,int,int>,std::size_t>> expectedWorldBlockIndices;
     std::vector<std::size_t> liquidProxySectionCellCounts;
     std::vector<std::unique_ptr<mce::Mesh>> liquidProxySectionMeshes;
     struct { std::size_t liquidProxyFallbackCells{}; } nativeLiquidTelemetry;
     CorrectionState buildCorrectionState(std::size_t i) const { return corrections.at(i); }
+    bool buildLiquidShouldRender(std::size_t i) const { return lholo::projection::detail::projectionLiquidShouldRender(corrections.at(i), i < missingLayers.size() ? missingLayers[i] : lholo::projection::detail::MissingLayerBoth); }
 };
 inline Block const* transformExpectedBlock(Block const* b,LegacyStructureSettings const&,bool) { return b; }
 inline BlockPos transformStructurePosition(lholo::structure::LoadedStructure::RenderBlock const& b,

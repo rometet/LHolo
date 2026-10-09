@@ -78,6 +78,13 @@ for path, signature, call in [
     old_body = extract(subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':'+path]).decode('utf-8'),signature)
     assert 'ScopedRegionWriteSuppression projectedWrites;' not in old_body
     assert body.index('ScopedRegionWriteSuppression projectedWrites;') < body.index(call)
+    if path == renderer:
+        # The independent component gate is checked by its production fixture.
+        # Normalize precisely that gate to verify the earlier write scope and
+        # all other block-actor command behavior remain unchanged.
+        body = body.replace('projected.structureIndex >= state.correctionStates.size()\n            || projected.structureIndex >= state.missingLayers.size())', 'projected.structureIndex >= state.correctionStates.size())')
+        body = body.replace('        try {\n', '        auto const correctionState = state.correctionStates[projected.structureIndex];\n        try {\n', 1)
+        body = body.replace('            if (!state.buildBodyShouldRender(projected.structureIndex) || !renderComponent) {', '            if (correctionState == CorrectionState::Correct\n                || correctionState == CorrectionState::WrongType\n                || correctionState == CorrectionState::WrongState\n                || !renderComponent) {')
     assert body.replace('    ScopedRegionWriteSuppression projectedWrites;\n','') == old_body
 record = {'base': BASE, 'generated': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
            for p in OUT.glob('*.inc')}, 'native_GPU': 'NOT_RUN',

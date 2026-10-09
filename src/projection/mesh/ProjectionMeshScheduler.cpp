@@ -242,6 +242,10 @@ void scheduleProjectionMeshBuild(
         snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
     }
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
+    // Always capture just the target section for component gates. Keep the
+    // existing correction/actor neighbor snapshot and its large-model policy.
+    snapshot->sectionMissingLayerSnapshot.emplace();
+    snapshot->sectionMissingLayerSnapshot->capture(state.sectionBlockIndices[section], state.missingLayers);
     snapshot->sectionExtraBlockPositions = {state.sectionExtraBlockPositions[section]};
     // Correction face culling only needs extras in this section and its six
     // direct neighbors. Avoid copying the complete sparse set for every async

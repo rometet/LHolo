@@ -661,16 +661,13 @@ void submitProjectedBlockActorPass(
     );
     for (auto const& projected : state.projectedBlockActors) {
         if (!projected.actor || !projected.block
-            || projected.structureIndex >= state.correctionStates.size()) {
+            || projected.structureIndex >= state.correctionStates.size()
+            || projected.structureIndex >= state.missingLayers.size()) {
             continue;
         }
-        auto const correctionState = state.correctionStates[projected.structureIndex];
         try {
             auto* renderComponent = projected.actor->_getRenderComponent();
-            if (correctionState == CorrectionState::Correct
-                || correctionState == CorrectionState::WrongType
-                || correctionState == CorrectionState::WrongState
-                || !renderComponent) {
+            if (!state.buildBodyShouldRender(projected.structureIndex) || !renderComponent) {
                 continue;
             }
             auto const rendererId = renderComponent->getRendererId();
