@@ -78,6 +78,60 @@ void snapshotBench(std::size_t cells, bool sectionLayout = false) {
         cells, sectionLayout ? "section_xyz" : "contiguous_strips", queries.size(), compact,
         indices.size() * sizeof(lholo::projection::detail::SectionBlockSnapshot::Entry));
 }
+// Fixed CPU fixtures, independent of Minecraft/BDS and GPU submission. Keep
+// capture, lookup and the actual 8M production admission threshold separate.
+void snapshotProfile() {
+    using lholo::projection::detail::SectionBlockSnapshot;
+    constexpr int delta[7][3]{{0,0,0},{-16,0,0},{16,0,0},{0,-16,0},{0,16,0},{0,0,-16},{0,0,16}};
+    std::puts("profile,cells,density,path,sample,capture_us,lookup_us,total_us,stored_bytes,checksum");
+    for (auto const million : {1, 4, 8, 16}) {
+        auto const cells = static_cast<std::size_t>(million) * 1024 * 1024;
+        std::vector<std::uint8_t> correction(cells), actors(cells);
+        for (std::size_t i = 0; i < cells; ++i) { correction[i] = i % 5; actors[i] = i % 2; }
+        for (auto const stride : {1U, 16U}) {
+            std::vector<std::size_t> indices, queries;
+            for (std::size_t section = 0; section < 7; ++section) {
+                for (std::size_t cell = 0; cell < 4096; cell += stride) {
+                    auto const x = static_cast<std::size_t>(16 + delta[section][0]) + cell / 256;
+                    auto const y = static_cast<std::size_t>(16 + delta[section][1]) + cell / 16 % 16;
+                    auto const z = static_cast<std::size_t>(16 + delta[section][2]) + cell % 16;
+                    auto const index = (x * (cells / (128 * 128)) + y) * 128 + z;
+                    indices.push_back(index);
+                    for (int pass = 0; pass < (section == 0 ? 8 : 1); ++pass) queries.push_back(index);
+                }
+            }
+            std::uint64_t expected{};
+            for (auto const index : queries) expected += correction[index] + actors[index];
+            for (bool compact : {false, true}) {
+                for (int sample = -2; sample < 31; ++sample) {
+                    auto const started = Clock::now();
+                    SectionBlockSnapshot snapshot;
+                    std::vector<std::uint8_t> fullCorrection, fullActors;
+                    if (compact) snapshot.capture(indices, correction, actors);
+                    else { fullCorrection = correction; fullActors = actors; }
+                    auto const captured = Clock::now();
+                    std::uint64_t sum{};
+                    for (auto const index : queries) {
+                        if (compact) {
+                            auto const* value = snapshot.find(index);
+                            if (!value) throw std::runtime_error("profile missing neighbor");
+                            sum += value->correction + value->actorRenderer;
+                        } else sum += fullCorrection[index] + fullActors[index];
+                    }
+                    auto const finished = Clock::now();
+                    if (sum != expected) throw std::runtime_error("profile snapshot checksum mismatch");
+                    checksum = sum;
+                    if (sample >= 0) std::printf("snapshot,%zu,%s,%s,%d,%.3f,%.3f,%.3f,%zu,%llu\n",
+                        cells, stride == 1 ? "dense" : "sparse", compact ? "compact" : "full", sample,
+                        std::chrono::duration<double, std::micro>(captured - started).count(),
+                        std::chrono::duration<double, std::micro>(finished - captured).count(),
+                        std::chrono::duration<double, std::micro>(finished - started).count(),
+                        compact ? snapshot.bytes() : cells * 2, static_cast<unsigned long long>(sum));
+                }
+            }
+        }
+    }
+}
 void append32(std::string& bytes, std::uint32_t value) {
     for (int shift = 24; shift >= 0; shift -= 8) bytes.push_back(static_cast<char>(value >> shift));
 }
@@ -293,6 +347,10 @@ void materialKeyBench(std::size_t blocks) {
 }
 } // namespace
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--snapshot-profile") {
+        snapshotProfile();
+        return checksum == 0;
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--material-keys") {
         for (auto const million : {1, 4}) materialKeyBench(static_cast<std::size_t>(million) * 1024 * 1024);
         return checksum == 0;

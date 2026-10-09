@@ -47,6 +47,7 @@
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "SectionSnapshotChecks.h"
 #include "projection/mesh/TransparentQuadSort.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
@@ -2385,6 +2386,7 @@ int main() {
     testImGuiFrameRecovery();
     testSingleTaskWorker();
     testSectionBlockSnapshot();
+    lholo::tests::runSectionSnapshotChecks([](bool ok) { LHOLO_CHECK(ok); });
     testMeshDiagnosticGate();
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
