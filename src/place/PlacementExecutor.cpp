@@ -19,6 +19,9 @@
 #include "place/PlacementState.h"
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementDirectionRules.h"
+#include "place/PlacementRotation.h"
+#include "place/PlacementRotationDelivery.h"
+#include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
 #include "place/PlacementQuantization.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
@@ -345,6 +348,7 @@ struct ProjectionTarget {
     uchar        face;
     Block const* block;
     Vec3         clickPos{};  // Exact click point; chosen to reproduce the ghost.
+    std::optional<float> interactionYaw{};
 };
 
 // Which face of a cell points most along the given (unit) direction.
@@ -509,6 +513,14 @@ bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, I
     // the server misaligns the stream while reading and silently drops the
     // packet before the transaction is ever validated.
     transaction.mItem.get().mIncludeNetIds = true;
+
+    if (target.interactionYaw) {
+        detail::queueRotationPlacement(player,target.cell,packBlockPos(target.cell),
+            target.block->mNetworkId,slot,item,*target.interactionYaw,std::move(transactionBase));
+        // A fresh native AuthInput must carry both the use and interaction yaw.
+        // Queue admission does not consume a Manual tap or start the cell lock.
+        return false;
+    }
 
     InventoryTransactionPacket packet(
         InventoryTransactionPacketPayload(std::move(transactionBase), true)
@@ -929,7 +941,23 @@ bool resolveOrientedPlacement(
         return false;
     };
 
-    return searchCurrentRotation(out);
+    if (searchCurrentRotation(out)) return true;
+    // Keep the verified current-rotation path for every other family. Search
+    // native trapdoor permutations with scoped logic yaw, not a guessed mapping
+    // between serialized direction and yaw. Wrong half/direction still rejects.
+    auto const name=ghost.getTypeName();
+    if (!name.starts_with("minecraft:")) return false;
+    if (name!="minecraft:trapdoor" && !name.ends_with("_trapdoor")) return false;
+    auto& logicRotation=const_cast<Vec2&>(player.getRotation());
+    for (float yaw : {0.0f,90.0f,180.0f,-90.0f}) {
+        detail::ScopedPlacementYaw rotation(logicRotation,yaw);
+        bool matched=false;
+        auto const ok=app::invokeNativeCallback([&] { matched=searchCurrentRotation(out); },
+            [](char const* reason) noexcept { app::reportNativeCallbackFailure("trapdoor rotation prediction",reason); });
+        if (!ok) return false;
+        if (matched) { out.interactionYaw=yaw;return true; }
+    }
+    return false;
 }
 
 void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementContext) {

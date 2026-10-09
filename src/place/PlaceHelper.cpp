@@ -22,6 +22,7 @@
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
+#include "place/PlacementRotationDelivery.h"
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
@@ -69,6 +70,7 @@ struct PlaceHookStatus {
     bool manualUseItem{};
     bool manualStop{};
     bool manualBuild{};
+    bool rotation{};
 };
 
 PlaceHookStatus gHookStatus;
@@ -418,6 +420,8 @@ bool installHook() {
         return false;
     }
     gPlacementHooksReady.store(true, std::memory_order_release);
+    gHookStatus.rotation=detail::installRotationDeliveryHook();
+    if (!gHookStatus.rotation) logger().warn("Placement rotation delivery unavailable; retaining current-facing placement");
     return true;
 }
 
@@ -429,6 +433,7 @@ bool uninstallHook() {
         if (unhook()) installed = false;
         else ok = false;
     };
+    remove(gHookStatus.rotation, [] { return detail::uninstallRotationDeliveryHook(); });
     remove(gHookStatus.manualBuild, [] { return GameModeBuildBlockHook::unhook(); });
     remove(gHookStatus.manualStop, [] { return GameModeStopBuildHook::unhook(); });
     remove(gHookStatus.manualUseItem, [] { return GameModeUseItemHook::unhook(); });

@@ -3,6 +3,7 @@
 #include "place/PlacementState.h"
 #include "place/PlacementDirectionRules.h"
 #include "place/ManualPlacementRules.h"
+#include "place/PlacementRotation.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -16,10 +17,13 @@
 #include <tuple>
 #include <unordered_map>
 #include <vector>
+#include <stdexcept>
 
 using uchar = unsigned char;
 using uint = unsigned int;
 struct Vec3 { float x{},y{},z{}; };
+struct Vec2 { float x{},y{};bool operator==(Vec2 const&) const=default; };
+bool orientationProbe{},throwOnOverride{};
 struct BlockPos {
     int x{},y{},z{};
     bool operator==(BlockPos const&) const = default;
@@ -73,6 +77,7 @@ struct BlockSource {
 };
 struct Inventory { std::array<ItemStack,36> items{}; ItemStack const& getItem(int i) const { return items.at(i); } };
 struct Player {
+    Vec2 rotation{17,0};
     Inventory inventory; int selected{}; BlockSource region;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
@@ -81,14 +86,25 @@ struct Player {
     Vec3 getEyePos() const { return {}; }
     Vec3 getViewVector(float) const { return {1,0,0}; }
     float getPickRange() const { return 4; }
+    Vec2 const& getRotation() const { return rotation; }
     BlockSource& getDimensionBlockSource() { return region; }
 };
 using LocalPlayer=Player;
 struct PredictionInput { BlockPos cell;uchar face;Vec3 relative;int aux; };
 std::vector<PredictionInput> predictionInputs;
 Block const* suppliedPrediction{};
-Block const& Block::getPlacementBlock(Player&,BlockPos const& cell,uchar face,Vec3 const& relative,int aux) const {
-    predictionInputs.push_back({cell,face,relative,aux});return suppliedPrediction?*suppliedPrediction:*this;
+Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,Vec3 const& relative,int aux) const {
+    predictionInputs.push_back({cell,face,relative,aux});
+    if(orientationProbe&&name.ends_with("_trapdoor")) {
+        if(throwOnOverride&&p.rotation.y==0) throw std::runtime_error("supplied predictor fault");
+        static Block predicted;predicted=*this;++predicted.mNetworkId;
+        int direction=static_cast<int>(std::floor(std::fmod(p.rotation.y+360.0f,360.0f)/90.0f));
+        predicted.states["direction"]=std::to_string(direction);
+        predicted.states["upside_down_bit"]=relative.y>=0.5f?"1":"0";
+        predicted.states["open_bit"]="0";
+        return predicted;
+    }
+    return suppliedPrediction?*suppliedPrediction:*this;
 }
 template<class T> struct Field { T value{}; T& get() { return value; } };
 enum class ContainerID { Inventory };
@@ -202,7 +218,9 @@ struct Message { TextKey key; };
 }
 namespace app {
 namespace hook_lifecycle { struct DetourGuard { explicit operator bool() const { return true; } }; }
-template<class F,class E> bool invokeNativeCallback(F&& fn,E&&) { fn();return true; }
+template<class F,class E> bool invokeNativeCallback(F&& fn,E&& error) {
+    try {fn();return true;} catch(...) {error("supplied callback fault");return false;}
+}
 void reportNativeCallbackFailure(char const*,char const*) {}
 }
 namespace structure {
@@ -210,6 +228,11 @@ std::vector<i18n::TextKey> hints;
 void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
+int rotatedQueueCalls{};float rotatedQueueYaw{};
+void queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
+    ItemStack const&,float yaw,std::unique_ptr<ComplexInventoryTransaction>) {
+    ++rotatedQueueCalls;rotatedQueueYaw=yaw;
+}
 enum class ManualTargetStatus { None,Ready,MissingMaterial };
 ManualTargetStatus fixtureTargetStatus=ManualTargetStatus::None;
 ManualTargetStatus manualTargetStatusUnderCrosshair(Player&) { return fixtureTargetStatus; }
@@ -218,7 +241,7 @@ namespace {
 using detail::FailedPlanKey;using detail::FailedPlanKeyHash;using detail::PlacementContext;
 auto& placementState() { return detail::PlacementState::getInstance(); }
 #include "ConstantsBody.inc"
-struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{}; };
+struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<float> interactionYaw{}; };
 std::optional<ProjectionTarget> aimed;
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
@@ -308,10 +331,12 @@ void reset(Player& p) {
     sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();aimed.reset();
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;
+    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
 #include "DeliveryChecks.h"
 #include "CoverageChecks.h"
+#include "OrientationChecks.h"
 int main() {
     Player player;Block stone;reset(player);
     // Native predictor boundary inputs, all support faces and +/-section edges.
@@ -487,6 +512,7 @@ int main() {
     }
     runDeliveryChecks(player);
     runCoverageChecks(player);
+    runOrientationChecks(player);
     std::printf("ExecutorFixture: %d checks, %d failures; native/BDS/apply/consumption NOT_RUN\n",checks,failures);
     return failures?1:0;
 }

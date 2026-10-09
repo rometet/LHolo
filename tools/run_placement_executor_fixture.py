@@ -55,7 +55,7 @@ env['LIB']=';'.join(map(str,[vc/'lib/x64']+[sdk/'Lib'/ver/n/'x64' for n in ('ucr
 env['PATH']=str(cl.parent)+';'+str(vc/'bin/HostX64/x64')+';'+env['PATH']
 env['TEMP']=str(out);env['TMP']=str(out)
 fixture=Path(__file__).resolve().parents[1]/'tests/manual_placement/ExecutorFixture.cpp'
-argv=[str(cl),'/nologo','/std:c++20','/EHsc','/O2','/W4','/WX','/MD','/utf-8','/I'+str(src/'src'),'/I'+str(out),'/Fe:'+str(out/'executor-fixture.exe'),str(fixture),str(src/'src/place/PlacementState.cpp')]
+argv=[str(cl),'/nologo','/std:c++20','/EHsc','/O2','/W4','/WX','/MD','/utf-8','/I'+str(src/'src'),'/I'+str(Path(__file__).resolve().parents[1]/'src'),'/I'+str(out),'/Fe:'+str(out/'executor-fixture.exe'),str(fixture),str(src/'src/place/PlacementState.cpp')]
 t=time.perf_counter();r=subprocess.run(argv,cwd=out,env=env,capture_output=True)
 (out/'build.log').write_bytes(r.stdout+r.stderr)
 rec={'source':str(src),'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip(), 'scope':'offline actual bodies, boundary doubles; NOT native prediction/BDS/server apply', 'body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in parts], 'planner_body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in planner_parts], 'swap_body_sha256':hashlib.sha256(swap_part.encode()).hexdigest(),'start_build_body_sha256':hashlib.sha256(hook_body.encode()).hexdigest(),'identity_body_sha256':hashlib.sha256(identity.encode()).hexdigest(), 'argv':argv,'build_exit':r.returncode,'build_seconds':time.perf_counter()-t}
