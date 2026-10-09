@@ -371,6 +371,15 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     std::array<char, lholo::ui::StructurePathUtf8Capacity> path{};
     std::snprintf(path.data(), path.size(), "%s", "C:/schematics/test.litematic");
     lholo::ui::MenuModel model;
+    // Image/fallback geometry is exercised across every locale/viewport/scale.
+    // IDs are draw-command fixtures; this suite does not submit GPU work.
+    model.blockIcons=[](std::string_view block,std::string_view) {
+        using namespace lholo::ui;
+        auto name=verifierBlockParts(block).first;
+        if(name=="minecraft:air")return BlockIconView{{},BlockIconStatus::Air};
+        if(name=="minecraft:water")return BlockIconView{};
+        return BlockIconView{123,BlockIconStatus::Ready,2.f};
+    };
     model.pathBuffer = path.data();
     model.pathBufferSize = path.size();
     model.uiScale = scale;
