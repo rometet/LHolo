@@ -7,6 +7,9 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionSectionBuilder.h"
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+#include "projection/mesh/NativeGeometryProbe.h"
+#endif
 #include "projection/core/ComparisonStyle.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
@@ -70,6 +73,9 @@ std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic_bool gSubmergedPlantLogged{};
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+std::atomic<std::uint32_t> gGeometryProbeBuilds{};
+#endif
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -601,6 +607,18 @@ void buildProjectionSection(
         *state.expectedWorldBlockActors,
         &state.nativeLiquidTelemetry
     );
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+    NativeGeometryProbe geometryProbe;
+    if (std::any_of(compositeBodyOutcomes.begin(), compositeBodyOutcomes.end(), [&](auto const& cell) {
+            return state.buildCorrectionState(cell.structureIndex) == CorrectionState::Missing;
+        })) {
+        geometryProbe.batch = gGeometryProbeBuilds.fetch_add(1, std::memory_order_relaxed);
+        geometryProbe.active = geometryProbe.batch < 16;
+        geometryProbe.generation = state.structureGeneration;
+        geometryProbe.section = section;
+    }
+    ScopedNativeGeometryProbe probeScope{geometryProbe};
+#endif
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
          ++bucketIndex) {
@@ -649,9 +667,26 @@ void buildProjectionSection(
             );
             auto const firstPosition = tessellator.mMeshData->mPositions.get().size();
             auto const firstColor = tessellator.mMeshData->mColors.get().size();
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+            auto const firstUv = tessellator.mMeshData->mTextureUVs[0].get().size();
+            auto const extraBefore = blockTessellator.mRenderingExtra;
+#endif
             auto const rendered = blockTessellator.tessellateInWorld(
                 tessellator, renderBlock, layered.position, true
             );
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+            if (geometryProbe.select(layered.structureIndex)) {
+                auto const& entry = state.structure->renderBlocks[layered.structureIndex];
+                auto const& data = tessellator.mMeshData.get();
+                geometryProbe.dump("body", "native", layered.structureIndex,
+                    layered.block->getTypeName(), entry.liquid ? entry.liquid->getTypeName() : "none",
+                    static_cast<int>(layered.layer), static_cast<int>(data.mMode),
+                    extraBefore, blockTessellator.mRenderingExtra, rendered, data.mIndices.get().size(),
+                    data.mPositions.get(), data.mTextureUVs[0].get(), data.mColors.get(),
+                    firstPosition, firstUv, firstColor, 0, 0, 0,
+                    [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+            }
+#endif
             // Several legacy shape tessellators (notably doors) return
             // false after successfully appending vertices. The return
             // value describes the dispatch path, not mesh production.
@@ -807,6 +842,21 @@ void buildProjectionSection(
             sectionBuildSettings
         );
     }
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+    if (auto const* compat = state.praxisCompatLiquidSections[section].get(); compat && compat->ready()) {
+        auto const& data = *compat->nativeStream;
+        geometryProbe.dump("liquid", "final", 0, "section", "section", 3, static_cast<int>(data.mMode),
+            false, false, true, data.mIndices.get().size(),
+            data.mPositions.get(), data.mTextureUVs[0].get(), data.mColors.get(),
+            0, 0, 0, origin.x, origin.y, origin.z,
+            [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+    }
+    try {
+        if (geometryProbe.active) logger().info("PRAXIS_GEOMETRY_OWNER batch={} generation={} compatReady={} nativeMesh={} section={} cellsLimit=16 nativeVerticesLimit=256 finalVerticesLimit=4096",
+            geometryProbe.batch, geometryProbe.generation, state.praxisCompatLiquidSections[section] ? 1 : 0,
+            state.nativeLiquidSectionMeshes[section] ? 1 : 0, section);
+    } catch (...) { /* Diagnostic failure preserves the original draw path. */ }
+#endif
     auto const& liquidOwnership = state.praxisCompatLiquidSections[section]
         ? praxisCompatLiquidSucceeded
         : nativeLiquidSucceeded;
@@ -1290,6 +1340,11 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
         auto const positionsBefore = positions.size();
         auto const uvsBefore = uvs.size();
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        auto const firstProbeColor = tessellator.mMeshData->mColors.get().size();
+        auto const extraBefore = blockTessellator.mRenderingExtra;
+        auto* probe = gActiveNativeGeometryProbe;
+#endif
         bool rendered{};
         try {
             rendered = blockTessellator.tessellateInWorld(
@@ -1340,6 +1395,17 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             continue;
         }
 
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        if (probe && probe->select(index)) {
+            auto const& data = tessellator.mMeshData.get();
+            probe->dump("liquid", "native", index,
+                entry.block ? entry.block->getTypeName() : "none", expectedLiquid->getTypeName(),
+                3, static_cast<int>(data.mMode), extraBefore, blockTessellator.mRenderingExtra,
+                rendered, data.mIndices.get().size(), positions, uvs, data.mColors.get(),
+                positionsBefore, uvsBefore, firstProbeColor, 0, 0, 0,
+                [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+        }
+#endif
         auto const addedVertices = positionsAfter - positionsBefore;
         auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
         auto const uvRemapped = addedUvs == addedVertices
@@ -1353,6 +1419,17 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             continue;
         }
 
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        if (probe && probe->select(index)) {
+            auto const& data = tessellator.mMeshData.get();
+            probe->dump("liquid", "atlas", index,
+                entry.block ? entry.block->getTypeName() : "none", expectedLiquid->getTypeName(),
+                3, static_cast<int>(data.mMode), extraBefore, blockTessellator.mRenderingExtra,
+                rendered, data.mIndices.get().size(), positions, uvs, data.mColors.get(),
+                positionsBefore, uvsBefore, firstProbeColor, 0, 0, 0,
+                [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+        }
+#endif
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;

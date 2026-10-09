@@ -6,6 +6,12 @@ option("levimc_repo")
     set_description("Set the levimc-repo path or url")
 option_end()
 
+option("waterlogged_geometry_probe")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Observe bounded native body/liquid streams; no draw changes")
+option_end()
+
 option("target_type")
     set_default("client")
     set_showmenu(true)
@@ -115,6 +121,9 @@ rule("lholo.i18n.resources")
 rule_end()
 
 target("LHolo")
+    if has_config("waterlogged_geometry_probe") then
+        add_defines("LHOLO_WATERLOGGED_GEOMETRY_PROBE")
+    end
     -- Keep release optimization and emit matching CodeView/RSDS + PDB.
     set_symbols("debug")
     add_shflags("/OPT:REF", "/OPT:ICF", {force = true})
