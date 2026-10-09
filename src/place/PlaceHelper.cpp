@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "place/PlaceHelper.h"
+#include "ui/BlockIconRuntime.h"
 
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
@@ -86,6 +87,8 @@ LL_TYPE_INSTANCE_HOOK(
         origin(currentTick);
         return;
     }
+    app::invokeNativeCallback([] { ui::icons::tick(); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("block icon tick", reason); });
     app::invokeNativeCallback([&] { structure::capture::tick(*this); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("capture game tick", reason); });
     app::invokeNativeCallback([&] {

@@ -107,6 +107,7 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         ImGui::TextWrapped("%s", tr(TextKey::VerifierManualHint));
         ImGui::TextWrapped("%s", tr(TextKey::VerifierCountHint));
         ImGui::TextWrapped("%s", tr(TextKey::VerifierCoordinateHint));
+        ImGui::TextWrapped("%s", tr(TextKey::BlockIconHint));
         ImGui::PopTextWrapPos();
         ImGui::EndPopup();
     }
@@ -186,27 +187,38 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
                     ImGui::TableSetupColumn(tr(TextKey::VerifierShownCount), ImGuiTableColumnFlags_WidthFixed,
                         ImGui::CalcTextSize(tr(TextKey::VerifierShownCount)).x + metrics.gap);
                     ImGui::TableHeadersRow();
-                    ImGuiListClipper clipper; clipper.Begin(static_cast<int>(indices.size()));
+                    auto const iconSize=std::max(ImGui::GetTextLineHeight(),24.f*metrics.scale);
+                    auto const rowHeight=iconSize+ImGui::GetStyle().CellPadding.y*2;
+                    ImGuiListClipper clipper; clipper.Begin(static_cast<int>(indices.size()),rowHeight);
                     while (clipper.Step()) for (int n = clipper.DisplayStart; n < clipper.DisplayEnd; ++n) {
                         auto const& group = view.groups[indices[n]];
                         auto const& row = report->mismatches[group.indices.front()];
                         ImGui::PushID(static_cast<int>(group.indices.front()));
-                        ImGui::TableNextRow(); ImGui::TableSetColumnIndex(0);
+                        ImGui::TableNextRow(ImGuiTableRowFlags_None,rowHeight); ImGui::TableSetColumnIndex(0);
                         auto const width = ImGui::GetContentRegionAvail().x;
                         bool const selected = snap.target && samePair(*snap.target, row);
                         if (ImGui::Selectable("##MismatchRow", selected,
                             ImGuiSelectableFlags_SpanAllColumns | (!actions.selectMistake ? ImGuiSelectableFlags_Disabled : 0),
-                            ImVec2(0, ImGui::GetTextLineHeight())) && actions.selectMistake)
+                            ImVec2(0, iconSize)) && actions.selectMistake)
                             actions.selectMistake(report->stamp, group.indices.front());
                         if (ImGui::IsItemHovered()) {
                             ImGui::BeginTooltip(); ImGui::PushTextWrapPos(450.f * metrics.scale);
                             ImGui::TextWrapped("%s: %s\n%s: %s", tr(TextKey::VerifierExpected), row.expected.c_str(), tr(TextKey::VerifierActual), row.actual.c_str());
                             ImGui::PopTextWrapPos(); ImGui::EndTooltip();
                         }
-                        auto const text = fittedText(blockLabel(row.expected), width);
-                        ImGui::GetWindowDrawList()->AddText(ImGui::GetItemRectMin(), ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
+                        auto const expectedPos=ImGui::GetItemRectMin();
+                        auto const shownSize=std::min(iconSize,std::max(1.f,width));
+                        drawBlockIcon(model.blockIcons,row.expected,{},expectedPos,shownSize);
+                        auto const text = fittedText(blockLabel(row.expected), std::max(1.f,width-shownSize-metrics.gap*.5f));
+                        ImGui::GetWindowDrawList()->AddText({expectedPos.x+shownSize+metrics.gap*.5f,
+                            expectedPos.y+(iconSize-ImGui::GetTextLineHeight())*.5f},ImGui::GetColorU32(ImGuiCol_Text),text.c_str());
                         ImGui::TableSetColumnIndex(1);
-                        ImGui::TextUnformatted(fittedText(blockLabel(row.actual), ImGui::GetContentRegionAvail().x).c_str());
+                        auto const actualPos=ImGui::GetCursorScreenPos();
+                        auto const actualWidth=ImGui::GetContentRegionAvail().x;
+                        auto const actualSize=std::min(iconSize,std::max(1.f,actualWidth));
+                        drawBlockIcon(model.blockIcons,row.actual,{},actualPos,actualSize);
+                        ImGui::Dummy(ImVec2(actualSize,iconSize));ImGui::SameLine(0,metrics.gap*.5f);
+                        ImGui::TextUnformatted(fittedText(blockLabel(row.actual),ImGui::GetContentRegionAvail().x).c_str());
                         ImGui::TableSetColumnIndex(2); ImGui::Text("%zu", group.indices.size());
                         ImGui::PopID();
                     }
@@ -230,8 +242,14 @@ void renderVerificationPage(MenuModel& model, MenuActions const& actions, UiMetr
         if (selected == view.groups.end()) ImGui::TextWrapped("%s", tr(TextKey::VerifierSelectHint));
         else {
             auto const& row = report->mismatches[selected->indices.front()];
-            ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierExpected), std::string{verifierBlockParts(row.expected).first}.c_str());
-            ImGui::TextWrapped("%s: %s", tr(TextKey::VerifierActual), std::string{verifierBlockParts(row.actual).first}.c_str());
+            for(auto const expected:{true,false}) {
+                auto const& value=expected ? row.expected : row.actual;
+                auto const iconSize=std::min(36.f*metrics.scale,ImGui::GetContentRegionAvail().x*.25f);
+                drawBlockIcon(model.blockIcons,value,{},ImGui::GetCursorScreenPos(),iconSize);
+                ImGui::Dummy(ImVec2(iconSize,iconSize));ImGui::SameLine(0,metrics.gap*.5f);
+                ImGui::TextWrapped("%s: %s",tr(expected ? TextKey::VerifierExpected : TextKey::VerifierActual),
+                    std::string{verifierBlockParts(value).first}.c_str());
+            }
             auto const changes = verifierStateChanges(row.expected, row.actual);
             if (!changes.empty() && ImGui::BeginTable("##VerifierStateChanges", 3,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {

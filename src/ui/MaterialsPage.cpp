@@ -93,7 +93,11 @@ void renderMaterialBill(MenuModel const& model,MenuActions const& actions,UiMetr
             auto const identity=std::to_string(snapshot->scope.generation)+":"+std::to_string(snapshot->scope.token)+":"+row.key;
             ++view.drawnRows;ImGui::PushID(identity.c_str());
             ImGui::TableNextRow(ImGuiTableRowFlags_None,rowHeight);
-            ImGui::TableSetColumnIndex(0);fitted(nameFor(row));
+            ImGui::TableSetColumnIndex(0);
+            auto const iconSize=std::min(32.f*metrics.scale,ImGui::GetContentRegionAvail().x*.25f);
+            drawBlockIcon(model.blockIcons,row.typeName,row.itemId,ImGui::GetCursorScreenPos(),iconSize);
+            ImGui::Dummy(ImVec2(iconSize,iconSize));ImGui::SameLine(0,metrics.gap*.5f);
+            ImGui::BeginGroup();fitted(nameFor(row));
             ImGui::TextDisabled("%s",snapshot->isIgnored(index)?textFor(TextKey::MaterialsIgnored):"");
             // Clip the identifier, while exposing the exact block/item/key in
             // a tooltip. No identity gets truncated in an export or an action.
@@ -102,6 +106,7 @@ void renderMaterialBill(MenuModel const& model,MenuActions const& actions,UiMetr
                 ImGui::BeginTooltip();ImGui::TextUnformatted(row.typeName.c_str());
                 ImGui::TextUnformatted(row.itemId.c_str());ImGui::TextUnformatted(row.key.c_str());ImGui::EndTooltip();
             }
+            ImGui::EndGroup();
             ImGui::TableSetColumnIndex(1);
             char count[100]{};std::snprintf(count,sizeof(count),textFor(TextKey::MaterialsRequired),static_cast<unsigned long long>(row.count));fitted(count);
             if(index<snapshot->available.size() && snapshot->available[index]) {
@@ -127,6 +132,7 @@ void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics c
         ImGui::TextWrapped("%s",textFor(TextKey::MaterialsScope));
         ImGui::TextWrapped("%s",textFor(TextKey::MaterialsInventoryHint));
         ImGui::TextWrapped("%s",textFor(TextKey::MaterialsExportHint));
+        ImGui::TextWrapped("%s",textFor(TextKey::BlockIconHint));
     }
     constexpr std::array keys{TextKey::MaterialsAll,TextKey::MaterialsShortage,TextKey::MaterialsIgnored};
     for(int filter=0;filter<3;++filter) {

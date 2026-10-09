@@ -33,6 +33,26 @@ void saveRender(std::filesystem::path const& path,int width,int height) {
     require(data && data->Valid && data->TotalVtxCount>0,"menu draw data");
     for(auto* list:data->CmdLists)for(auto& command:list->CmdBuffer)
         if(command.TextureId==previous)command.TextureId=ImGui::GetIO().Fonts->TexID;
+    // Diagnostic textures are synthetic patterns, not Minecraft artwork.
+    // Rebind fixture image IDs to owned resources on this WARP device.
+    std::vector<ComPtr<ID3D11ShaderResourceView>> iconViews;
+    for(unsigned i=0;i<8;++i) {
+        std::array<unsigned char,16*16*4> pixels{};
+        for(unsigned y=0;y<16;++y)for(unsigned x=0;x<16;++x) {
+            auto const at=(y*16+x)*4;bool const light=((x/4+y/4)%2)==0;
+            pixels[at]=static_cast<unsigned char>(light?70+i*20:30+i*12);
+            pixels[at+1]=static_cast<unsigned char>(light?170-i*12:70-i*5);
+            pixels[at+2]=static_cast<unsigned char>(light?210-i*16:100-i*8);pixels[at+3]=255;
+        }
+        D3D11_TEXTURE2D_DESC icon{};icon.Width=icon.Height=16;icon.MipLevels=icon.ArraySize=1;
+        icon.Format=DXGI_FORMAT_R8G8B8A8_UNORM;icon.SampleDesc.Count=1;icon.Usage=D3D11_USAGE_IMMUTABLE;icon.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA source{pixels.data(),64,0};ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> view;
+        require(SUCCEEDED(device->CreateTexture2D(&icon,&source,&texture)),"fixture icon texture");
+        require(SUCCEEDED(device->CreateShaderResourceView(texture.Get(),nullptr,&view)),"fixture icon SRV");iconViews.push_back(view);
+    }
+    for(auto* list:data->CmdLists)for(auto& command:list->CmdBuffer)
+        if(command.TextureId>=0xB10C0000 && command.TextureId<0xB10C0008)
+            command.TextureId=reinterpret_cast<ImTextureID>(iconViews[static_cast<std::size_t>(command.TextureId-0xB10C0000)].Get());
     ImGui_ImplDX11_RenderDrawData(data);
     desc.BindFlags=0;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> readback;require(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&readback)),"readback texture");
@@ -44,7 +64,7 @@ void saveRender(std::filesystem::path const& path,int width,int height) {
     context->Unmap(readback.Get(),0);ImGui_ImplDX11_Shutdown();
     require(output.good(),"render artifact write");
 }
-void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running,bool scroll=false,int directCase=0) {
+void renderCase(std::filesystem::path const& output,int width,int height,float scale,bool running,bool scroll=false,int directCase=0,bool iconFixture=false) {
     using namespace lholo::ui;using namespace lholo::structure;
     auto* context=ImGui::CreateContext();auto& io=ImGui::GetIO();
     io.IniFilename=nullptr;io.LogFilename=nullptr;io.DisplaySize={static_cast<float>(width),static_cast<float>(height)};io.DeltaTime=1.f/60.f;
@@ -75,6 +95,15 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
                 "Japanese API/status text uses existing actual font glyphs");
     }
     MenuModel model;model.page=MenuPage::Verification;
+    std::size_t iconLookups{};
+    if(iconFixture)model.blockIcons=[&](std::string_view block,std::string_view) {
+        ++iconLookups;
+        auto const name=verifierBlockParts(block).first;
+        if(name=="minecraft:air")return BlockIconView{{},BlockIconStatus::Air};
+        if(name=="minecraft:birch_planks" || name=="minecraft:water")return BlockIconView{};
+        std::size_t hash{};for(auto c:name)hash=hash*31+static_cast<unsigned char>(c);
+        return BlockIconView{0xB10C0000+(hash%8),BlockIconStatus::Ready};
+    };
     if(directCase>=30 && directCase<40) {
         using namespace lholo::structure::detail;
         model.page=MenuPage::Materials;model.hasLoadedStructure=true;
@@ -227,6 +256,12 @@ void renderCase(std::filesystem::path const& output,int width,int height,float s
         for(int frame=0;frame<2;++frame){ImGui::NewFrame();renderMenu(model,actions,metrics);ImGui::Render();}
         require(panel->Pos.y < page->ClipRect.Max.y && panel->Pos.y >= page->ClipRect.Min.y-2,"compact panel is reachable at page scroll target");
     }
+    if(iconFixture) {
+        std::size_t images{};for(auto* list:ImGui::GetDrawData()->CmdLists)for(auto const& command:list->CmdBuffer)
+            if(command.TextureId>=0xB10C0000 && command.TextureId<0xB10C0008)++images;
+        require(images>0,"visible icon fixture produces image commands");
+        require(iconLookups<1000,"icon lookup remains limited to visible rows");
+    }
     saveRender(output,width,height);
     require(verifyCalls==0 && cancelCalls==0 && resetCalls==0,"opening and scrolling a page never invokes scan controls");
     if(directCase>=40 && directCase<=43) {
@@ -301,6 +336,13 @@ int main(int argc,char** argv) {
         renderCase(dir/"materials-stopping-1920.ppm",1920,1080,1,false,false,39);
         renderCase(dir/"materials-stopping-640.ppm",640,480,1,false,false,39);
         renderCase(dir/"materials-stopping-640-controls.ppm",640,480,1,false,true,39);
+        renderCase(dir/"icons-verifier-1920-synthetic.ppm",1920,1080,1,false,false,0,true);
+        renderCase(dir/"icons-verifier-640-list-synthetic.ppm",640,480,1,false,false,20,true);
+        renderCase(dir/"icons-verifier-640-detail-synthetic.ppm",640,480,1,false,false,21,true);
+        renderCase(dir/"icons-verifier-3840-synthetic.ppm",3840,2160,2,false,false,16,true);
+        renderCase(dir/"icons-materials-1920-synthetic.ppm",1920,1080,1,false,false,30,true);
+        renderCase(dir/"icons-materials-640-synthetic.ppm",640,480,1,false,false,36,true);
+        renderCase(dir/"icons-materials-3840-synthetic.ppm",3840,2160,2,false,false,30,true);
         return 0;
     }catch(std::exception const& e){std::fprintf(stderr,"Verifier render failed: %s\n",e.what());return 1;}
 }

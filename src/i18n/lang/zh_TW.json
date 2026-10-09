@@ -353,5 +353,6 @@
   "materials.totalHint": "所需數量涵蓋整個結構圖，並非尚未放置的數量。未知庫存不等於零。",
   "materials.placementTitle": "所選放置的驗證結果",
   "materials.placementHint": "已放置和剩餘數量來自上次手動驗證。請使用開始驗證再次檢查。",
-  "materials.help": "庫存、排除與匯出說明"
+  "materials.help": "庫存、排除與匯出說明",
+  "blockIcon.hint": "圖示顯示代表性紋理。朝向和狀態請查看詳細資訊。無法取得圖像時顯示 ?，空氣顯示 -。"
 }

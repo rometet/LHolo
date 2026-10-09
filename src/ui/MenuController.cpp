@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "ui/MenuController.h"
+#include "overlay/BlockIconGpu.h"
 
 #include "place/PlaceHelper.h"
 #include "projection/Projection.h"
@@ -470,6 +471,7 @@ void renderStructureMenu() {
     auto const metrics = calculateMetrics(displaySize, effectiveScale);
     applyFluentTheme(metrics);
     auto model = buildStructureMenuModel(effectiveScale);
+    model.blockIcons=[](std::string_view block,std::string_view item){return overlay::blockIconGpu().lookup(block,item);};
     applyMenuRoutePresentation(model,route);
     if(route==input::MenuRoute::Materials) {
         structure::requestMaterialList();

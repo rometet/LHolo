@@ -415,7 +415,8 @@
     LHOLO_TEXT_KEY("materials.totalHint", MaterialsTotalHint, "") \
     LHOLO_TEXT_KEY("materials.placementTitle", MaterialsPlacementTitle, "") \
     LHOLO_TEXT_KEY("materials.placementHint", MaterialsPlacementHint, "") \
-    LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "")
+    LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "") \
+    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "")
 
 namespace lholo::i18n {
 

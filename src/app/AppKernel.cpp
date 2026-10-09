@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "app/AppKernel.h"
+#include "ui/BlockIconRuntime.h"
 
 #include "app/HookLifecycle.h"
 #include "app/InitializationRetention.h"
@@ -60,6 +61,10 @@ bool AppKernel::enable() {
         projection::detail::resetMeshWorkerForSession();
         if (!projection::detail::projectionController().installHooks()) {
             logger.error("Failed to install required projection hooks");
+            return false;
+        }
+        if (!ui::icons::installHooks()) {
+            logger.error("Failed to install block icon resource lifetime hooks");
             return false;
         }
         if (!place::installHook()) {
@@ -127,6 +132,7 @@ bool AppKernel::disable() {
     bool hooksRemoved = true;
     hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
     hooksRemoved = place::uninstallHook() && hooksRemoved;
+    hooksRemoved = ui::icons::uninstallHooks() && hooksRemoved;
     hooksRemoved = projection::detail::projectionController().uninstallHooks()
         && hooksRemoved;
     if (!hooksRemoved) {
@@ -141,6 +147,7 @@ bool AppKernel::disable() {
     // released until every already-entered typed detour has returned.
     hook_lifecycle::waitForQuiescence();
     structure::capture::shutdown();
+    ui::icons::closeSession();
 
     // No typed render callback can reinstall the overlay after this point.
     // The overlay has its own callback drain for Present/WndProc/D3D detours and

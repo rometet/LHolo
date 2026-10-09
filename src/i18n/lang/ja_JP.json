@@ -353,5 +353,6 @@
   "materials.totalHint": "必要数は設計図全体。未設置の数とは異なります。所持数の不明は0ではありません。",
   "materials.placementTitle": "選択した配置の検証結果",
   "materials.placementHint": "設置済み・残りは最後の手動検証時点。再確認は「検証開始」から行います。",
-  "materials.help": "所持数・除外・保存の説明"
+  "materials.help": "所持数・除外・保存の説明",
+  "blockIcon.hint": "アイコンは代表テクスチャです。向きや状態は詳細で確認できます。画像を取得できない場合は ?、空気は - を表示します。"
 }

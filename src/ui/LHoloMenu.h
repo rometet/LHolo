@@ -3,6 +3,7 @@
 
 #include "i18n/Translator.h"
 #include "ui/FluentTheme.h"
+#include "ui/BlockIcon.h"
 #include "input/HotkeyTypes.h"
 #include "input/MenuRoute.h"
 #include "structure/SchematicRuntime.h"
@@ -78,6 +79,7 @@ struct MaterialRow {
 };
 
 struct MenuModel {
+    BlockIconLookup blockIcons;
     MenuPage page{MenuPage::Projection};
     input::MenuRoute directMenuRoute{input::MenuRoute::None};
     bool directMenuRoutesReady{true};

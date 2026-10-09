@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "overlay/ImGuiOverlay.h"
+#include "overlay/BlockIconGpu.h"
 #include "overlay/OverlayFonts.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
@@ -245,6 +246,7 @@ HWND findProcessWindow() {
 }
 
 void releaseGraphicsBackend() {
+    blockIconGpu().reset();
     std::lock_guard imguiLock(gImGuiMutex);
     // A v3 companion owns its own ImGui/DX11 backend on the same device/context.
     // Tear it down before LHolo releases or recreates the shared graphics device.
@@ -1004,6 +1006,8 @@ void render(IDXGISwapChain* swapChain) {
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
+            blockIconGpu().beginFrame(gDevice);
+            app::ScopeExit endIconFrame([]() noexcept {blockIconGpu().endFrame();});
             detail::ImGuiFrameRecovery frameRecovery;
 
             if (structure::isGuiVisible()) {

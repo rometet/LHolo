@@ -353,5 +353,6 @@
   "materials.totalHint": "所需数量涵盖整个原理图，并非尚未放置的数量。未知库存不等于零。",
   "materials.placementTitle": "所选放置的验证结果",
   "materials.placementHint": "已放置和剩余数量来自上次手动验证。请使用开始验证再次检查。",
-  "materials.help": "库存、排除与导出说明"
+  "materials.help": "库存、排除与导出说明",
+  "blockIcon.hint": "图标显示代表性纹理。朝向和状态请查看详情。无法获取图像时显示 ?，空气显示 -。"
 }

@@ -353,5 +353,6 @@
   "materials.totalHint": "Required counts cover the whole schematic, not unplaced blocks. Unknown inventory is not zero.",
   "materials.placementTitle": "Selected-placement verification",
   "materials.placementHint": "Placed and remaining counts are from the last manual verification. Use Start verification to check again.",
-  "materials.help": "Inventory, exclusions and export"
+  "materials.help": "Inventory, exclusions and export",
+  "blockIcon.hint": "Icons show representative textures. Check details for orientation and states. Unavailable images show ?; air shows -."
 }

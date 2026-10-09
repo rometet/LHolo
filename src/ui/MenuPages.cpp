@@ -224,6 +224,9 @@ void renderSelectedMaterials(MenuModel const& model) {
     ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));
     if(ImGui::BeginChild("##SelectedMaterials",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*6),ImGuiChildFlags_Borders)){
         for(auto const& row:report->materials){
+            auto const size=ImGui::GetTextLineHeight()*1.2f;
+            drawBlockIcon(model.blockIcons,row.item,{},ImGui::GetCursorScreenPos(),size);
+            ImGui::Dummy(ImVec2(size,size));ImGui::SameLine();
             ImGui::TextWrapped("%s  %llu / %llu / %llu / %s",row.item.c_str(),static_cast<unsigned long long>(row.count.total),static_cast<unsigned long long>(row.count.correct),static_cast<unsigned long long>(row.count.remaining()),
                 row.inventory?std::to_string(*row.inventory).c_str():tr(i18n::TextKey::SchematicInventoryUnavailable));
         }
