@@ -97,6 +97,8 @@ jobs:
 
       - name: Build and run translucency tests
         run: |
+          python tools/Prepare-WaterOrderFixtures.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake -v -y LHoloTranslucencyTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake run LHoloTranslucencyTests
