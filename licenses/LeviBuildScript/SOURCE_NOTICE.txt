@@ -1,0 +1,4 @@
+Upstream source: https://github.com/LiteLDev/LeviBuildScript
+Exact ref: 16f0f565951dbbf1161e61c798209d2a35889684
+Version: 0.6.1
+No root license file was supplied by this upstream build-script snapshot; no additional license designation is asserted.

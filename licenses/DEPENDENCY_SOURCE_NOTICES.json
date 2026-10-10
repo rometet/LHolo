@@ -1,0 +1,51 @@
+{
+  "runtimeAndHeaders": [
+    "Dear-ImGui",
+    "EnTT",
+    "expected-lite",
+    "fmt",
+    "GLM",
+    "GSL",
+    "LeviLamina",
+    "nlohmann-json",
+    "PFR",
+    "SymbolProvider"
+  ],
+  "additionalSources": [
+    {
+      "name": "MinHook",
+      "repository": "https://github.com/TsudaKageyu/minhook",
+      "ref": "v1.3.4",
+      "version": "v1.3.4",
+      "archive": "MinHook.zip",
+      "downloadURL": "https://codeload.github.com/TsudaKageyu/minhook/zip/v1.3.4",
+      "sha256": "172708123daa0c98d20d3a980b16a50be14af243dc95dee6f79c24193ad010e4",
+      "bytes": 74334
+    },
+    {
+      "name": "zlib",
+      "repository": "https://github.com/madler/zlib",
+      "ref": "v1.3.2",
+      "version": "v1.3.2",
+      "archive": "zlib.zip",
+      "downloadURL": "https://codeload.github.com/madler/zlib/zip/v1.3.2",
+      "sha256": "31fd9fee98812abcf147d0e103bc4d2f983c35a8d7a807a328a299f3a74e0050",
+      "bytes": 1671101
+    },
+    {
+      "name": "LeviBuildScript",
+      "repository": "https://github.com/LiteLDev/LeviBuildScript",
+      "ref": "16f0f565951dbbf1161e61c798209d2a35889684",
+      "version": "0.6.1",
+      "archive": "LeviBuildScript.zip",
+      "downloadURL": "https://codeload.github.com/LiteLDev/LeviBuildScript/zip/16f0f565951dbbf1161e61c798209d2a35889684",
+      "sha256": "a1144ab893161a189af8d97a453d3cbba19ae28e05daf0308562512c01a79bd1",
+      "bytes": 2752
+    }
+  ],
+  "otherDeclaredSdkDependencySourcesIncluded": [
+    "LevelDB",
+    "Snappy"
+  ],
+  "LeviBuildScript": "Upstream helper source is included at its pinned commit, with no inferred license designation."
+}

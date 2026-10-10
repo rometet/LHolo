@@ -126,7 +126,7 @@ inline void runWaterCommands() {
     auto captured=makeData(capturedPositions());NativeReplaySortBudget cb;auto cp=glm::vec3{0,80,100};
     submitPraxisExactReplayImmediately(screen,captured,material,texture,cp,cb);WC(captured.cameraSort.keyValid);verify(captured,captured.cameraSort.order);
     auto fresh=makeData();WC(!fresh.cameraSort.keyValid);WC(fresh.cameraSort.order.empty());
-    std::cout<<"Water replay command fixture: PASS checks="<<checks<<" captured_vertices="<<captured.nativeStream->mPositions.get().size()<<" native_GPU=NOT_RUN\n";
+    std::cout<<"Water replay command fixture: PASS checks="<<checks<<" fixture_vertices="<<captured.nativeStream->mPositions.get().size()<<" native_GPU=NOT_RUN\n";
 }
 #undef WC
 } // namespace water_commands
