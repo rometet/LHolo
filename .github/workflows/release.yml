@@ -108,7 +108,9 @@ jobs:
             bin/
 
   update-release-notes:
-    if: ${{ github.event_name == 'release' || inputs.publish_assets == true }}
+    # Published releases validate the tagged source without replacing accepted assets.
+    # Asset/notes updates remain available through an explicit manual dispatch.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_assets == true }}
     needs: build
     permissions:
       contents: write
@@ -128,7 +130,7 @@ jobs:
             ${{ steps.extract-release-notes.outputs.release_notes }}
 
   upload-to-release:
-    if: ${{ github.event_name == 'release' || inputs.publish_assets == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_assets == true }}
     needs:
       - build
       - update-release-notes
