@@ -5,6 +5,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include "WaterOrderCommandFixture.h"
 
 using namespace lholo::projection::detail;
 namespace {
@@ -127,6 +128,7 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
+    water_commands::runWaterCommands();
     keys(); orderAndAttributes(); indices(); malformed(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }

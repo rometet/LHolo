@@ -564,11 +564,55 @@ struct PraxisExactReplaySubmitResult {
     std::uint64_t submitMicros{};
 };
 
+template<class QuadInfo>
+bool applyNativeReplayQuadOrder(
+    mce::MeshData& replayData, std::vector<QuadInfo>& quadInfo,
+    std::span<std::size_t const> order
+) {
+    if (order.empty() || !transparentQuadOrderChanged(order)) return true;
+    // Transactional staging: a failed layout/allocation keeps both original
+    // replay streams and face metadata. Canonical data and cull caches never
+    // observe this permutation.
+    mce::MeshData candidate{replayData};
+    auto metadata = quadInfo;
+    if (!reorderQuadVertexField(candidate.mPositions.get(), order)
+        || !reorderQuadVertexField(candidate.mNormals.get(), order)
+        || !reorderQuadVertexField(candidate.mTangents.get(), order)
+        || !reorderQuadVertexField(candidate.mColors.get(), order)
+        || !reorderQuadVertexField(candidate.mBoneId0s.get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[0].get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[1].get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[2].get(), order)
+        || !reorderQuadVertexField(candidate.mPBRTextureIndices.get(), order)
+        || !reorderQuadVertexField(candidate.mMERS.get(), order)
+        || !reorderQuadVertexField(candidate.mGeoType.get(), order)
+        || !reorderReplayQuadMetadata(metadata, order)) return false;
+    // Standard-vector swaps commit without calling an engine MeshData move
+    // assignment. No allocation or native submission occurs during commit.
+    replayData.mPositions.get().swap(candidate.mPositions.get());
+    replayData.mNormals.get().swap(candidate.mNormals.get());
+    replayData.mTangents.get().swap(candidate.mTangents.get());
+    replayData.mColors.get().swap(candidate.mColors.get());
+    replayData.mBoneId0s.get().swap(candidate.mBoneId0s.get());
+    replayData.mTextureUVs[0].get().swap(candidate.mTextureUVs[0].get());
+    replayData.mTextureUVs[1].get().swap(candidate.mTextureUVs[1].get());
+    replayData.mTextureUVs[2].get().swap(candidate.mTextureUVs[2].get());
+    replayData.mPBRTextureIndices.get().swap(candidate.mPBRTextureIndices.get());
+    replayData.mMERS.get().swap(candidate.mMERS.get());
+    replayData.mGeoType.get().swap(candidate.mGeoType.get());
+    quadInfo.swap(metadata);
+    return true;
+}
+
+
+
 PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     ScreenContext&                       screenContext,
     PraxisCompatLiquidSectionData const& data,
     mce::MaterialPtr const&              material,
-    mce::TexturePtr const&               terrainTexture
+    mce::TexturePtr const&               terrainTexture,
+    glm::vec3                            localCamera,
+    NativeReplaySortBudget&              sortBudget
 ) {
     PraxisExactReplaySubmitResult result{};
     if (!data.ready()) return result;
@@ -590,6 +634,19 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     );
     mce::MeshData replayData{*data.nativeStream};
     replayData.mColors.get() = data.derivedColors;
+    auto replayQuadInfo = data.tessellatorState.quadInfo;
+    try {
+        auto const order = nativeReplayQuadOrder(data.cameraSort,
+            std::span<glm::vec3 const>{data.nativeStream->mPositions.get()}, localCamera, sortBudget);
+        if (!applyNativeReplayQuadOrder(replayData, replayQuadInfo, order)) {
+            data.cameraSort.unsupported = true;
+            logger().warn("NATIVE_REPLAY_PRIMITIVE_SORT incompatible metadata; native order retained");
+        }
+    } catch (...) {
+        // Staging has not committed. Keep the accepted replay path on failure.
+        data.cameraSort.keyValid = false;
+        data.cameraSort.order.clear();
+    }
     tessellator.mMeshData.get() = std::move(replayData);
     tessellator.mIsFormatFixed = data.tessellatorState.isFormatFixed;
     tessellator.mHasNormals = data.tessellatorState.hasNormals;
@@ -606,7 +663,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     );
     tessellator.mFaceCenterAccumulator =
         data.tessellatorState.faceCenterAccumulator;
-    tessellator.mQuadInfoList.get() = data.tessellatorState.quadInfo;
+    tessellator.mQuadInfoList.get() = std::move(replayQuadInfo);
     result.vertices = vertexCount;
     result.replayMicros = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -757,6 +814,12 @@ void submitProjectionMeshPass(
     // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
     if (renderAlphaLayer) {
+        NativeReplaySortBudget replaySortBudget;
+        glm::vec3 const replayLocalCamera{
+            camera.x - static_cast<float>(renderOrigin.x),
+            camera.y - static_cast<float>(renderOrigin.y),
+            camera.z - static_cast<float>(renderOrigin.z)
+        };
         auto& telemetry = state.nativeLiquidTelemetry;
         telemetry.praxisCompatImmediateSubmitsPerFrame = 0;
         telemetry.praxisCompatVerticesReplayedPerFrame = 0;
@@ -869,7 +932,9 @@ void submitProjectionMeshPass(
                             renderContext.mScreenContext,
                             data,
                             *exactReplayMaterial,
-                            *state.terrainTexture
+                            *state.terrainTexture,
+                            replayLocalCamera,
+                            replaySortBudget
                         );
                         ++telemetry.praxisCompatImmediateSubmits;
                         ++telemetry.praxisCompatImmediateSubmitsPerFrame;
