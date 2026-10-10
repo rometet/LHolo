@@ -31,8 +31,6 @@ jobs:
           path: |
             ~/AppData/Local/.xmake
           key: xmake-${{ hashFiles('xmake.lua') }}
-          restore-keys: |
-            xmake-
 
       - name: Install verified LLVM 22.1.8
         shell: pwsh
@@ -97,8 +95,6 @@ jobs:
 
       - name: Build and run translucency tests
         run: |
-          python tools/Prepare-WaterOrderFixtures.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake -v -y LHoloTranslucencyTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake run LHoloTranslucencyTests

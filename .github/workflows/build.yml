@@ -18,8 +18,6 @@ jobs:
           path: |
             ~/AppData/Local/.xmake
           key: xmake-${{ hashFiles('xmake.lua') }}
-          restore-keys: |
-            xmake-
 
       - name: Install verified LLVM 22.1.8
         shell: pwsh

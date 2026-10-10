@@ -1,7 +1,7 @@
 # Corresponding source and build information
 
 This is the Windows x64 / Minecraft Bedrock 1.26.51.01 / LeviLamina Client
-26.51.5 comparison prerelease `v26.51.2-ja.8-rc.1`. Native game execution and
+26.51.5 comparison prerelease `v26.51.2-ja.8-rc.2`. Native game execution and
 pixel, transparency, flicker, and FPS improvement are NOT_RUN / NOT_CONFIRMED.
 
 The shipped DLL/PDB were freshly built from candidate commit
@@ -46,7 +46,7 @@ must not select delayimp:delayhlp. Delay-load bedrock_runtime.dll and retain its
 These are verified conditions for the supplied asset, not a claim that any
 unverified local rebuild automatically satisfies them. The modpacker upstream
 version is 26.51.2-ja.1; the release package manifest is explicitly expanded to
-26.51.2-ja.8-rc.1 without changing compiled code.
+26.51.2-ja.8-rc.2 without changing compiled code.
 
 The public water-order test generator extracts the current product submit
 functions and creates 106 synthetic quads (424 vertices). It needs no game,
@@ -64,3 +64,11 @@ still make an extra copy; the 1 ms budget gates starting another sort and is
 not a hard execution time cap. The reported transparency abnormality remains
 unconfirmed. Resource world/gate and the separate normal-opacity proposal are
 excluded. No main/stable promotion or live installation is performed.
+
+rc.2 corrects test fixture generation ownership: LHoloTranslucencyTests runs
+Prepare-WaterOrderFixtures.py before compilation. Both push/tag and release
+workflows use this target hook; generated includes remain untracked under build/.
+The exact include directory is build/generated/render-contract. Package-cache
+keys are exact per xmake.lua; broad fallback restoration was removed for the
+clean rc.2 verification. Product runtime source and the supplied DLL/PDB are
+unchanged from rc.1. The original rc.1 tag and failed run evidence are retained.

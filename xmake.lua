@@ -302,6 +302,11 @@ target("LHoloTranslucencyTests")
     add_cxflags("/utf-8", "/W4", "/WX")
     add_defines("NOMINMAX")
     add_packages("levilamina")
+    -- Generated product-body fixtures must exist before compilation in every
+    -- entry point, including push/tag CI and a clean local target build.
+    before_build(function (target)
+        os.vrunv("python", {path.join(os.projectdir(), "tools", "Prepare-WaterOrderFixtures.py")})
+    end)
 
 target("LHoloVerifierRenderTests")
     add_rules("lholo.i18n.resources")
