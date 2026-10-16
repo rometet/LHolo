@@ -101,6 +101,12 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
     if (!corners) return TransparentMeshSortResult::Invalid;
     auto& indices = data.mIndices.get();
     if (!indices.empty()) {
+        // Indexed primitives reorder only the index stream, but every enabled
+        // vertex stream must still address the same position domain. Reject a
+        // malformed native layout before publishing a replacement mesh.
+        if (!transparentIndexedStreamsCompatible(data, positions.size())) {
+            return TransparentMeshSortResult::Invalid;
+        }
         auto const order = transparentIndexedPrimitiveOrder(
             std::span<glm::vec3 const>{positions.data(), positions.size()},
             std::span<unsigned int const>{indices.data(), indices.size()}, corners, camera);

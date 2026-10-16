@@ -1,4 +1,6 @@
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/core/LiquidProxyRules.h"
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -17,6 +19,22 @@ std::vector<glm::vec3> quads(std::initializer_list<float> zs) {
     }
     return vertices;
 }
+struct FakeStream {
+    std::vector<int> values;
+    bool empty() const noexcept { return values.empty(); }
+    std::size_t size() const noexcept { return values.size(); }
+    auto const& get() const noexcept { return values; }
+};
+struct FakeIndexedStreams {
+    FakeStream mNormals;
+    FakeStream mTangents;
+    FakeStream mColors;
+    FakeStream mBoneId0s;
+    std::array<FakeStream, 3> mTextureUVs;
+    FakeStream mPBRTextureIndices;
+    FakeStream mMERS;
+    FakeStream mGeoType;
+};
 void keys() {
     auto const a=transparentSortKey({1.24f,-0.01f,2.0f});
     auto const b=transparentSortKey({1.25f,-0.26f,2.0f});
@@ -95,6 +113,20 @@ void malformed() {
     auto extreme=quads({(std::numeric_limits<float>::max)(),-(std::numeric_limits<float>::max)()});
     CHECK(transparentQuadOrder(extreme,{0,0,0}));
 }
+void liquidProxyGuards() {
+    CHECK(isValidLiquidProxyUvRect({0.1f, 0.2f, 0.3f, 0.4f}));
+    CHECK(!isValidLiquidProxyUvRect({0.1f, 0.2f, 0.1f, 0.4f}));
+    CHECK(!isValidLiquidProxyUvRect({0.1f, std::numeric_limits<float>::quiet_NaN(), 0.3f, 0.4f}));
+    CHECK(!liquidProxyFaceOccluded(false, false));
+    CHECK(liquidProxyFaceOccluded(false, true));
+    CHECK(liquidProxyFaceOccluded(true, false));
+
+    FakeIndexedStreams streams;
+    streams.mNormals.values.resize(8);
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
+    streams.mNormals.values.pop_back();
+    CHECK(!transparentIndexedStreamsCompatible(streams, 8));
+}
 void randomizedAndBudgetMeasurement() {
     std::mt19937 random(42);
     std::uniform_real_distribution<float> coord(-10000,10000);
@@ -127,6 +159,6 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
-    keys(); orderAndAttributes(); indices(); malformed(); randomizedAndBudgetMeasurement();
+    keys(); orderAndAttributes(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }

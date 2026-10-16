@@ -91,6 +91,26 @@ inline std::optional<std::vector<std::size_t>> transparentIndexedPrimitiveOrder(
         });
 }
 
+template <class MeshDataLike>
+[[nodiscard]] inline bool transparentIndexedStreamsCompatible(
+    MeshDataLike const& data,
+    std::size_t vertexCount
+) {
+    auto const compatible = [vertexCount](auto const& field) {
+        return field.empty() || field.size() == vertexCount;
+    };
+    return compatible(data.mNormals.get())
+        && compatible(data.mTangents.get())
+        && compatible(data.mColors.get())
+        && compatible(data.mBoneId0s.get())
+        && compatible(data.mTextureUVs[0].get())
+        && compatible(data.mTextureUVs[1].get())
+        && compatible(data.mTextureUVs[2].get())
+        && compatible(data.mPBRTextureIndices.get())
+        && compatible(data.mMERS.get())
+        && compatible(data.mGeoType.get());
+}
+
 inline std::optional<std::vector<std::size_t>> transparentQuadOrder(
     std::span<glm::vec3 const> positions, glm::vec3 camera
 ) { return transparentPrimitiveOrder(positions, 4U, camera); }
