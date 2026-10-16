@@ -66,6 +66,35 @@ void orderAndAttributes() {
     auto tie=transparentQuadOrder(duplicate,{0,0,0});
     CHECK(tie && *tie==std::vector<std::size_t>({0,1,2}));
 }
+void sectionBoundariesAndViewChanges() {
+    // Adjacent positive sections must reverse order when the camera crosses
+    // their shared boundary; this is the primitive contract the render owner
+    // relies on for a camera-local resort.
+    auto positiveBoundary=quads({15.5f,16.5f});
+    auto fromNegativeSide=transparentQuadOrder(positiveBoundary,{0,0,0});
+    auto fromPositiveSide=transparentQuadOrder(positiveBoundary,{0,0,32});
+    CHECK(fromNegativeSide && *fromNegativeSide==std::vector<std::size_t>({1,0}));
+    CHECK(fromPositiveSide && *fromPositiveSide==std::vector<std::size_t>({0,1}));
+
+    // Minecraft's negative coordinate section boundary is between -16 and
+    // -15. Keep it explicit so truncating division cannot silently change the
+    // expected order.
+    auto negativeBoundary=quads({-16.5f,-15.5f});
+    auto fromPositiveSideNegative=transparentQuadOrder(negativeBoundary,{0,0,0});
+    auto fromNegativeSideNegative=transparentQuadOrder(negativeBoundary,{0,0,-32});
+    CHECK(fromPositiveSideNegative && *fromPositiveSideNegative==std::vector<std::size_t>({0,1}));
+    CHECK(fromNegativeSideNegative && *fromNegativeSideNegative==std::vector<std::size_t>({1,0}));
+
+    auto movingView=quads({1,5,9});
+    auto firstView=transparentQuadOrder(movingView,{0,0,0});
+    auto secondView=transparentQuadOrder(movingView,{0,0,10});
+    CHECK(firstView && secondView);
+    CHECK(*firstView==std::vector<std::size_t>({2,1,0}));
+    CHECK(*secondView==std::vector<std::size_t>({0,1,2}));
+    CHECK(transparentQuadOrderChanged(*firstView));
+    CHECK(!transparentQuadOrderChanged(*secondView));
+    CHECK(*firstView != *secondView);
+}
 void indices() {
     auto p=quads({1,5});
     std::vector<unsigned int> quadIndices{0,1,2,3,4,5,6,7};
@@ -126,6 +155,17 @@ void liquidProxyGuards() {
     CHECK(transparentIndexedStreamsCompatible(streams, 8));
     streams.mNormals.values.pop_back();
     CHECK(!transparentIndexedStreamsCompatible(streams, 8));
+    streams.mNormals.values.resize(8);
+    streams.mTextureUVs[0].values.resize(8);
+    streams.mTextureUVs[1].values.resize(8);
+    streams.mTextureUVs[2].values.resize(8);
+    streams.mColors.values.resize(8);
+    streams.mGeoType.values.resize(8);
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
+    streams.mGeoType.values.resize(7);
+    CHECK(!transparentIndexedStreamsCompatible(streams, 8));
+    streams.mGeoType.values.clear();
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
 }
 void randomizedAndBudgetMeasurement() {
     std::mt19937 random(42);
@@ -159,6 +199,6 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
-    keys(); orderAndAttributes(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
+    keys(); orderAndAttributes(); sectionBoundariesAndViewChanges(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }

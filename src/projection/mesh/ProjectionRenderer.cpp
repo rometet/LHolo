@@ -28,6 +28,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -74,6 +75,7 @@ std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
+std::atomic<std::int64_t> gTransparentSortLastDiagnosticMs{};
 
 // Candidate A remains available as an explicit diagnostic build. Phase 4B
 // uses Candidate B and changes only the MaterialPtr passed to Exact Replay.
@@ -195,6 +197,39 @@ public:
 private:
     mce::RenderMaterial* mMaterial{};
     bool                 mSaved{};
+};
+
+// The vanilla blend material is shared with the rest of the renderer. A
+// projected translucent mesh must test depth, but must not publish its own
+// fragments into the depth buffer: a later coplanar face, adjacent section,
+// or another translucent primitive would otherwise be accepted/rejected based
+// on draw order. Change only the state observed by this submission and restore
+// it before the native owner can use the material again.
+class ScopedDepthWriteDisabled {
+public:
+    using DepthWriteMask = std::decay_t<decltype(
+        std::declval<mce::RenderMaterial&>().depthStencilStateDescription.get().depthWriteMask
+    )>;
+
+    explicit ScopedDepthWriteDisabled(mce::MaterialPtr const& material) {
+        mMaterial = tryRenderMaterial(material);
+        if (!mMaterial) return;
+        auto& description = mMaterial->depthStencilStateDescription.get();
+        mSaved = description.depthWriteMask;
+        description.depthWriteMask = DepthWriteMask{};
+    }
+
+    ~ScopedDepthWriteDisabled() {
+        if (!mMaterial || !mSaved) return;
+        mMaterial->depthStencilStateDescription.get().depthWriteMask = *mSaved;
+    }
+
+    ScopedDepthWriteDisabled(ScopedDepthWriteDisabled const&) = delete;
+    ScopedDepthWriteDisabled& operator=(ScopedDepthWriteDisabled const&) = delete;
+
+private:
+    mce::RenderMaterial*       mMaterial{};
+    std::optional<DepthWriteMask> mSaved;
 };
 
 class ScopedShaderColorWhite {
@@ -1039,15 +1074,29 @@ void submitProjectionMeshPass(
         constexpr std::size_t kMaxResortsPerFrame = 4;
         auto const started = std::chrono::steady_clock::now();
         std::size_t resorts{};
+        std::size_t validBlendMeshes{};
+        std::size_t unsupportedBlendMeshes{};
+        std::size_t staleBlendMeshes{};
+        std::size_t changedBlendMeshes{};
+        std::size_t unchangedBlendMeshes{};
+        std::size_t revisionChurn{};
         for (std::size_t checked = 0; checked < state.sections.size(); ++checked) {
             if (resorts >= kMaxResortsPerFrame
                 || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
             auto const section = state.blendSortCursor++ % state.sections.size();
             auto& sectionState = state.sections[section];
+            if (sectionState.requestedRevision != sectionState.uploadedRevision) {
+                ++revisionChurn;
+            }
+            if (sectionState.blendSortUnsupported) {
+                ++unsupportedBlendMeshes;
+            }
             if (sectionState.blendSortUnsupported || (sectionState.blendSortKeyValid
                 && sectionState.blendSortKey == *cameraSortKey)) continue;
             auto& mesh = sectionState.meshes[blendBucket];
             if (!mesh || !mesh->isValid()) continue;
+            ++validBlendMeshes;
+            ++staleBlendMeshes;
             ++resorts;
             try {
                 auto sortedData = mesh->mMeshData.get();
@@ -1057,8 +1106,26 @@ void submitProjectionMeshPass(
                     // A new upload clears this flag. Do not destroy/rebuild an
                     // unknown engine layout and do not retry it every frame.
                     sectionState.blendSortUnsupported = true;
+                    ++unsupportedBlendMeshes;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
-                        logger().warn("TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout");
+                        logger().warn(
+                            "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
+                            "section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
+                            "uv0={} uv1={} uv2={} pbr={} mers={} geoType={}",
+                            section,
+                            sortedData.mPositions.get().size(),
+                            sortedData.mIndices.get().size(),
+                            sortedData.mNormals.get().size(),
+                            sortedData.mTangents.get().size(),
+                            sortedData.mColors.get().size(),
+                            sortedData.mBoneId0s.get().size(),
+                            sortedData.mTextureUVs[0].get().size(),
+                            sortedData.mTextureUVs[1].get().size(),
+                            sortedData.mTextureUVs[2].get().size(),
+                            sortedData.mPBRTextureIndices.get().size(),
+                            sortedData.mMERS.get().size(),
+                            sortedData.mGeoType.get().size()
+                        );
                     }
                     continue;
                 }
@@ -1072,10 +1139,13 @@ void submitProjectionMeshPass(
                         continue;
                     }
                     mesh = std::move(replacement);
+                    ++changedBlendMeshes;
                     if (!gTransparentQuadSortLogged.exchange(true, std::memory_order_acq_rel)) {
                         logger().info("TRANSPARENT_PRIMITIVE_SORT enabled=1 quantum=0.25 budget=4/1ms firstSection={} vertices={}",
                             section, vertexCount);
                     }
+                } else {
+                    ++unchangedBlendMeshes;
                 }
                 sectionState.blendSortKey = *cameraSortKey;
                 sectionState.blendSortKeyValid = true;
@@ -1084,6 +1154,42 @@ void submitProjectionMeshPass(
             } catch (...) {
                 app::reportNativeCallbackFailure("transparent primitive sort", "unknown C++ exception");
             }
+        }
+
+        auto const nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+        auto lastMs = gTransparentSortLastDiagnosticMs.load(std::memory_order_acquire);
+        if ((unsupportedBlendMeshes != 0 || staleBlendMeshes != 0 || revisionChurn != 0)
+            && nowMs - lastMs >= 2000
+            && gTransparentSortLastDiagnosticMs.compare_exchange_strong(
+                lastMs, nowMs, std::memory_order_acq_rel
+            )) {
+            auto* material = tryRenderMaterial(blendMaterial);
+            auto const* info = blendMaterial.mRenderMaterialInfoPtr.get();
+            auto const blendEnabled = material && material->blendStateDescription->enableBlend;
+            auto const depthTestEnabled = material
+                && material->depthStencilStateDescription->depthTestEnabled;
+            auto const depthWriteMask = material
+                ? static_cast<unsigned int>(material->depthStencilStateDescription->depthWriteMask)
+                : 0U;
+            logger().info(
+                "TRANSPARENT_PRIMITIVE_SORT_SUMMARY sections={} valid={} stale={} changed={} "
+                "unchanged={} unsupported={} revisionChurn={} cursor={} budget=4/1ms "
+                "material={} blend={} depthTest={} depthWriteMask={}",
+                state.sections.size(),
+                validBlendMeshes,
+                staleBlendMeshes,
+                changedBlendMeshes,
+                unchangedBlendMeshes,
+                unsupportedBlendMeshes,
+                revisionChurn,
+                state.blendSortCursor,
+                info ? info->mHashedName->getString() : std::string{"<unresolved>"},
+                blendEnabled ? 1 : 0,
+                depthTestEnabled ? 1 : 0,
+                depthWriteMask
+            );
         }
     };
 
@@ -1125,6 +1231,7 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
+            ScopedDepthWriteDisabled depthWriteGuard(blendMaterial);
             renderMeshes(transparentMeshes, blendMaterial);
         }
     } else if (renderAlphaLayer) {
@@ -1141,6 +1248,7 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
+        ScopedDepthWriteDisabled depthWriteGuard(blendMaterial);
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
