@@ -56,6 +56,10 @@ struct SectionState {
     bool                        blendSortKeyValid{};
     bool                        blendSortUnsupported{};
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)> meshes;
+    // Immutable pre-upload source for the Blend bucket. The engine consumes
+    // Mesh::mMeshData while creating GPU buffers, so the renderer must never
+    // use the uploaded Mesh as the source for a later camera sort.
+    std::unique_ptr<mce::MeshData> blendSource;
 };
 
 struct ProjectionState {
@@ -213,6 +217,16 @@ struct ProjectionState {
     std::uint64_t glassR3SortInvalid{};
     std::uint64_t glassR3SortChanged{};
     std::optional<Vec3> glassR3LastCamera;
+
+    // R4 bounded source-cache/sort diagnostics. These are reset when the
+    // periodic R4_BUILT line is emitted; they never drive rendering.
+    std::uint64_t glassR4LastDiagnosticMs{};
+    std::uint64_t glassR4SortAttempts{};
+    std::uint64_t glassR4SortReplacements{};
+    std::uint64_t glassR4SortIdentityRestores{};
+    std::uint64_t glassR4SortUploadFailures{};
+    std::uint64_t glassR4SortSourceUnavailable{};
+    std::uint64_t glassR4SortInvalid{};
 };
 
 } // namespace lholo::projection::detail

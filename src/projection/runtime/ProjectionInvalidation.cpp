@@ -165,6 +165,9 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         );
         for (auto& sectionState : state.sections) {
             for (auto& mesh : sectionState.meshes) mesh.reset();
+            sectionState.blendSource.reset();
+            sectionState.blendSortKeyValid = false;
+            sectionState.blendSortUnsupported = false;
         }
         for (auto& mesh : state.warningFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.correctionOutlineSectionMeshes) mesh.reset();

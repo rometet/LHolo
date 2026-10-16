@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -198,9 +199,18 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
             }
     
             auto const sectionUploadStarted = std::chrono::steady_clock::now();
-            auto uploadCpuMesh = [&](std::unique_ptr<mce::Mesh> cpuMesh, std::string_view name) {
+            auto uploadCpuMesh = [&](std::unique_ptr<mce::Mesh> cpuMesh,
+                                     std::string_view name,
+                                     std::unique_ptr<mce::MeshData>* originalSource = nullptr) {
                 if (!cpuMesh || cpuMesh->mMeshData.get().size() == 0) {
                     return std::unique_ptr<mce::Mesh>{};
+                }
+                // Never let the engine's upload consume the only CPU source
+                // used by the later transparent sorter.
+                if (originalSource && !*originalSource) {
+                    *originalSource = std::make_unique<mce::MeshData>(
+                        cpuMesh->mMeshData.get()
+                    );
                 }
                 auto data = std::move(cpuMesh->mMeshData.get());
                 return std::make_unique<mce::Mesh>(bufferService, std::move(data), false, name);
@@ -211,7 +221,21 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)>
                     uploadedMeshes;
                 for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
-                    uploadedMeshes[bucket] = uploadCpuMesh(std::move(result.sectionMeshes[bucket]), bucketNames[bucket]);
+                    uploadedMeshes[bucket] = uploadCpuMesh(
+                        std::move(result.sectionMeshes[bucket]),
+                        bucketNames[bucket],
+                        bucket == static_cast<std::size_t>(RenderBucket::Blend)
+                            ? &result.blendSource : nullptr
+                    );
+                }
+                auto const blendBucket = static_cast<std::size_t>(RenderBucket::Blend);
+                if (uploadedMeshes[blendBucket]) {
+                    if (!result.blendSource) {
+                        throw std::runtime_error("blend original source was unavailable");
+                    }
+                    if (!uploadedMeshes[blendBucket]->isValid()) {
+                        throw std::runtime_error("blend upload produced an invalid mesh");
+                    }
                 }
                 auto warningFill = uploadCpuMesh(std::move(result.warningFillMesh), "LHoloWarningFill");
                 auto correctionOutline = uploadCpuMesh(
@@ -232,6 +256,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
                     state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
                 }
+                state.sections[section].blendSource = std::move(result.blendSource);
                 state.sections[section].blendSortKeyValid = false;
                 state.sections[section].blendSortUnsupported = false;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);

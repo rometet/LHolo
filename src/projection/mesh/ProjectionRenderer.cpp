@@ -75,6 +75,7 @@ std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
+std::atomic_bool gTransparentQuadSortSourceFailureLogged{};
 std::atomic<std::int64_t> gTransparentSortLastDiagnosticMs{};
 
 // Candidate A remains available as an explicit diagnostic build. Phase 4B
@@ -1083,6 +1084,13 @@ void submitProjectionMeshPass(
         std::size_t changedBlendMeshes{};
         std::size_t unchangedBlendMeshes{};
         std::size_t revisionChurn{};
+        std::size_t originalCacheOccupancy{};
+        std::size_t originalCacheVertices{};
+        for (auto const& sectionState : state.sections) {
+            if (!sectionState.blendSource) continue;
+            ++originalCacheOccupancy;
+            originalCacheVertices += sectionState.blendSource->mPositions.get().size();
+        }
         for (std::size_t checked = 0; checked < state.sections.size(); ++checked) {
             if (resorts >= kMaxResortsPerFrame
                 || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
@@ -1103,8 +1111,29 @@ void submitProjectionMeshPass(
             ++validBlendMeshes;
             ++staleBlendMeshes;
             ++resorts;
+            ++state.glassR4SortAttempts;
             try {
-                auto sortedData = mesh->mMeshData.get();
+                auto const* originalSource = sectionState.blendSource.get();
+                if (!originalSource || originalSource->mPositions.get().empty()) {
+                    // A GPU-resident Mesh is still drawable, so retain it and
+                    // fail closed when its independent CPU source is missing.
+                    sectionState.blendSortUnsupported = true;
+                    ++state.glassR4SortSourceUnavailable;
+                    ++state.glassR3UnsupportedLayoutObservations;
+                    if (!gTransparentQuadSortSourceFailureLogged.exchange(
+                            true, std::memory_order_acq_rel
+                        )) {
+                        logger().warn(
+                            "TRANSPARENT_PRIMITIVE_SORT skipped blend mesh without original CPU source section={}",
+                            section
+                        );
+                    }
+                    continue;
+                }
+                // Always start from the immutable original. Sorting the
+                // current GPU mesh would make camera reversal non-reversible,
+                // and its mMeshData may already have been consumed by upload.
+                auto sortedData = *originalSource;
                 auto const vertexCount = sortedData.mPositions.get().size();
                 auto const result = sortTransparentMeshDataBackToFront(sortedData, localCamera);
                 if (result == TransparentMeshSortResult::Invalid) {
@@ -1114,6 +1143,7 @@ void submitProjectionMeshPass(
                     ++unsupportedBlendMeshes;
                     ++state.glassR3SortInvalid;
                     ++state.glassR3UnsupportedLayoutObservations;
+                    ++state.glassR4SortInvalid;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
                         logger().warn(
                             "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
@@ -1137,16 +1167,21 @@ void submitProjectionMeshPass(
                     }
                     continue;
                 }
-                if (result == TransparentMeshSortResult::Changed) {
-                    auto replacement = std::make_unique<mce::Mesh>(
-                        bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
-                    if (!replacement->isValid()) {
-                        if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
-                            logger().warn("TRANSPARENT_PRIMITIVE_SORT upload failed; retaining previous blend mesh");
-                        }
-                        continue;
+                // Even an identity order needs a replacement: the currently
+                // published GPU mesh may still carry a previous camera's
+                // order. Rebuilding from originalSource restores identity.
+                auto replacement = std::make_unique<mce::Mesh>(
+                    bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
+                if (!replacement->isValid()) {
+                    ++state.glassR4SortUploadFailures;
+                    if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                        logger().warn("TRANSPARENT_PRIMITIVE_SORT upload failed; retaining previous blend mesh");
                     }
-                    mesh = std::move(replacement);
+                    continue;
+                }
+                mesh = std::move(replacement);
+                ++state.glassR4SortReplacements;
+                if (result == TransparentMeshSortResult::Changed) {
                     ++changedBlendMeshes;
                     ++state.glassR3SortChanged;
                     if (!gTransparentQuadSortLogged.exchange(true, std::memory_order_acq_rel)) {
@@ -1155,12 +1190,15 @@ void submitProjectionMeshPass(
                     }
                 } else {
                     ++unchangedBlendMeshes;
+                    ++state.glassR4SortIdentityRestores;
                 }
                 sectionState.blendSortKey = *cameraSortKey;
                 sectionState.blendSortKeyValid = true;
             } catch (std::exception const& exception) {
+                ++state.glassR4SortUploadFailures;
                 app::reportNativeCallbackFailure("transparent primitive sort", exception.what());
             } catch (...) {
+                ++state.glassR4SortUploadFailures;
                 app::reportNativeCallbackFailure("transparent primitive sort", "unknown C++ exception");
             }
         }
@@ -1199,6 +1237,30 @@ void submitProjectionMeshPass(
                 depthTestEnabled ? 1 : 0,
                 depthWriteMask
             );
+        }
+        if (state.glassR4LastDiagnosticMs == 0
+            || nowMs - state.glassR4LastDiagnosticMs >= 4000) {
+            state.glassR4LastDiagnosticMs = static_cast<std::uint64_t>(nowMs);
+            logger().info(
+                "LHoloGlassR4 R4_BUILT/active=1 originalCacheOccupancy={}/{} originalCacheVertices={} "
+                "sortAttempts={} sortReplacements={} identityRestores={} uploadFailures={} "
+                "sourceUnavailable={} sortInvalid={} budget=4/1ms",
+                originalCacheOccupancy,
+                state.sections.size(),
+                originalCacheVertices,
+                state.glassR4SortAttempts,
+                state.glassR4SortReplacements,
+                state.glassR4SortIdentityRestores,
+                state.glassR4SortUploadFailures,
+                state.glassR4SortSourceUnavailable,
+                state.glassR4SortInvalid
+            );
+            state.glassR4SortAttempts = 0;
+            state.glassR4SortReplacements = 0;
+            state.glassR4SortIdentityRestores = 0;
+            state.glassR4SortUploadFailures = 0;
+            state.glassR4SortSourceUnavailable = 0;
+            state.glassR4SortInvalid = 0;
         }
     };
 

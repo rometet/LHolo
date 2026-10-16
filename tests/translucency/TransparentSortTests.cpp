@@ -95,6 +95,40 @@ void sectionBoundariesAndViewChanges() {
     CHECK(!transparentQuadOrderChanged(*secondView));
     CHECK(*firstView != *secondView);
 }
+void immutableOriginalSourceAndIdentityRestoration() {
+    // Model the R4 ownership boundary: the source is never reordered, while
+    // each published view is a fresh copy. This makes camera reversal
+    // reversible and restores the original order for an identity result.
+    auto const original = quads({9,5,1});
+    auto current = original;
+    auto publishFromSource = [&](glm::vec3 camera) {
+        current = original;
+        auto const order = transparentQuadOrder(current, camera);
+        CHECK(order);
+        CHECK(reorderQuadVertexField(current, *order));
+    };
+    publishFromSource({0,0,10});
+    CHECK(current == quads({1,5,9}));
+    CHECK(original == quads({9,5,1}));
+    publishFromSource({0,0,0});
+    CHECK(current == original);
+    CHECK(original == quads({9,5,1}));
+
+    // An unavailable source is fail-closed: no replacement is published.
+    auto retained = current;
+    std::vector<glm::vec3> unavailable;
+    auto const noOrder = transparentQuadOrder(unavailable, {0,0,0});
+    CHECK(!noOrder);
+    CHECK(retained == current);
+
+    // A malformed source is likewise rejected before any source mutation.
+    auto malformedSource = original;
+    malformedSource.pop_back();
+    auto malformedRetained = current;
+    auto const malformedOrder = transparentQuadOrder(malformedSource, {0,0,0});
+    CHECK(!malformedOrder);
+    CHECK(malformedRetained == current);
+}
 void indices() {
     auto p=quads({1,5});
     std::vector<unsigned int> quadIndices{0,1,2,3,4,5,6,7};
@@ -199,6 +233,6 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
-    keys(); orderAndAttributes(); sectionBoundariesAndViewChanges(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
+    keys(); orderAndAttributes(); sectionBoundariesAndViewChanges(); immutableOriginalSourceAndIdentityRestoration(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }
