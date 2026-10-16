@@ -197,6 +197,22 @@ struct ProjectionState {
     NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
     MeshDiagnosticGate                      meshDiagnosticGate;
+
+    // Bounded stationary-glass diagnostics. These counters are sampled by
+    // the existing render callback and reset only when the R3 summary is
+    // emitted; they never drive rendering decisions.
+    std::uint64_t glassR3LastDiagnosticMs{};
+    std::uint64_t glassR3RenderCallbacks{};
+    std::uint64_t glassR3InvalidCameraCallbacks{};
+    std::uint64_t glassR3CameraChangedSamples{};
+    std::uint64_t glassR3CameraJitterSamples{};
+    std::uint64_t glassR3RetainedDrawCalls{};
+    std::uint64_t glassR3BlendDrawCalls{};
+    std::uint64_t glassR3RevisionChurn{};
+    std::uint64_t glassR3UnsupportedLayoutObservations{};
+    std::uint64_t glassR3SortInvalid{};
+    std::uint64_t glassR3SortChanged{};
+    std::optional<Vec3> glassR3LastCamera;
 };
 
 } // namespace lholo::projection::detail

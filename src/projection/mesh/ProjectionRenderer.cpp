@@ -28,7 +28,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
-#include <type_traits>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -154,6 +154,38 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
     return TransparentMeshSortResult::Changed;
 }
 
+std::string_view transparentMeshLayoutIssue(mce::MeshData const& data) {
+    auto const corners = data.mMode == mce::PrimitiveMode::QuadList ? 4U
+        : (data.mMode == mce::PrimitiveMode::TriangleList ? 3U : 0U);
+    if (!corners) return "unsupported_primitive_mode";
+    auto const& positions = data.mPositions.get();
+    if (positions.empty() || positions.size() % corners != 0) {
+        return "positions_not_primitive_aligned";
+    }
+    auto const& indices = data.mIndices.get();
+    if (!indices.empty()) {
+        if (indices.size() % corners != 0) return "indices_not_primitive_aligned";
+        for (auto const index : indices) {
+            if (index >= positions.size()) return "index_out_of_range";
+        }
+    }
+    auto const vertexCount = positions.size();
+    auto issue = [vertexCount](auto const& field, std::string_view name) {
+        return field.empty() || field.size() == vertexCount ? std::string_view{} : name;
+    };
+    if (auto const value = issue(data.mNormals.get(), "normals_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTangents.get(), "tangents_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mColors.get(), "colors_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mBoneId0s.get(), "boneIds_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[0].get(), "uv0_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[1].get(), "uv1_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[2].get(), "uv2_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mPBRTextureIndices.get(), "pbr_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mMERS.get(), "mers_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mGeoType.get(), "geoType_size_mismatch"); !value.empty()) return value;
+    return "sort_contract_rejected";
+}
+
 mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     auto* info = material.mRenderMaterialInfoPtr.get();
     return info ? info->mPtr.get() : nullptr;
@@ -197,39 +229,6 @@ public:
 private:
     mce::RenderMaterial* mMaterial{};
     bool                 mSaved{};
-};
-
-// The vanilla blend material is shared with the rest of the renderer. A
-// projected translucent mesh must test depth, but must not publish its own
-// fragments into the depth buffer: a later coplanar face, adjacent section,
-// or another translucent primitive would otherwise be accepted/rejected based
-// on draw order. Change only the state observed by this submission and restore
-// it before the native owner can use the material again.
-class ScopedDepthWriteDisabled {
-public:
-    using DepthWriteMask = std::decay_t<decltype(
-        std::declval<mce::RenderMaterial&>().depthStencilStateDescription.get().depthWriteMask
-    )>;
-
-    explicit ScopedDepthWriteDisabled(mce::MaterialPtr const& material) {
-        mMaterial = tryRenderMaterial(material);
-        if (!mMaterial) return;
-        auto& description = mMaterial->depthStencilStateDescription.get();
-        mSaved = description.depthWriteMask;
-        description.depthWriteMask = DepthWriteMask{};
-    }
-
-    ~ScopedDepthWriteDisabled() {
-        if (!mMaterial || !mSaved) return;
-        mMaterial->depthStencilStateDescription.get().depthWriteMask = *mSaved;
-    }
-
-    ScopedDepthWriteDisabled(ScopedDepthWriteDisabled const&) = delete;
-    ScopedDepthWriteDisabled& operator=(ScopedDepthWriteDisabled const&) = delete;
-
-private:
-    mce::RenderMaterial*       mMaterial{};
-    std::optional<DepthWriteMask> mSaved;
 };
 
 class ScopedShaderColorWhite {
@@ -1032,6 +1031,8 @@ void submitProjectionMeshPass(
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
         if (!materialExists(material)) return;
+        auto const usingBlendMaterial = material.mRenderMaterialInfoPtr.get()
+            == blendMaterial.mRenderMaterialInfoPtr.get();
         for (auto const& visible : meshes) {
             auto& mesh = *state.sections[visible.section].meshes[visible.bucket];
             mesh.renderMesh(
@@ -1043,6 +1044,8 @@ void submitProjectionMeshPass(
                 emptyOffscreenCaptureDescription(),
                 nullptr
             );
+            ++state.glassR3RetainedDrawCalls;
+            if (usingBlendMaterial) ++state.glassR3BlendDrawCalls;
         }
     };
     auto collectBucket = [&](std::size_t bucket) {
@@ -1087,9 +1090,11 @@ void submitProjectionMeshPass(
             auto& sectionState = state.sections[section];
             if (sectionState.requestedRevision != sectionState.uploadedRevision) {
                 ++revisionChurn;
+                ++state.glassR3RevisionChurn;
             }
             if (sectionState.blendSortUnsupported) {
                 ++unsupportedBlendMeshes;
+                ++state.glassR3UnsupportedLayoutObservations;
             }
             if (sectionState.blendSortUnsupported || (sectionState.blendSortKeyValid
                 && sectionState.blendSortKey == *cameraSortKey)) continue;
@@ -1107,11 +1112,14 @@ void submitProjectionMeshPass(
                     // unknown engine layout and do not retry it every frame.
                     sectionState.blendSortUnsupported = true;
                     ++unsupportedBlendMeshes;
+                    ++state.glassR3SortInvalid;
+                    ++state.glassR3UnsupportedLayoutObservations;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
                         logger().warn(
                             "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
-                            "section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
+                            "reason={} section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
                             "uv0={} uv1={} uv2={} pbr={} mers={} geoType={}",
+                            transparentMeshLayoutIssue(sortedData),
                             section,
                             sortedData.mPositions.get().size(),
                             sortedData.mIndices.get().size(),
@@ -1140,6 +1148,7 @@ void submitProjectionMeshPass(
                     }
                     mesh = std::move(replacement);
                     ++changedBlendMeshes;
+                    ++state.glassR3SortChanged;
                     if (!gTransparentQuadSortLogged.exchange(true, std::memory_order_acq_rel)) {
                         logger().info("TRANSPARENT_PRIMITIVE_SORT enabled=1 quantum=0.25 budget=4/1ms firstSection={} vertices={}",
                             section, vertexCount);
@@ -1231,7 +1240,6 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
-            ScopedDepthWriteDisabled depthWriteGuard(blendMaterial);
             renderMeshes(transparentMeshes, blendMaterial);
         }
     } else if (renderAlphaLayer) {
@@ -1248,7 +1256,6 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
-        ScopedDepthWriteDisabled depthWriteGuard(blendMaterial);
         renderMeshes(transparentMeshes, blendMaterial);
     }
 
