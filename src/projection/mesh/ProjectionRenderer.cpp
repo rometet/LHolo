@@ -192,6 +192,56 @@ mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     return info ? info->mPtr.get() : nullptr;
 }
 
+// R5 A/B experiment: use a material owned only by this projection rather
+// than modifying the vanilla ItemInHandRenderer's shared material around a
+// deferred GPU draw call. Preserve the source material shader, vertex layout,
+// blend factors, sampler states and depth test. Change depth WRITE only.
+// Never hold a global cache across texture/resource-pack/world reloads.
+mce::MaterialPtr const& projectionPrivateBlendMaterial(
+    ProjectionState& state, mce::MaterialPtr const& vanillaBlend
+) {
+    auto const current = vanillaBlend.mRenderMaterialInfoPtr.get();
+    if (!current || !current->mPtr || !current->mPtr->blendStateDescription->enableBlend) {
+        return vanillaBlend;
+    }
+    if (state.glassPrivateBlendMaterial
+        && state.glassPrivateBlendBase.lock().get() == current) {
+        return *state.glassPrivateBlendMaterial;
+    }
+    // Do not change the already-live material if a new resource pack makes
+    // source creation fail. The original vanilla render material remains safe.
+    try {
+        auto privateInfo = std::make_shared<mce::RenderMaterialInfo>();
+        privateInfo->mHashedName.get() = current->mHashedName.get();
+        privateInfo->mPtr = std::make_unique<mce::RenderMaterial>(*current->mPtr.get());
+        // Native DepthWriteMask is a binary HAL flag on 26.51: 0=none, 1=all.
+        // Keep depth testing; projected alpha must be occluded by opaque world.
+        auto& depth = privateInfo->mPtr->depthStencilStateDescription.get();
+        depth.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
+        mce::MaterialPtr privatePtr{vanillaBlend};
+        privatePtr.mRenderMaterialInfoPtr = privateInfo;
+        auto privateOwner = std::make_unique<mce::MaterialPtr>(privatePtr);
+        state.glassPrivateBlendMaterial = std::move(privateOwner);
+        state.glassPrivateBlendBase = current->weak_from_this();
+        logger().info(
+            "LHoloGlassR5 privateMaterial=1 material={} baseDepthWrite={} "
+            "privateDepthWrite={} depthTest={} blend={}",
+            current->mHashedName->getString(),
+            static_cast<unsigned int>(current->mPtr->depthStencilStateDescription->depthWriteMask),
+            static_cast<unsigned int>(depth.depthWriteMask),
+            depth.depthTestEnabled ? 1 : 0,
+            privateInfo->mPtr->blendStateDescription->enableBlend ? 1 : 0
+        );
+        return *state.glassPrivateBlendMaterial;
+    } catch (std::exception const& exception) {
+        logger().warn("LHoloGlassR5 privateMaterial=0 fallback=vanilla reason={}", exception.what());
+        return vanillaBlend;
+    } catch (...) {
+        logger().warn("LHoloGlassR5 privateMaterial=0 fallback=vanilla reason=unknown");
+        return vanillaBlend;
+    }
+}
+
 OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
     using Storage = decltype(dragon::RenderMetadata::mOffscreenCaptureDescription);
     static Storage empty{};
@@ -1033,7 +1083,10 @@ void submitProjectionMeshPass(
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
         if (!materialExists(material)) return;
         auto const usingBlendMaterial = material.mRenderMaterialInfoPtr.get()
-            == blendMaterial.mRenderMaterialInfoPtr.get();
+            == blendMaterial.mRenderMaterialInfoPtr.get()
+            || (state.glassPrivateBlendMaterial
+                && material.mRenderMaterialInfoPtr.get()
+                    == state.glassPrivateBlendMaterial->mRenderMaterialInfoPtr.get());
         for (auto const& visible : meshes) {
             auto& mesh = *state.sections[visible.section].meshes[visible.bucket];
             mesh.renderMesh(
@@ -1302,7 +1355,7 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, blendMaterial);
+            renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
         }
     } else if (renderAlphaLayer) {
         // True projection transparency needs a blending material even for
@@ -1318,7 +1371,7 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
-        renderMeshes(transparentMeshes, blendMaterial);
+        renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
     }
 
     // Textured liquid hulls travel the proven glass path: blend-block material

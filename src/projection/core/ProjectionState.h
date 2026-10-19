@@ -28,6 +28,8 @@
 #include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
 #include "mc/deps/minecraft_renderer/resources/ServerTexture.h"
 #include "mc/deps/minecraft_renderer/renderer/Mesh.h"
+#include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
+#include "mc/deps/core/renderer/RenderMaterialInfo.h"
 #include "mc/deps/minecraft_renderer/renderer/TexturePtr.h"
 
 class Dimension;
@@ -73,6 +75,11 @@ struct ProjectionState {
     int                             dimensionId{};
     std::optional<mce::TexturePtr>  terrainTexture;
     std::optional<TextureVariant>   terrainTextureVariant;
+    // R5 experimental per-projection material variant. This is a separately
+    // owned copy of the vanilla blend material with depth-write disabled;
+    // never mutate the shared ItemInHandRenderer material.
+    std::unique_ptr<mce::MaterialPtr> glassPrivateBlendMaterial;
+    std::weak_ptr<mce::RenderMaterialInfo> glassPrivateBlendBase;
     std::shared_ptr<structure::LoadedStructure const> structure;
     std::uint64_t                   structureGeneration{};
     std::uint64_t                   activationGeneration{};
