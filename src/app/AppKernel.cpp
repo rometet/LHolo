@@ -72,6 +72,8 @@ bool AppKernel::enable() {
             logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
         }
         logger.info("LHolo enabled. Type lholo to open the projection menu.");
+        logger.info("LHoloGlassR5 build=private-projection-blend-depthwrite0 test-only");
+        logger.info("LHoloGlassR3 build=stationary-camera-fail-closed diagnostics=bounded-4s");
         logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
         return true;
     }, [this]() noexcept {

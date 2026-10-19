@@ -370,6 +370,14 @@ void scheduleProjectionMeshBuild(
                     ).count()
                 );
                 for (std::size_t bucket = 0; bucket < result.sectionMeshes.size(); ++bucket) {
+                    if (bucket == static_cast<std::size_t>(RenderBucket::Blend)) {
+                        // UploadMode::Never leaves the worker MeshData intact.
+                        // Preserve the original stream before ownership moves
+                        // into the render-thread result/upload path.
+                        if (snapshot->sections[0].blendSource) {
+                            result.blendSource = std::move(snapshot->sections[0].blendSource);
+                        }
+                    }
                     result.sectionMeshes[bucket] = std::move(snapshot->sections[0].meshes[bucket]);
                 }
                 result.warningFillMesh = std::move(snapshot->warningFillSectionMeshes[0]);

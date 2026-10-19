@@ -26,6 +26,8 @@
 #include "projection/runtime/VerifierHighlightRules.h"
 #include "projection/world/ProjectionPlacement.h"
 
+#include "app/ScopeExit.h"
+
 #include "overlay/BoundsWireframe.h"
 #include "place/PlaceHelper.h"
 #include "plugin/LHolo.h"
@@ -63,9 +65,10 @@
 namespace lholo::projection::detail {
 namespace {
 
-Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
+std::optional<Vec3> renderCameraPosition(BaseActorRenderContext const& renderContext) {
     auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
-    return camera ? Vec3{camera->x, camera->y, camera->z} : Vec3{};
+    if (!camera) return std::nullopt;
+    return Vec3{camera->x, camera->y, camera->z};
 }
 
 void resetWorldAfterExit() {
@@ -80,6 +83,71 @@ void resetWorldAfterExit() {
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
+}
+
+void recordGlassR3CameraSample(
+    ProjectionState& state,
+    std::optional<Vec3> const& camera
+) noexcept {
+    ++state.glassR3RenderCallbacks;
+    if (!camera) {
+        ++state.glassR3InvalidCameraCallbacks;
+        return;
+    }
+    if (state.glassR3LastCamera) {
+        auto const dx = std::fabs(camera->x - state.glassR3LastCamera->x);
+        auto const dy = std::fabs(camera->y - state.glassR3LastCamera->y);
+        auto const dz = std::fabs(camera->z - state.glassR3LastCamera->z);
+        auto const delta = (std::max)(dx, (std::max)(dy, dz));
+        if (delta > 0.00001F) {
+            ++state.glassR3CameraChangedSamples;
+            if (delta <= 0.01F) ++state.glassR3CameraJitterSamples;
+        }
+    }
+    state.glassR3LastCamera = *camera;
+}
+
+void maybeLogGlassR3(
+    ProjectionState& state,
+    bool cameraValid,
+    Vec3 const* camera
+) noexcept {
+    auto const now = static_cast<std::uint64_t>(GetTickCount64());
+    if (state.glassR3LastDiagnosticMs != 0
+        && now - state.glassR3LastDiagnosticMs < 4000) return;
+    state.glassR3LastDiagnosticMs = now;
+    auto const cameraX = camera ? camera->x : 0.0F;
+    auto const cameraY = camera ? camera->y : 0.0F;
+    auto const cameraZ = camera ? camera->z : 0.0F;
+    logger().info(
+        "LHoloGlassR3 cameraValid={} camera=({},{},{}) callbacks={} invalidCamera={} "
+        "cameraChanged={} cameraJitter={} retainedDrawCalls={} blendDrawCalls={} "
+        "revisionChurn={} unsupportedLayouts={} sortInvalid={} sortChanged={}",
+        cameraValid ? 1 : 0,
+        cameraX,
+        cameraY,
+        cameraZ,
+        state.glassR3RenderCallbacks,
+        state.glassR3InvalidCameraCallbacks,
+        state.glassR3CameraChangedSamples,
+        state.glassR3CameraJitterSamples,
+        state.glassR3RetainedDrawCalls,
+        state.glassR3BlendDrawCalls,
+        state.glassR3RevisionChurn,
+        state.glassR3UnsupportedLayoutObservations,
+        state.glassR3SortInvalid,
+        state.glassR3SortChanged
+    );
+    state.glassR3RenderCallbacks = 0;
+    state.glassR3InvalidCameraCallbacks = 0;
+    state.glassR3CameraChangedSamples = 0;
+    state.glassR3CameraJitterSamples = 0;
+    state.glassR3RetainedDrawCalls = 0;
+    state.glassR3BlendDrawCalls = 0;
+    state.glassR3RevisionChurn = 0;
+    state.glassR3UnsupportedLayoutObservations = 0;
+    state.glassR3SortInvalid = 0;
+    state.glassR3SortChanged = 0;
 }
 
 bool enableStructureProjection(
@@ -181,7 +249,20 @@ void renderProjection(
     }
 
     auto& tessellator = renderContext.mScreenContext.tessellator;
-    Vec3 const camera = renderCameraPosition(renderContext);
+    auto const cameraPosition = renderCameraPosition(renderContext);
+    recordGlassR3CameraSample(state, cameraPosition);
+    if (!cameraPosition) {
+        // An invalid/temporarily unreadable native context must not turn into
+        // the origin. The origin is a valid projection coordinate and would
+        // make both the world matrix and transparent sort appear plausible
+        // while using the wrong camera for this callback.
+        maybeLogGlassR3(state, false, nullptr);
+        return;
+    }
+    Vec3 const camera = *cameraPosition;
+    app::ScopeExit glassR3Log([&]() noexcept {
+        maybeLogGlassR3(state, true, &camera);
+    });
     if (!renderAlphaLayer) {
         auto const transform = structure::detail::StructureSession::getInstance().transform();
         auto const mirrorMode = transform.mirror;
