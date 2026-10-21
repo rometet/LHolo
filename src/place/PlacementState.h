@@ -10,6 +10,7 @@
 #include "place/PlacementModes.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -110,6 +111,8 @@ public:
     void suppressAutoPlacement(std::int64_t cell, std::uint64_t expiresAt);
     [[nodiscard]] bool failedPlanCached(FailedPlanKey const& key, std::uint64_t now) const;
     void cacheFailedPlan(FailedPlanKey const& key, std::uint64_t now, std::uint64_t expiresAt);
+    [[nodiscard]] std::size_t rangePlanCursor() const;
+    void setRangePlanCursor(std::size_t cursor);
 
     [[nodiscard]] std::string aimedProjectedBlockName() const;
     void setAimedProjectedBlockName(std::string name);
@@ -142,6 +145,7 @@ private:
     std::unordered_map<std::int64_t, std::uint64_t> mAutoPlacementSuppressions;
     std::atomic_uint64_t                             mNextAutoPlacementSuppressionExpiry{0};
     std::unordered_map<FailedPlanKey, std::uint64_t, FailedPlanKeyHash> mFailedRangePlans;
+    std::atomic_size_t mRangePlanCursor{0};
 
     mutable std::mutex       mManualPlacementItemsMutex;
     std::vector<std::string> mManualPlacementAllowedItems;

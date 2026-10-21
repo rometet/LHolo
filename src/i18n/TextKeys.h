@@ -211,6 +211,11 @@
     LHOLO_TEXT_KEY("hud.rangeFromZero", HudRangeFromZero, "")                                            \
     LHOLO_TEXT_KEY("hud.rangeBetween", HudRangeBetween, "")                                              \
     LHOLO_TEXT_KEY("hud.overallProgress", HudOverallProgress, "")                                        \
+    LHOLO_TEXT_KEY("hud.transform", HudTransform, "") \
+    LHOLO_TEXT_KEY("hud.remaining", HudRemaining, "") \
+    LHOLO_TEXT_KEY("hud.progressUnknown", HudProgressUnknown, "") \
+    LHOLO_TEXT_KEY("materialHud.summary", MaterialHudSummary, "") \
+    LHOLO_TEXT_KEY("materialHud.types", MaterialHudTypes, "") \
     LHOLO_TEXT_KEY("hud.buildProgress", HudBuildProgress, "")                                            \
     LHOLO_TEXT_KEY("hud.wrongState", HudWrongState, "")                                                  \
     LHOLO_TEXT_KEY("hud.wrongType", HudWrongType, "")                                                    \
@@ -299,7 +304,119 @@
     LHOLO_TEXT_KEY("schematic.filterExtra", SchematicFilterExtra, "") \
     LHOLO_TEXT_KEY("schematic.highlightHint", SchematicHighlightHint, "") \
     LHOLO_TEXT_KEY("schematic.filterState", SchematicFilterState, "") \
-    LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "")
+    LHOLO_TEXT_KEY("schematic.filterMissing", SchematicFilterMissing, "") \
+    LHOLO_TEXT_KEY("page.verification", PageVerification, "") \
+    LHOLO_TEXT_KEY("verifier.cancel", VerifierCancel, "") \
+    LHOLO_TEXT_KEY("verifier.manualHint", VerifierManualHint, "") \
+    LHOLO_TEXT_KEY("verifier.queued", VerifierQueued, "") \
+    LHOLO_TEXT_KEY("verifier.checked", VerifierChecked, "") \
+    LHOLO_TEXT_KEY("verifier.cancelled", VerifierCancelled, "") \
+    LHOLO_TEXT_KEY("verifier.notVerified", VerifierNotVerified, "") \
+    LHOLO_TEXT_KEY("verifier.completed", VerifierCompleted, "") \
+    LHOLO_TEXT_KEY("verifier.noPlacement", VerifierNoPlacement, "") \
+    LHOLO_TEXT_KEY("verifier.expected", VerifierExpected, "") \
+    LHOLO_TEXT_KEY("verifier.actual", VerifierActual, "") \
+    LHOLO_TEXT_KEY("verifier.shownCount", VerifierShownCount, "") \
+    LHOLO_TEXT_KEY("verifier.coordinates", VerifierCoordinates, "") \
+    LHOLO_TEXT_KEY("verifier.noRows", VerifierNoRows, "") \
+    LHOLO_TEXT_KEY("verifier.start", VerifierStart, "") \
+    LHOLO_TEXT_KEY("verifier.countHint", VerifierCountHint, "") \
+    LHOLO_TEXT_KEY("verifier.expectedShort", VerifierExpectedShort, "") \
+    LHOLO_TEXT_KEY("verifier.actualShort", VerifierActualShort, "") \
+    LHOLO_TEXT_KEY("verifier.reset", VerifierReset, "") \
+    LHOLO_TEXT_KEY("verifier.idle", VerifierIdle, "") \
+    LHOLO_TEXT_KEY("verifier.waiting", VerifierWaiting, "") \
+    LHOLO_TEXT_KEY("verifier.running", VerifierRunning, "") \
+    LHOLO_TEXT_KEY("verifier.done", VerifierDone, "") \
+    LHOLO_TEXT_KEY("verifier.stopped", VerifierStopped, "") \
+    LHOLO_TEXT_KEY("verifier.all", VerifierAll, "") \
+    LHOLO_TEXT_KEY("verifier.errorsOnly", VerifierErrorsOnly, "") \
+    LHOLO_TEXT_KEY("verifier.totals", VerifierTotals, "") \
+    LHOLO_TEXT_KEY("verifier.missing", VerifierMissing, "") \
+    LHOLO_TEXT_KEY("verifier.wrongType", VerifierWrongType, "") \
+    LHOLO_TEXT_KEY("verifier.wrongState", VerifierWrongState, "") \
+    LHOLO_TEXT_KEY("verifier.extra", VerifierExtra, "") \
+    LHOLO_TEXT_KEY("verifier.correct", VerifierCorrect, "") \
+    LHOLO_TEXT_KEY("verifier.unknown", VerifierUnknown, "") \
+    LHOLO_TEXT_KEY("verifier.summaryOnly", VerifierSummaryOnly, "") \
+    LHOLO_TEXT_KEY("verifier.search", VerifierSearch, "") \
+    LHOLO_TEXT_KEY("verifier.filterStatus", VerifierFilterStatus, "") \
+    LHOLO_TEXT_KEY("verifier.noSearch", VerifierNoSearch, "") \
+    LHOLO_TEXT_KEY("verifier.details", VerifierDetails, "") \
+    LHOLO_TEXT_KEY("verifier.selectHint", VerifierSelectHint, "") \
+    LHOLO_TEXT_KEY("verifier.expectedState", VerifierExpectedState, "") \
+    LHOLO_TEXT_KEY("verifier.actualState", VerifierActualState, "") \
+    LHOLO_TEXT_KEY("verifier.noState", VerifierNoState, "") \
+    LHOLO_TEXT_KEY("verifier.retained", VerifierRetained, "") \
+    LHOLO_TEXT_KEY("verifier.selectionHidden", VerifierSelectionHidden, "") \
+    LHOLO_TEXT_KEY("verifier.clearHighlight", VerifierClearHighlight, "") \
+    LHOLO_TEXT_KEY("verifier.coordinateHint", VerifierCoordinateHint, "") \
+    LHOLO_TEXT_KEY("hotkey.openPlaced", HotkeyOpenPlaced, "") \
+    LHOLO_TEXT_KEY("hotkey.openFiles", HotkeyOpenFiles, "") \
+    LHOLO_TEXT_KEY("hotkey.openVerification", HotkeyOpenVerification, "") \
+    LHOLO_TEXT_KEY("hotkey.openMaterials", HotkeyOpenMaterials, "") \
+    LHOLO_TEXT_KEY("hotkey.routeConflict", HotkeyRouteConflict, "") \
+    LHOLO_TEXT_KEY("hotkey.routeReserved", HotkeyRouteReserved, "") \
+    LHOLO_TEXT_KEY("hotkey.routeUnavailable", HotkeyRouteUnavailable, "") \
+    LHOLO_TEXT_KEY("page.files", PageFiles, "") \
+    LHOLO_TEXT_KEY("page.placed", PagePlaced, "") \
+    LHOLO_TEXT_KEY("page.materials", PageMaterials, "") \
+    LHOLO_TEXT_KEY("material.refresh", MaterialRefresh, "") \
+    LHOLO_TEXT_KEY("menu.tagline", MenuTagline, "") \
+    LHOLO_TEXT_KEY("label.placementName", LabelPlacementName, "") \
+    LHOLO_TEXT_KEY("layer.bottomToTop", LayerBottomToTop, "") \
+    LHOLO_TEXT_KEY("layer.topToBottom", LayerTopToBottom, "") \
+    LHOLO_TEXT_KEY("layer.westToEast", LayerWestToEast, "") \
+    LHOLO_TEXT_KEY("layer.eastToWest", LayerEastToWest, "") \
+    LHOLO_TEXT_KEY("layer.northToSouth", LayerNorthToSouth, "") \
+    LHOLO_TEXT_KEY("layer.southToNorth", LayerSouthToNorth, "") \
+    LHOLO_TEXT_KEY("hint.filesHowTo", HintFilesHowTo, "") \
+    LHOLO_TEXT_KEY("hint.placedHowTo", HintPlacedHowTo, "") \
+    LHOLO_TEXT_KEY("hint.transformHowTo", HintTransformHowTo, "") \
+    LHOLO_TEXT_KEY("hint.materialsHowTo", HintMaterialsHowTo, "") \
+    LHOLO_TEXT_KEY("hint.hotkeysHowTo", HintHotkeysHowTo, "") \
+    LHOLO_TEXT_KEY("hint.hudHowTo", HintHudHowTo, "") \
+    LHOLO_TEXT_KEY("hint.captureHowTo", HintCaptureHowTo, "") \
+    LHOLO_TEXT_KEY("materials.all", MaterialsAll, "") \
+    LHOLO_TEXT_KEY("materials.shortage", MaterialsShortage, "") \
+    LHOLO_TEXT_KEY("materials.ignored", MaterialsIgnored, "") \
+    LHOLO_TEXT_KEY("materials.restore", MaterialsRestore, "") \
+    LHOLO_TEXT_KEY("materials.export", MaterialsExport, "") \
+    LHOLO_TEXT_KEY("materials.original", MaterialsOriginal, "") \
+    LHOLO_TEXT_KEY("materials.working", MaterialsWorking, "") \
+    LHOLO_TEXT_KEY("materials.unknownKinds", MaterialsUnknownKinds, "") \
+    LHOLO_TEXT_KEY("materials.scope", MaterialsScope, "") \
+    LHOLO_TEXT_KEY("materials.inventoryHint", MaterialsInventoryHint, "") \
+    LHOLO_TEXT_KEY("materials.counts", MaterialsCounts, "") \
+    LHOLO_TEXT_KEY("materials.required", MaterialsRequired, "") \
+    LHOLO_TEXT_KEY("materials.owned", MaterialsOwned, "") \
+    LHOLO_TEXT_KEY("materials.missing", MaterialsMissing, "") \
+    LHOLO_TEXT_KEY("materials.unknown", MaterialsUnknown, "") \
+    LHOLO_TEXT_KEY("materials.ignore", MaterialsIgnore, "") \
+    LHOLO_TEXT_KEY("materials.loading", MaterialsLoading, "") \
+    LHOLO_TEXT_KEY("materials.empty", MaterialsEmpty, "") \
+    LHOLO_TEXT_KEY("materials.saving", MaterialsSaving, "") \
+    LHOLO_TEXT_KEY("materials.saved", MaterialsSaved, "") \
+    LHOLO_TEXT_KEY("materials.cancelled", MaterialsCancelled, "") \
+    LHOLO_TEXT_KEY("materials.failed", MaterialsFailed, "") \
+    LHOLO_TEXT_KEY("materials.destination", MaterialsDestination, "") \
+    LHOLO_TEXT_KEY("materials.exportHint", MaterialsExportHint, "") \
+    LHOLO_TEXT_KEY("materials.exportStopping", MaterialsExportStopping, "") \
+    LHOLO_TEXT_KEY("materials.shown", MaterialsShown, "") \
+    LHOLO_TEXT_KEY("materials.ownedUnknown", MaterialsOwnedUnknown, "") \
+    LHOLO_TEXT_KEY("materials.missingUnknown", MaterialsMissingUnknown, "") \
+    LHOLO_TEXT_KEY("materials.source", MaterialsSource, "") \
+    LHOLO_TEXT_KEY("menu.target", MenuTarget, "") \
+    LHOLO_TEXT_KEY("menu.noTarget", MenuNoTarget, "") \
+    LHOLO_TEXT_KEY("verifier.help", VerifierHelp, "") \
+    LHOLO_TEXT_KEY("verifier.stateProperty", VerifierStateProperty, "") \
+    LHOLO_TEXT_KEY("verifier.fullStates", VerifierFullStates, "") \
+    LHOLO_TEXT_KEY("materials.totalTitle", MaterialsTotalTitle, "") \
+    LHOLO_TEXT_KEY("materials.totalHint", MaterialsTotalHint, "") \
+    LHOLO_TEXT_KEY("materials.placementTitle", MaterialsPlacementTitle, "") \
+    LHOLO_TEXT_KEY("materials.placementHint", MaterialsPlacementHint, "") \
+    LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "") \
+    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "")
 
 namespace lholo::i18n {
 

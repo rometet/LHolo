@@ -1,0 +1,27 @@
+{
+  "base": "71bae52980c22d7cc186b41b8024371ad0abc35c",
+  "source_sha256": "d651c5af554d407a09b2a4223e5b0ab21d8cfa6e1fde6c76c21d764357fba61b",
+  "log_sha256": "888489ba4bac77e2d63fb41885ec3d5eb527025839c0f050b028748121299c74",
+  "captured_batch": 0,
+  "captured_vertices": 424,
+  "origin": [
+    60,
+    151,
+    130
+  ],
+  "generated": {
+    "BaselineDerivedAlpha.inc": "d366b50120e8efb9e2852999647cb52af4ac2073855e4340d90e3024989b029f",
+    "BaselineProxyAlpha.inc": "038361e7ae190aba26a04325d552bb3a92c1f24931603b119351c9daef2fc9b4",
+    "CurrentDerivedAlpha.inc": "883bcf9f685ebe63bdb7ceddf4ed1cb352af636879abcd8df68a2db00a24c69e",
+    "CurrentProxyAlpha.inc": "f53c1ba79df74ad39ec3b6cad4573f677dba28ce946f2c8f51af336fd9fa70ff",
+    "CurrentProxyBody.inc": "2da83f2333045f39e63d57ea8bc830549fd4591e81eca6255f9dddde04ea46b4",
+    "LightingSubmissionOrder.inc": "950e9ff9d9b34e6ebb5b28ed7c8c28de72175ed40a7457d442ff31193d583ce3",
+    "NativeCapturedPositions.inc": "d762723c314148570e3bc00bf0a8a110b57a07583626383a3cc539e161ddb4a0",
+    "OpacityStageProxyBody.inc": "ff3c30298bf9e8f3f5a4f705c7a3b0a98db006c4dd9aa0522e371c15d3f1f91c",
+    "ProxyColorEmitter.inc": "bf218d997fbc8cf1900604502885048b5ab0c0a3eb9c570e024c51ada51a0e7c",
+    "RegionWriteScope.inc": "033f2dd61478712b254da959fb0df7a5d58a6efdfcd24e124e163089236e8f2a",
+    "WaterOrderSubmit.inc": "19c529640e462dae8fd9d380b1d61250643f4c02d61a55dd3171821640f38855"
+  },
+  "mocked": "SDK/ScreenContext/Tessellator/MaterialPtr/texture submission use CPU mocks; source submit owner is verbatim",
+  "native_GPU": "NOT_RUN"
+}

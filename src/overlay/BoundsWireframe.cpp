@@ -1,5 +1,6 @@
 #include "render/RenderCameraPosition.h"
 #include "overlay/BoundsWireframe.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "render/OverlayMaterials.h"
 
@@ -94,6 +95,7 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
         addEdge({x1,y1,z1},{x0,y1,z1}); addEdge({x0,y1,z1},{x0,y0,z1});
         addEdge({x0,y0,z0},{x0,y0,z1}); addEdge({x1,y0,z0},{x1,y0,z1});
         addEdge({x1,y1,z0},{x1,y1,z1}); addEdge({x0,y1,z0},{x0,y1,z1});
+        resourcepacks::state().submitted(resourcepacks::Domain::Projection);
         mMesh = std::make_unique<mce::Mesh>(tessellator.end(
             Tessellator::UploadMode::Buffered,
             "LHoloSelectionBounds",
@@ -127,6 +129,7 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
         static_cast<float>(mMin.y) - camera.y,
         static_cast<float>(mMin.z) - camera.z
     );
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     mMesh->renderMesh(
         renderContext.mScreenContext,
         material,

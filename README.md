@@ -1,89 +1,15 @@
-# LHolo
+# LHolo Glass R5 + ResourcePack ABI v4
 
-[日本語](docs/README_JA.md) | [English](docs/README_EN.md)
+Experimental prerelease v26.51.2-ja.8-rc.3 for Minecraft Bedrock Windows 1.26.51.01, LeviLamina Client 26.51.5.
 
-> 此分支为日语/Praxis 风格界面分支。默认语言为日语，默认菜单键为 `Insert`。
+Retains Glass R5 transparent sorting/depth-write fixes and liquid proxy rendering, and restores real lholo_resource_reload_v4 lifecycle required by Praxis R33. The native owners enforce thread, epoch and renderer/GPU state protections.
 
-`LHolo` 是一个 [LeviLamina](https://github.com/LiteLDev/LeviLamina) 客户端投影模组
+Paired user test on 2026-10-21: one resource pack OFF through Minecraft Global Resources in the designated disposable offline test clone. The local player remained visible in third person and both participants returned to idle. This does not validate other worlds, servers, mandatory packs, bulk changes or shader/behavior packs.
 
-## 版本号说明
+Compatible paired prototype: https://github.com/rometet/praxis/releases/tag/v0.1.3-rc.1 . LHolo includes no Praxis binary.
 
-示例版本：`v26.51.2`
+Installation: close Minecraft, back up mods/LHolo DLL/PDB, manifest, settings and schematics. Extract LHolo to mods; do not overwrite saved settings/worlds. Use matching PDB. Do not hot-unload native hooks; restart Minecraft.
 
-- `26.51`：对应的 Minecraft 游戏版本
-- `.2`：模组在该游戏版本下的第 2 个版本
+Known issues: config saving may log Access is denied; overlay teardown warns on exit. Neither is fixed here. This is an unofficial third-party mod not affiliated with Mojang/Microsoft.
 
-## 快速上手
-
-[安装教程](https://www.bilibili.com/opus/1239631121935761412)
-
-1. 安装本模组以后,聊天栏输入 `LHolo`,或按 `Insert` 打开模组菜单
-2. 本模组交互为GUI与快捷键(具体快捷键直接看模组菜单)
-3. 使用本模组时,请关闭灵动视效
-
-## 主要功能
-
-**文件支持**
-
-- 支持 `.mcstructure` 和 `.litematic`(Java 版 Litematica 蓝图)两种文件
-
-**纠错**
-
-- 蓝色 = 未放置投影方块
-- 红色 = 方块放置错误
-- 黄色 = 朝向或状态错误
-- 品红色 = 多余方块
-
-**分层建造**
-
-- X或Y轴分层显示
-- 材料分层显示
-
-**结构变换**
-
-- 移动
-- 旋转 
-- 镜像
-
-**HUD 信息显示**
-
-- 屏幕角落可显示:蓝图文件名、当前显示的层、建造进度(已放/总数)、各类错误数量、当前辅助放置模式等。
-- 位置可放在屏幕四角,每一项都能单独开关。
-
-**多语言支持**
-
-- 日本語（此分支默认）
-- 简体中文
-- 繁體中文
-- English
-- Русский
-
-## 模组演示
-
-以下截图来自旧版界面；本分支使用日语默认语言和中央 Praxis 风格菜单。
-
-**模组菜单页面**
-
-![image-20260918202008186](docs/images/image-20260918202008186.png)
-
-**加载结构**
-
-![image-20260918200440220](docs/images/image-20260918200440220.png)
-
-**纠错**
-
-![image-20260918201002570](docs/images/image-20260918201002570.png)
-
-**材料清单**
-
-![image-20260918201318315](docs/images/image-20260918201318315.png)
-
-**语言设置**
-
-入口：打开模组主菜单 -> 界面设置 -> 语言
-
-![image-20260918202312106](docs/images/image-20260918202312106.png)
-
-
-
-****
+Build from xmake.lua; licensing in LICENSE, THIRD_PARTY_NOTICES.md and included source notices.

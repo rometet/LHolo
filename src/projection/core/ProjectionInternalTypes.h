@@ -8,6 +8,7 @@
 #pragma once
 #include "projection/core/ProjectionCoordinateKey.h"
 #include "projection/core/LiquidReplayRules.h"
+#include "projection/mesh/NativeReplaySort.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -65,6 +66,7 @@ struct PraxisCompatLiquidSectionData {
     std::vector<std::uint32_t> derivedColors;
     std::vector<PraxisCompatLiquidKind> liquidKinds;
     PraxisCompatTessellatorState tessellatorState;
+    mutable NativeReplaySortCache cameraSort;
 
     [[nodiscard]] bool ready() const noexcept {
         if (!nativeStream) return false;

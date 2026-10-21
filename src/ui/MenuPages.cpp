@@ -1,6 +1,8 @@
 // LHolo - Fluent-style menu pages
 
 #include "ui/MenuPages.h"
+#include "ui/MaterialsPage.h"
+#include "ui/PresentationText.h"
 #include "projection/core/ComparisonStyle.h"
 
 #include "structure/LayerDisplayTypes.h"
@@ -25,7 +27,7 @@ char const* pageName(MenuPage page) {
     // message" sentinel behind, which the assertion below rejects: a missing
     // initializer alone would only be value-initialized, not diagnosed.
     static constexpr std::array<i18n::TextKey, kMenuPageCount> kPageKeys{
-        i18n::TextKey::PageProjection,
+        i18n::TextKey::PageFiles,
         i18n::TextKey::PageCreateStructure,
         i18n::TextKey::PageTransform,
         i18n::TextKey::PageRender,
@@ -33,7 +35,9 @@ char const* pageName(MenuPage page) {
         i18n::TextKey::PageHotkeys,
         i18n::TextKey::PageInterface,
         i18n::TextKey::PageExperimental,
-        i18n::TextKey::PageSchematics
+        i18n::TextKey::PagePlaced,
+        i18n::TextKey::PageVerification,
+        i18n::TextKey::PageMaterials
     };
     constexpr auto allPagesNamed
         = [](std::array<i18n::TextKey, kMenuPageCount> const& keys) constexpr {
@@ -139,15 +143,13 @@ void renderPathRow(MenuModel& model, MenuActions const& actions, UiMetrics const
     }
 }
 
-void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+void renderSchematicFilesSection(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     using namespace structure;
     auto const& snap = model.schematic;
-    auto const& placements = snap.session.document;
     auto const tr = [](i18n::TextKey key){return i18n::tr(key);};
-    if (!snap.status.empty()) ImGui::TextWrapped("%s",snap.status.c_str());
-    if (!snap.session.status.empty()) ImGui::TextWrapped("%s",snap.session.status.c_str());
     renderSection("##SchematicFiles",tr(i18n::TextKey::SchematicFiles),metrics,[&] {
         ImGui::TextWrapped("%s",snap.library.c_str());
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintFilesHowTo));
         if(ImGui::Button(tr(i18n::TextKey::SchematicRefresh)) && actions.refreshSchematics)actions.refreshSchematics();
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicImport)) && actions.importSavedSchematic)actions.importSavedSchematic();
@@ -160,7 +162,17 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             }
         }ImGui::EndChild();ImGui::EndDisabled();
     });
+}
+
+void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    using namespace structure;
+    auto const& snap=model.schematic;
+    auto const& placements=snap.session.document;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
+    if(!snap.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.status).c_str());
+    if(!snap.session.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.session.status).c_str());
     renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintPlacedHowTo));
         ImGui::BeginDisabled(!snap.worldAvailable || !snap.session.writable);
         if(ImGui::Button(tr(i18n::TextKey::SchematicDeselect)) && actions.selectPlacement)actions.selectPlacement(0);
         for(auto const& p:placements.placements){
@@ -174,23 +186,22 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             if(ImGui::Button(tr(i18n::TextKey::SchematicMove)) && actions.movePlacementToFeet)actions.movePlacementToFeet(p.id);
             if(!metrics.compact)ImGui::SameLine();
             if(ImGui::Button(tr(i18n::TextKey::SchematicDelete)) && actions.deletePlacement)actions.deletePlacement(p.id);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));
             char name[129]{};std::snprintf(name,sizeof(name),"%s",p.name.c_str());
-            if(ImGui::InputText("Name##PlacementName",name,sizeof(name)))p.name=name;
-            auto coordinate = [&](char const* label,std::int64_t& value){
-                ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::InputScalar(label,ImGuiDataType_S64,&value);
+            renderValueRow(tr(i18n::TextKey::LabelPlacementName),metrics,[&]{if(ImGui::InputText("##PlacementName",name,sizeof(name)))p.name=name;});
+            auto coordinate = [&](char const* label,char const* id,std::int64_t& value){
+                renderValueRow(label,metrics,[&]{ImGui::InputScalar(id,ImGuiDataType_S64,&value);});
             };
-            coordinate("X##PlacementX",p.origin.x);coordinate("Y##PlacementY",p.origin.y);coordinate("Z##PlacementZ",p.origin.z);
-            char const* rotations[]{"0","90","180","270"};char const* mirrors[]{"None","X","Z"};
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelRotation),&p.rotation,rotations,4);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelMirror),&p.mirror,mirrors,3);
-            ImGui::Checkbox(tr(i18n::TextKey::SchematicVisible),&p.visible);
-            ImGui::Checkbox(tr(i18n::TextKey::SchematicExtras),&p.countExtras);
-            char const* axes[]{"Y (legacy)","X (legacy)","Material", "Bottom -> Top","Top -> Bottom","West -> East","East -> West","North -> South","South -> North"};
+            coordinate("X","##PlacementX",p.origin.x);coordinate("Y","##PlacementY",p.origin.y);coordinate("Z","##PlacementZ",p.origin.z);
+            char const* rotations[]{"0","90","180","270"};char const* mirrors[]{tr(i18n::TextKey::ComboMirrorNone),"X","Z"};
+            renderValueRow(tr(i18n::TextKey::LabelRotation),metrics,[&]{ImGui::Combo("##PlacementRotation",&p.rotation,rotations,4);});
+            renderValueRow(tr(i18n::TextKey::LabelMirror),metrics,[&]{ImGui::Combo("##PlacementMirror",&p.mirror,mirrors,3);});
+            renderCheckboxRow("##PlacementVisible",tr(i18n::TextKey::SchematicVisible),p.visible,metrics);
+            renderCheckboxRow("##PlacementExtras",tr(i18n::TextKey::SchematicExtras),p.countExtras,metrics);
+            char const* axes[]{tr(i18n::TextKey::ComboLayerAxisY),tr(i18n::TextKey::ComboLayerAxisX),tr(i18n::TextKey::ComboLayerAxisMaterial),tr(i18n::TextKey::LayerBottomToTop),tr(i18n::TextKey::LayerTopToBottom),tr(i18n::TextKey::LayerWestToEast),tr(i18n::TextKey::LayerEastToWest),tr(i18n::TextKey::LayerNorthToSouth),tr(i18n::TextKey::LayerSouthToNorth)};
             int axis=toInt(p.layerAxis),mode=toInt(p.layerMode);
             char const* modes[]{tr(i18n::TextKey::ComboRangeAll),tr(i18n::TextKey::ComboRangeSingle),tr(i18n::TextKey::ComboRangeUpToCurrent),tr(i18n::TextKey::ComboRangeFromCurrent)};
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelLayerAxis),&axis,axes,9);p.layerAxis=layerAxisFromInt(axis);
-            ImGui::SetNextItemWidth(fieldWidth(metrics));ImGui::Combo(tr(i18n::TextKey::LabelDisplayRange),&mode,modes,4);p.layerMode=layerDisplayModeFromInt(mode);
+            renderValueRow(tr(i18n::TextKey::LabelLayerAxis),metrics,[&]{ImGui::Combo("##PlacementLayerAxis",&axis,axes,9);});p.layerAxis=layerAxisFromInt(axis);
+            renderValueRow(tr(i18n::TextKey::LabelDisplayRange),metrics,[&]{ImGui::Combo("##PlacementLayerMode",&mode,modes,4);});p.layerMode=layerDisplayModeFromInt(mode);
             auto const size=PlacementTransform{{model.sizeX,model.sizeY,model.sizeZ},{},p.rotation,p.mirror}.placedSize();
             int const max=p.layerAxis==LayerAxis::Material?std::max(0,model.materialCount-1):std::max(0,(p.layerAxis==LayerAxis::X?model.sizeX:layerCount(size,p.layerAxis))-1);
             renderSteppedInt("PlacementLayer",tr(i18n::TextKey::LabelCurrentLayer),p.layer,0,max,metrics);
@@ -198,50 +209,24 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
         }
         ImGui::EndDisabled();
     });
-    if(!placements.selected)return;
-    if(ImGui::Button(tr(i18n::TextKey::SchematicVerify)) && actions.verifySchematic)actions.verifySchematic();
+    if(placements.selected && ImGui::Button(tr(i18n::TextKey::PageVerification)))model.page=MenuPage::Verification;
+    renderTransformPage(model,metrics);
+}
+
+void renderSelectedMaterials(MenuModel const& model) {
+    auto const& snap=model.schematic;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
     auto const report=snap.report;
-    if(!report || report->running){
-        ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicPending));
-        if(report)ImGui::Text("%llu",static_cast<unsigned long long>(report->checked));
-        return;
-    }
-    auto const& t=report->tally;
-    ImGui::TextWrapped(tr(i18n::TextKey::SchematicSummary),static_cast<unsigned long long>(t.correct),static_cast<unsigned long long>(t.total()),
-        static_cast<unsigned long long>(t.missing),static_cast<unsigned long long>(t.wrongType),static_cast<unsigned long long>(t.extra),static_cast<unsigned long long>(t.wrongState),static_cast<unsigned long long>(t.unknown+t.unknownAir));
-    auto filter = std::clamp(static_cast<int>(snap.filter), 0, 5);
-    char const* filters[]{tr(i18n::TextKey::SchematicFilterAll),tr(i18n::TextKey::SchematicFilterWrong),tr(i18n::TextKey::SchematicFilterState),tr(i18n::TextKey::SchematicFilterMissing),tr(i18n::TextKey::SchematicFilterWrongType),tr(i18n::TextKey::SchematicFilterExtra)};
-    ImGui::SetNextItemWidth(fieldWidth(metrics));
-    auto const filterChanged=ImGui::Combo("##MistakeFilter",&filter,filters,6);
-    if (filterChanged && actions.setMistakeFilter) {
-        actions.setMistakeFilter(static_cast<MistakeFilter>(filter));
-    }
-    if(ImGui::Button(tr(i18n::TextKey::SchematicNearest)) && actions.cycleMistake)actions.cycleMistake(static_cast<MistakeFilter>(filter));
-    if(!filterChanged && snap.target && matchesFilter(snap.target->kind,static_cast<MistakeFilter>(filter))){auto const& m=*snap.target;ImGui::TextWrapped("%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));}
-    if(report->truncated)ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicTruncated));
-    ImGui::TextWrapped("%s",tr(i18n::TextKey::SchematicHighlightHint));
-    if(ImGui::BeginChild("##MismatchList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*7),ImGuiChildFlags_Borders)){
-        for(std::size_t index=0;index<report->mismatches.size();++index){
-            auto const& m=report->mismatches[index];
-            if(!matchesFilter(m.kind,static_cast<MistakeFilter>(filter)))continue;
-            ImGui::PushID(static_cast<int>(index));
-            char label[160]{};
-            std::snprintf(label,sizeof(label),"%s (%lld, %lld, %lld)  %.1f",verificationStateName(m.kind),m.world.x,m.world.y,m.world.z,std::sqrt(m.distanceSquared));
-            auto const text=std::string{label}+"\n"+m.expected+" -> "+m.actual;
-            auto const padding=ImGui::GetStyle().FramePadding;
-            auto const wrap=std::max(1.f,ImGui::GetContentRegionAvail().x-padding.x*2.f);
-            auto const height=ImGui::CalcTextSize(text.c_str(),nullptr,false,wrap).y+padding.y*2.f;
-            bool const selected=!filterChanged && snap.target && snap.target->kind==m.kind && snap.target->world==m.world;
-            if(ImGui::Selectable("##MismatchRow",selected,0,ImVec2{0,height}) && actions.selectMistake) actions.selectMistake(report->stamp,index);
-            auto const min=ImGui::GetItemRectMin();
-            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(),ImGui::GetFontSize(),
-                {min.x+padding.x,min.y+padding.y},ImGui::GetColorU32(ImGuiCol_Text),text.c_str(),nullptr,wrap);
-            ImGui::PopID();
-        }
-    }ImGui::EndChild();
+    if(!report || report->running)return;
+    ImGui::Separator();
+    ImGui::TextUnformatted(tr(i18n::TextKey::MaterialsPlacementTitle));
+    ImGui::TextWrapped("%s",tr(i18n::TextKey::MaterialsPlacementHint));
     ImGui::TextUnformatted(tr(i18n::TextKey::SchematicMaterials));
     if(ImGui::BeginChild("##SelectedMaterials",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*6),ImGuiChildFlags_Borders)){
         for(auto const& row:report->materials){
+            auto const size=ImGui::GetTextLineHeight()*1.2f;
+            drawBlockIcon(model.blockIcons,row.item,{},ImGui::GetCursorScreenPos(),size);
+            ImGui::Dummy(ImVec2(size,size));ImGui::SameLine();
             ImGui::TextWrapped("%s  %llu / %llu / %llu / %s",row.item.c_str(),static_cast<unsigned long long>(row.count.total),static_cast<unsigned long long>(row.count.correct),static_cast<unsigned long long>(row.count.remaining()),
                 row.inventory?std::to_string(*row.inventory).c_str():tr(i18n::TextKey::SchematicInventoryUnavailable));
         }
@@ -265,9 +250,9 @@ void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetric
         if (!metrics.compact) ImGui::SameLine();
         if (ImGui::Button(i18n::tr(i18n::TextKey::MaterialListTitle))) {
             if (actions.requestMaterials) actions.requestMaterials();
-            // OpenPopup() is deferred to the page scope, where the modal is
-            // rendered, so both calls use the same Dear ImGui ID stack.
-            model.materialPopupRequested = true;
+            // Both the file-page button and the direct route open the same
+            // functional materials work list.
+            model.page = MenuPage::Materials;
         }
         ImGui::Spacing();
         if (model.hasSavedProjection) {
@@ -286,7 +271,7 @@ void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetric
             ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HintNoSavedProjection));
         }
     });
-
+    renderSchematicFilesSection(model,actions,metrics);
 }
 
 bool renderCapturePoint(
@@ -343,6 +328,7 @@ bool renderCapturePoint(
 }
 
 void renderCreateStructurePage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintCaptureHowTo));
     renderSection(
         "##CaptureSource", i18n::tr(i18n::TextKey::SectionCaptureSource), metrics, [&] {
         model.capture.mode = 0;
@@ -627,6 +613,7 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
 
 void renderTransformPage(MenuModel& model, UiMetrics const& metrics) {
     renderSection("##Transform", i18n::tr(i18n::TextKey::SectionTransform), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintTransformHowTo));
         static char const* rotationNames[]{"0°", "90°", "180°", "270°"};
         char const* mirrorNames[]{
             i18n::tr(i18n::TextKey::ComboMirrorNone), "X", "Z"
@@ -673,7 +660,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             i18n::tr(i18n::TextKey::ComboLayerAxisY),
             i18n::tr(i18n::TextKey::ComboLayerAxisX),
             i18n::tr(i18n::TextKey::ComboLayerAxisMaterial),
-            "Bottom -> Top", "Top -> Bottom", "West -> East", "East -> West", "North -> South", "South -> North"
+            i18n::tr(i18n::TextKey::LayerBottomToTop), i18n::tr(i18n::TextKey::LayerTopToBottom), i18n::tr(i18n::TextKey::LayerWestToEast), i18n::tr(i18n::TextKey::LayerEastToWest), i18n::tr(i18n::TextKey::LayerNorthToSouth), i18n::tr(i18n::TextKey::LayerSouthToNorth)
         };
         char const* layerModeNames[]{
             i18n::tr(i18n::TextKey::ComboRangeAll),
@@ -723,7 +710,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             ImGui::TextDisabled(
                 i18n::tr(i18n::TextKey::HintLayerZeroBased),
                 maxLayer(model),
-                structure::layerAxisLabel(structure::layerAxisFromInt(model.layerAxis))
+                layerAxisDisplayName(model.layerAxis)
             );
         }
         ImGui::PopTextWrapPos();
@@ -813,6 +800,7 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
 
 void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     renderSection("##Hotkeys", i18n::tr(i18n::TextKey::SectionHotkeys), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintHotkeysHowTo));
         auto maxLabelWidth = 0.0f;
         auto maxBindingWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::HintPressKeys)).x;
         for (auto const& hotkey : model.hotkeys) {
@@ -827,7 +815,7 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
             ImGui::PushID(static_cast<int>(hotkey.id));
             auto const rowStart = ImGui::GetCursorPosX();
             if (metrics.compact) {
-                ImGui::TextUnformatted(hotkey.label.c_str());
+                ImGui::TextWrapped("%s",hotkey.label.c_str());
             } else {
                 // Put the action first: scanning the left edge now explains
                 // what a shortcut does before showing its current binding.
@@ -841,28 +829,35 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
             }
             auto const clearWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ButtonClearHotkey)).x
                 + ImGui::GetStyle().FramePadding.x * 2.0f;
+            auto const resetWidth=ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ButtonResetHotkey)).x
+                + ImGui::GetStyle().FramePadding.x*2.0f;
             auto const available = ImGui::GetContentRegionAvail().x;
             auto const controlSpacing = ImGui::GetStyle().ItemSpacing.x;
-            auto const requiredWidth = preferredBindingWidth + clearWidth + controlSpacing;
-            auto const totalWidth = std::min(available, requiredWidth);
-            auto const bindWidth = std::max(0.0f, totalWidth - clearWidth - controlSpacing);
+            auto const minimumBinding=ImGui::CalcTextSize("---").x+bindingPadding;
+            bool const stacked=available<minimumBinding+resetWidth+clearWidth+controlSpacing*2;
+            auto const bindWidth=stacked?std::max(1.f,available):std::min(preferredBindingWidth,
+                std::max(1.f,available-resetWidth-clearWidth-controlSpacing*2));
             auto const label = hotkey.capturing
                 ? i18n::tr(i18n::TextKey::HintPressKeys)
                 : hotkey.display.c_str();
             if (ImGui::Button(label, ImVec2(bindWidth, 0.0f)) && !hotkey.capturing && actions.beginHotkeyCapture) {
                 actions.beginHotkeyCapture(hotkey.id);
             }
-            ImGui::SameLine();
+            if(!stacked)ImGui::SameLine();
             if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonResetHotkey)) && actions.resetHotkey) {
                 actions.resetHotkey(hotkey.id);
             }
-            ImGui::SameLine();
+            if(!stacked || available>=resetWidth+clearWidth+controlSpacing)ImGui::SameLine();
             if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonClearHotkey)) && actions.clearHotkey) {
                 actions.clearHotkey(hotkey.id);
             }
+            if(!hotkey.conflict.empty())
+                ImGui::TextWrapped(i18n::tr(i18n::TextKey::HotkeyRouteConflict),hotkey.conflict.c_str());
+            if(hotkey.reserved)ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HotkeyRouteReserved));
             ImGui::PopID();
         }
         ImGui::PopStyleVar();
+        if(!model.directMenuRoutesReady)ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HotkeyRouteUnavailable));
         // The fixed Alt+wheel gesture has no rebindable slot of its own, so it
         // sits between the binding rows and the page-wide reset that also
         // restores it.
@@ -882,6 +877,7 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
 
 void renderHudPage(MenuModel& model, UiMetrics const& metrics) {
     renderSection("##Hud", i18n::tr(i18n::TextKey::SectionHud), metrics, [&] {
+    ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HintHudHowTo));
         renderCheckboxRow(
             "##HudEnabled", i18n::tr(i18n::TextKey::CheckboxHudEnabled), model.hudEnabled, metrics
         );
@@ -997,62 +993,9 @@ void renderInterfacePage(MenuModel& model, UiMetrics const& metrics) {
 void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     auto const popupName = materialPopupName();
     if (!ImGui::IsPopupOpen(popupName.c_str())) return;
-    // The material list has a little more breathing room than the regular
-    // menu: its table is intentionally 1.5x the original logical footprint.
-    constexpr float popupDensity = 1.20f;
-    constexpr float itemColumnWeight = 0.38f;
-    constexpr float typeColumnWeight = 0.42f;
-    constexpr float totalColumnWeight = 0.20f;
-    // Measure the actual table content.  A fixed width multiplier makes a
-    // seven-row list look like a wide banner and leaves unused space below.
-    auto nameWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnItem)).x;
-    auto typeWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnIdentifier)).x;
-    auto countWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::ColumnTotal)).x;
-    auto const materialName = [](MaterialRow const& row) {
-        return materialDisplayName(row.displayName, row.nameKey);
-    };
-    for (auto const& item : model.materials) {
-        nameWidth = std::max(nameWidth, ImGui::CalcTextSize(materialName(item)).x);
-        typeWidth = std::max(typeWidth, ImGui::CalcTextSize(item.typeName.c_str()).x);
-        auto const countText = std::to_string(item.count);
-        countWidth = std::max(countWidth, ImGui::CalcTextSize(countText.c_str()).x);
-    }
-    auto const cellPadding = ImGui::GetStyle().CellPadding.x * 2.0f;
-    auto const tableWidth = std::max(
-        (nameWidth + cellPadding) / itemColumnWeight,
-        std::max(
-            (typeWidth + cellPadding) / typeColumnWeight,
-            (countWidth + cellPadding) / totalColumnWeight
-        )
-    );
-    auto const closeLabel = i18n::tr(i18n::TextKey::ButtonClose);
-    auto const closeWidth = ImGui::CalcTextSize(closeLabel).x
-        + ImGui::GetStyle().FramePadding.x * 2.0f;
-    auto const titleWidth = ImGui::CalcTextSize(i18n::tr(i18n::TextKey::MaterialListTitle)).x
-        + closeWidth + metrics.gap;
-    auto const popupWidth = std::min(
-        std::max(tableWidth + metrics.outerPadding * 2.35f, titleWidth + metrics.outerPadding * 2.35f)
-            * popupDensity,
-        metrics.viewport.x * 0.86f
-    );
-
-    auto const line = ImGui::GetTextLineHeightWithSpacing();
-    auto const rowHeight = (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity;
-    auto const listContentHeight = model.materials.empty()
-        ? rowHeight
-        : line + rowHeight * static_cast<float>(model.materials.size());
-    auto const listHeight = model.hasLoadedStructure
-        ? std::min(listContentHeight, metrics.viewport.y * 0.60f)
-        : 0.0f;
-    auto const popupHeight = std::min(
-        listHeight + ImGui::GetTextLineHeight() * 2.0f * popupDensity
-            + metrics.outerPadding * 2.35f * popupDensity + metrics.gap * 3.0f,
-        metrics.viewport.y * 0.84f
-    );
-    auto const popupSize = ImVec2(
-        popupWidth,
-        popupHeight
-    );
+    auto const closeLabel=i18n::tr(i18n::TextKey::ButtonClose);
+    auto const closeWidth=ImGui::CalcTextSize(closeLabel).x+ImGui::GetStyle().FramePadding.x*2;
+    auto const popupSize=ImVec2(std::min(980.f*metrics.scale,metrics.viewport.x*.86f),metrics.viewport.y*.84f);
     ImGui::SetNextWindowSize(popupSize, ImGuiCond_Always);
     if (!ImGui::BeginPopupModal(
             popupName.c_str(),
@@ -1071,101 +1014,34 @@ void renderMaterialPopup(MenuModel const& model, UiMetrics const& metrics) {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
 
-    if (!model.hasLoadedStructure) {
-        ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::StatusNotLoaded));
-    } else {
-        std::uint64_t total{};
-        for (auto const& item : model.materials) {
-            if (std::numeric_limits<std::uint64_t>::max() - total < item.count) {
-                total = std::numeric_limits<std::uint64_t>::max();
-                break;
-            }
-            total += item.count;
-        }
-        ImGui::Text(
-            i18n::tr(i18n::TextKey::LabelMaterialSummary),
-            static_cast<unsigned long long>(total),
-            model.materials.size()
-        );
-        ImGui::Separator();
-        // The popup header and Close button are fixed. Only this child consumes
-        // the wheel; its visual scrollbar stays hidden to match the rest of the
-        // menu, while the non-scrollable parent prevents wheel propagation.
-        auto const materialAreaHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y);
-        if (ImGui::BeginChild(
-                "##MaterialList",
-                ImVec2(0.0f, materialAreaHeight),
-                false,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings
-            )) {
-            if (model.materials.empty()) {
-                ImGui::TextDisabled(
-                    "%s", i18n::tr(i18n::TextKey::HintNoPlaceableMaterials)
-                );
-            } else if (ImGui::BeginTable(
-                           "##MaterialTable", 3,
-                           ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg
-                               | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_NoSavedSettings
-                       )) {
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnItem),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    itemColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnIdentifier),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    typeColumnWeight
-                );
-                ImGui::TableSetupColumn(
-                    i18n::tr(i18n::TextKey::ColumnTotal),
-                    ImGuiTableColumnFlags_WidthStretch,
-                    totalColumnWeight
-                );
-                ImGui::TableHeadersRow();
-                auto renderCenteredCell = [&](char const* text) {
-                    auto const cellWidth = ImGui::GetContentRegionAvail().x;
-                    auto const textSize = ImGui::CalcTextSize(text, nullptr, false, cellWidth);
-                    auto const verticalOffset = std::max(
-                        0.0f,
-                        (rowHeight - textSize.y) * 0.5f
-                    );
-                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + verticalOffset);
-                    if (textSize.y > ImGui::GetTextLineHeight() + 0.5f) {
-                        ImGui::TextWrapped("%s", text);
-                    } else {
-                        ImGui::TextUnformatted(text);
-                    }
-                };
-                for (auto const& item : model.materials) {
-                    ImGui::TableNextRow(
-                        ImGuiTableRowFlags_None,
-                        (ImGui::GetTextLineHeight() + metrics.gap * 0.55f) * popupDensity
-                    );
-                    ImGui::TableSetColumnIndex(0);
-                    renderCenteredCell(materialName(item));
-                    ImGui::TableSetColumnIndex(1);
-                    renderCenteredCell(item.typeName.c_str());
-                    ImGui::TableSetColumnIndex(2);
-                    auto const countText = std::to_string(item.count);
-                    renderCenteredCell(countText.c_str());
-                }
-                ImGui::EndTable();
-            }
-        }
-        ImGui::EndChild();
-    }
+    renderMaterialBill(model,{},metrics,0,false);
     ImGui::EndPopup();
 }
 
-void renderNavigation(MenuModel& model, UiMetrics const& metrics) {
+void renderNavigation(MenuModel& model, UiMetrics const& metrics, bool compact) {
     ImVec2 indicatorMin{};
     ImVec2 indicatorMax{};
-    for (std::size_t index = 0; index < kMenuPageCount; ++index) {
-        auto const page = static_cast<MenuPage>(index);
+    // Display frequent schematic routes together; enum values and widget IDs
+    // remain stable for saved state and future direct hotkey routing.
+    constexpr std::array navigation{
+        MenuPage::Projection,MenuPage::Schematics,MenuPage::Verification,MenuPage::Materials,
+        MenuPage::CreateStructure,MenuPage::Render,
+        MenuPage::Hud,MenuPage::Hotkeys,MenuPage::Interface,MenuPage::Experimental};
+    static_assert(navigation.size()+1==kMenuPageCount); // Transform is included in Placed.
+    if (compact) {
+        if (ImGui::BeginCombo("##PageNavigation", pageName(model.page))) {
+            for (auto const page : navigation) {
+                if (ImGui::Selectable(pageName(page), model.page == page)) model.page = page;
+            }
+            ImGui::EndCombo();
+        }
+        return;
+    }
+    for (std::size_t index = 0; index < navigation.size(); ++index) {
+        auto const page = navigation[index];
         auto const* name = pageName(page);
         auto const selected = model.page == page;
-        ImGui::PushID(static_cast<int>(index));
+        ImGui::PushID(static_cast<int>(page));
         auto const min = ImGui::GetCursorScreenPos();
         auto const height = std::max(
             ImGui::GetFrameHeight() * 1.08f,

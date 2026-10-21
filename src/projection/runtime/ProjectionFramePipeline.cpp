@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/runtime/ProjectionFramePipeline.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "projection/correction/ProjectionCorrectionTracker.h"
 #include "projection/correction/CorrectionUpdate.h"
@@ -82,6 +83,9 @@ void processProjectionOpaqueFrame(
     }
 
     // Consume completed CPU data only in the opaque render pass.
+    // Buffered uploads use the normal engine resource service registered at
+    // the render owner. This marker is not a private GPU completion receipt.
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     uploadCompletedProjectionMeshes(state, tessellator);
     if (state.asyncMeshBuildingEnabled) {
         // Bounds use the same exact extent/white UVs as synchronous fallback.

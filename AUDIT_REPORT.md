@@ -34,7 +34,6 @@ DLLの `/W4` 全コンパイルにはLL macro由来の `_AutoHookCount` unused w
 依存repoの初回自動更新は既存未追跡 `godotcpp4/4.5/manifest.txt` と衝突したため、削除せずlocal recipeとinstalled packagesを使用した。snapshot内では親projectの自動検出を避け、次の設定を明示した（snapshotをcurrent directoryとする）:
 
 ```powershell
-xmake f -P . -p windows -a x64 -m release --target_type=client --require=n --ccache=n --policies=network.mode:private --levimc_repo="C:\Users\missp\.codex\worktrees\36a6\LHolo\.xmake\windows\x64\repositories\levimc-repo" -o build -y
 xmake -P . -r LHolo
 # 各suiteについて: xmake -P . -b <target>; 成功後 xmake r -P . <target>
 ```

@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "ui/MenuController.h"
+#include "overlay/BlockIconGpu.h"
 
 #include "place/PlaceHelper.h"
 #include "projection/Projection.h"
@@ -14,9 +15,12 @@
 #include "structure/capture/StructureCapture.h"
 #include "structure/formats/StructureFormatLoaders.h"
 #include "ui/FileDialog.h"
+#include "ui/MaterialSaveDialog.h"
 #include "ui/FluentTheme.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/LHoloMenu.h"
+#include "ui/MenuRoutePresentation.h"
+#include "overlay/CompanionBridge.h"
 
 #include <algorithm>
 #include <array>
@@ -43,6 +47,8 @@ auto& uiState() {
 std::array<char, StructurePathUtf8Capacity> gPathBuffer{};
 bool                   gPathInitialized{};
 MenuPage               gActivePage{MenuPage::Projection};
+auto gVerifierView = std::make_shared<VerifierViewState>();
+auto gMaterialsView = std::make_shared<MaterialsViewState>();
 
 struct HotkeyDefinition { HotkeyId id; i18n::TextKey label; };
 constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
@@ -57,13 +63,20 @@ constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
     {HotkeyId::LayerDecrease, i18n::TextKey::HotkeyLayerDecrease},
     {HotkeyId::LoadProjection, i18n::TextKey::HotkeyLoadProjection},
     {HotkeyId::CloseProjection, i18n::TextKey::HotkeyCloseProjection},
-    {HotkeyId::ToggleManualPlacement, i18n::TextKey::CheckboxManualPlace}
+    {HotkeyId::ToggleManualPlacement, i18n::TextKey::CheckboxManualPlace},
+    {HotkeyId::OpenPlaced, i18n::TextKey::HotkeyOpenPlaced},
+    {HotkeyId::OpenFiles, i18n::TextKey::HotkeyOpenFiles},
+    {HotkeyId::OpenVerification, i18n::TextKey::HotkeyOpenVerification},
+    {HotkeyId::OpenMaterials, i18n::TextKey::HotkeyOpenMaterials}
 }};
 
 } // namespace
 
 MenuModel buildStructureMenuModel(float effectiveUiScale) {
     MenuModel model;
+    model.verifierView = gVerifierView;
+    model.materialsView = gMaterialsView;
+    model.materialExport = io::materialExportJob().poll();
     auto& session = structure::detail::StructureSession::getInstance();
     auto const sessionSnapshot = session.snapshot();
     auto const hud = uiState().hud();
@@ -144,6 +157,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.hudShowExtraBlocks = hud.showExtraBlocks;
     model.hudShowProjectedBlockName = hud.showProjectedBlockName;
     model.altWheelOffsetEnabled = uiState().altWheelOffsetEnabled();
+    model.directMenuRoutesReady=uiState().nativeTextInputHooksReady();
     std::size_t rowIndex = 0;
     for (auto const& definition : kHotkeyDefinitions) {
         auto const binding = uiState().hotkey(static_cast<std::size_t>(definition.id));
@@ -152,15 +166,14 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
         row.label = i18n::tr(definition.label);
         row.display = hotkeyChordName(binding.modifiers, binding.key);
         row.capturing = binding.capturing;
+        if(auto const conflict=uiState().firstHotkeyConflict(static_cast<std::size_t>(definition.id));conflict
+            && (input::isDirectMenuHotkey(static_cast<std::size_t>(definition.id)) || input::isDirectMenuHotkey(*conflict)))
+            row.conflict=i18n::tr(kHotkeyDefinitions[*conflict].label);
+        row.reserved=input::isDirectMenuHotkey(static_cast<std::size_t>(definition.id)) && binding.key==VK_F11;
     }
-    auto const materials = uiState().materialRequirements();
-    model.materials.reserve(materials.size());
-    for (auto const& material : materials) {
-        model.materials.push_back(
-            {material.displayName, material.nameKey, material.typeName,
-             material.count, material.stackSize}
-        );
-    }
+    auto const materials=uiState().materialListView();
+    if(sessionSnapshot.loaded && materials && materials->scope.generation==sessionSnapshot.loaded->generation)
+        model.materialList=materials;
     return model;
 }
 
@@ -307,6 +320,9 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.movePlacementToFeet = [&refreshModel](auto id) { structure::schematic::moveToFeet(id); refreshModel=true; };
     actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
     actions.verifySchematic = [] { structure::schematic::verify(); };
+    actions.cancelVerification = [] { structure::schematic::cancelVerification(); };
+    actions.resetVerification = [] { structure::schematic::resetVerification(); };
+    actions.clearMistakeTarget = [] { structure::schematic::clearMistakeTarget(); };
     actions.cycleMistake = [](auto filter) { structure::schematic::cycleMistake(filter); };
     actions.setMistakeFilter = [](auto filter) { structure::schematic::setMistakeFilter(filter); };
     actions.selectMistake = [](auto const& stamp, auto index) { (void)structure::schematic::selectMistake(stamp, index); };
@@ -337,7 +353,21 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
         structure::saveSettings();
         refreshModel = true;
     };
-    actions.requestMaterials = [] { structure::requestMaterialList(); };
+    actions.requestMaterials = [] { structure::requestMaterialList();uiState().requestMaterialAvailabilityRefresh(); };
+    actions.ignoreMaterial = [&refreshModel](auto scope,auto const& key,bool ignored) {
+        if(uiState().setMaterialIgnored(scope,key,ignored))refreshModel=true;
+    };
+    actions.clearIgnoredMaterials = [&refreshModel](auto scope) {
+        if(uiState().clearMaterialIgnored(scope))refreshModel=true;
+    };
+    actions.exportMaterials = [](io::MaterialExportRequest request) {
+        // Immutable click-time snapshot remains valid if the user loads another blueprint.
+        auto const title=std::string{i18n::tr(i18n::TextKey::MaterialsExport)};
+        auto const count=MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),nullptr,0);
+        std::wstring wide(static_cast<std::size_t>(count),L'\0');
+        MultiByteToWideChar(CP_UTF8,0,title.data(),static_cast<int>(title.size()),wide.data(),count);
+        (void)io::materialExportJob().start(std::move(request),[wide=std::move(wide)](auto const& cancellation) {return saveMaterialFile(wide,cancellation);});
+    };
     actions.beginHotkeyCapture = [](HotkeyId id) {
         uiState().beginHotkeyCapture(static_cast<std::size_t>(id));
     };
@@ -406,6 +436,21 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
 
 void renderStructureMenu() {
     if (!structure::isGuiVisible()) return;
+    auto route=input::MenuRoute::None;
+    if(auto const intent=uiState().consumeMenuRoute()) {
+        auto const view=structure::capture::getClientViewSnapshot();
+        bool const interaction=ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive();
+        bool applied{};
+        if(input::directMenuForegroundMatches(intent->window,reinterpret_cast<std::uintptr_t>(GetForegroundWindow())) && !overlay::companion::isVisible())
+            applied=structure::capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
+                if((current?current->worldEpoch:0)!=intent->worldEpoch)return false;
+                return uiState().applyMenuRouteIfCurrent(*intent,interaction,[&]{
+                    route=intent->route;gActivePage=menuPageForRoute(route,gActivePage);
+                });
+            });
+        if(!applied)uiState().discardMenuRoute(*intent);
+    }
+    if(!structure::isGuiVisible())return;
     auto const displaySize = ImGui::GetIO().DisplaySize;
     auto const configuredScale = uiState().hud().uiScale;
     auto const effectiveScale = configuredScale > 0.0f
@@ -426,9 +471,17 @@ void renderStructureMenu() {
     auto const metrics = calculateMetrics(displaySize, effectiveScale);
     applyFluentTheme(metrics);
     auto model = buildStructureMenuModel(effectiveScale);
+    model.blockIcons=[](std::string_view block,std::string_view item){return overlay::blockIconGpu().lookup(block,item);};
+    applyMenuRoutePresentation(model,route);
+    if(route==input::MenuRoute::Materials) {
+        structure::requestMaterialList();
+    }
     bool refreshModel = false;
     auto const actions = buildStructureMenuActions(refreshModel, model.captureRevision);
+    auto const previousPage=model.page;
     renderMenu(model, actions, metrics);
+    if(model.page==MenuPage::Materials && previousPage!=MenuPage::Materials)structure::requestMaterialList();
+    uiState().setUiInteractionBlocked(ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive());
     gActivePage = model.page;
     if (!refreshModel) applyStructureMenuModel(model, effectiveScale);
     uiState().consumeOpeningInputBlockFrame();

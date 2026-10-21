@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/ProjectionController.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "projection/hooks/ProjectionGameHooks.h"
 #include "projection/hooks/ProjectionRenderHooks.h"
@@ -36,6 +37,8 @@ bool ProjectionController::uninstallHooks() {
 }
 
 void ProjectionController::disableProjection() {
+    auto lease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!lease)return;
     auto& session = ProjectionSession::getInstance();
     session.withLockedState(
         [](ProjectionState& state, overlay::BoundsWireframe& captureBounds) {

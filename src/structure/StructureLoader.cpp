@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "structure/StructureLoader.h"
+#include "app/ScopeExit.h"
 #include "app/FutureResult.h"
 #include "app/NativeCallbackBoundary.h"
 
@@ -28,6 +29,9 @@
 #include "structure/LoadIntent.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
+#include "overlay/CompanionBridge.h"
+#include "ui/HudSummaryPolicy.h"
+#include "ui/PresentationText.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/MenuController.h"
 #include "structure/capture/StructureCapture.h"
@@ -114,6 +118,7 @@ struct PendingStructureLoad {
     PendingStructureLoadMode            mode{PendingStructureLoadMode::Normal};
     std::string                         path;
     detail::SavedProjectionSnapshot     saved;
+    ProjectionRequestStamp             request;
     std::future<PreparedStructureLoadResult> future;
     std::chrono::steady_clock::time_point started;
     std::uint64_t                       sourceWorldEpoch{};
@@ -130,7 +135,8 @@ detail::LoadIntent gLoadIntent;
 
 void commitNormalStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
-    std::string const&               pathText
+    std::string const&               pathText,
+    ProjectionRequestStamp           request
 ) {
     auto& session = detail::StructureSession::getInstance();
     auto const renderBlocks = loaded->renderBlocks.size();
@@ -138,7 +144,7 @@ void commitNormalStructureLoad(
 
     projection::cancelNextStructureAnchorRequest();
     session.resetTransform();
-    session.replaceLoaded(std::move(loaded), pathText, status);
+    session.replaceLoaded(std::move(loaded), pathText, status, request);
     detail::invalidateMaterialList();
     saveSettings();
     logger().info("Loaded structure {}: {} renderable blocks", pathText, renderBlocks);
@@ -146,7 +152,8 @@ void commitNormalStructureLoad(
 
 void commitRestoredStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
-    detail::SavedProjectionSnapshot const& saved
+    detail::SavedProjectionSnapshot const& saved,
+    ProjectionRequestStamp                request
 ) {
     auto& session = detail::StructureSession::getInstance();
     session.setRotation(saved.transform.rotation);
@@ -164,7 +171,8 @@ void commitRestoredStructureLoad(
     session.replaceLoaded(
         std::move(loaded),
         saved.structurePath,
-        i18n::Message{i18n::TextKey::StatusRestoredPending}
+        i18n::Message{i18n::TextKey::StatusRestoredPending},
+        request
     );
     detail::invalidateMaterialList();
     logger().info(
@@ -177,6 +185,8 @@ void commitRestoredStructureLoad(
 }
 
 bool launchPreparedStructureLoad(PendingStructureLoad pending) {
+    auto const request=pending.request;bool launched{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!launched)schematic::failProjectionRequest(request);});
     auto path = detail::pathFromUtf8(pending.path);
     try {
         pending.future = std::async(
@@ -204,6 +214,7 @@ bool launchPreparedStructureLoad(PendingStructureLoad pending) {
         return false;
     }
     gPendingStructureLoad.emplace(std::move(pending));
+    launched=true;
     logger().info("Preparing structure asynchronously: {}", gPendingStructureLoad->path);
     return true;
 }
@@ -212,13 +223,15 @@ bool startPreparedStructureLoad(
     PendingStructureLoadMode mode,
     std::string pathText,
     std::uint64_t ticket,
-    detail::SavedProjectionSnapshot const& saved = {}
+    detail::SavedProjectionSnapshot const& saved = {},
+    ProjectionRequestStamp request = {}
 ) {
     PendingStructureLoad pending;
     pending.mode = mode;
     pending.path = std::move(pathText);
     pending.ticket = ticket;
     pending.saved = saved;
+    pending.request = request;
     pending.started = std::chrono::steady_clock::now();
     if (auto const view = capture::getClientViewSnapshot()) {
         pending.sourceWorldEpoch = view->worldEpoch;
@@ -243,6 +256,8 @@ void processCompletedStructureLoad() {
     // get() consumes the future even when it throws. Retire the slot before
     // fallible error/status formatting, preserving admission of the next job.
     auto pending = app::takePendingValue(gPendingStructureLoad);
+    bool committed{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!committed)schematic::failProjectionRequest(pending.request);});
     auto const mode = pending.mode;
     auto const& path = pending.path;
     auto const& saved = pending.saved;
@@ -321,10 +336,11 @@ void processCompletedStructureLoad() {
 
     gLoadIntent.applyIfCurrent(ticket, [&] {
         if (mode == PendingStructureLoadMode::Restore) {
-            commitRestoredStructureLoad(std::move(loaded), saved);
+            commitRestoredStructureLoad(std::move(loaded), saved, pending.request);
         } else {
-            commitNormalStructureLoad(std::move(loaded), path);
+            commitNormalStructureLoad(std::move(loaded), path, pending.request);
         }
+        committed=true;
     });
 }
 
@@ -384,7 +400,21 @@ bool isMenuInputCaptured() {
     return isGuiVisible() || isInputTransitionBlocked();
 }
 
-bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
+static bool requestMenuRoute(input::MenuRoute route,bool allowDirectRoutes,std::uintptr_t gameWindow) {
+    if(route<input::MenuRoute::Placed || route>input::MenuRoute::Materials)return false;
+    auto const generation=uiState().menuRouteGeneration();
+    auto const view=capture::getClientViewSnapshot();
+    return capture::publishMenuRouteIfCurrent(view,[&](auto const& current){
+        auto const now=GetTickCount64();
+        bool const gameInput=current && now>=current->sampledAtMillis && now-current->sampledAtMillis<=250 && current->gameplayInputEnabled;
+        input::DirectMenuInputContext const context{allowDirectRoutes && input::directMenuForegroundMatches(gameWindow,reinterpret_cast<std::uintptr_t>(GetForegroundWindow())),overlay::companion::isVisible(),isGuiVisible(),gameInput,
+            uiState().uiInteractionBlocked(),uiState().nativeTextInputBlocked()};
+        if(!input::directMenuInputAllowed(context))return false;
+        return uiState().queueMenuRoute({route,generation,current?current->worldEpoch:0,gameWindow});
+    });
+}
+
+bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes,std::uintptr_t gameWindow) {
     auto const modifierKey = ui::isModifierKey(virtualKey);
     if (virtualKey == VK_CONTROL || virtualKey == VK_LCONTROL || virtualKey == VK_RCONTROL) {
         uiState().setControlHeld(true);
@@ -392,6 +422,13 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
         uiState().setAltHeld(true);
     } else if (virtualKey == VK_SHIFT || virtualKey == VK_LSHIFT || virtualKey == VK_RSHIFT) {
         uiState().setShiftHeld(true);
+    }
+
+    // Praxis owns input while its menu is visible, including its shared HUD
+    // binding editor. Keep modifier tracking above and key-up release active.
+    if (overlay::companion::isVisible()) {
+        uiState().stopHotkeyCapture();
+        return false;
     }
 
     auto const captureIndex = uiState().capturingHotkey();
@@ -435,6 +472,27 @@ bool handleGuiHotkeyKeyDown(unsigned int virtualKey) {
             requestOpenGui();
         }
         return true;
+    }
+    auto const now=GetTickCount64();
+    auto const view=capture::getClientViewSnapshot();
+    bool const gameInput=view && now>=view->sampledAtMillis
+        && now-view->sampledAtMillis<=250 && view->gameplayInputEnabled;
+    input::DirectMenuInputContext const directContext{
+        allowDirectRoutes,false,isGuiVisible(),gameInput,
+        uiState().uiInteractionBlocked(),uiState().nativeTextInputBlocked()};
+    if(input::directMenuInputAllowed(directContext) && virtualKey!=VK_F11) {
+        for(std::size_t index=input::kDirectMenuHotkeyFirst;index<input::kHotkeyCount;++index) {
+            auto const hotkey=uiState().inputHotkey(index);
+            if(!hotkey.key || hotkey.key!=virtualKey || hotkey.modifiers!=modifiers)continue;
+            if(uiState().firstHotkeyConflict(index))continue;
+            if(now>=uiState().ignoreHotkeyUntil() && uiState().tryPressHotkey(index)) {
+                if(!requestMenuRoute(input::menuRouteForHotkey(index),allowDirectRoutes,gameWindow)) {
+                    uiState().releaseHotkey(index);
+                    return false;
+                }
+            }
+            return true;
+        }
     }
     if (isGuiVisible()) return false;
 
@@ -519,7 +577,7 @@ bool handleGuiHotkeyKeyUp(unsigned int virtualKey) {
 }
 
 bool handleProjectionOffsetWheel(short wheelDelta) {
-    if (isGuiVisible() || !uiState().altWheelOffsetEnabled() || !uiState().altHeld()
+    if (overlay::companion::isVisible() || isGuiVisible() || !uiState().altWheelOffsetEnabled() || !uiState().altHeld()
         || !detail::StructureSession::getInstance().hasLoaded()) {
         return false;
     }
@@ -596,6 +654,8 @@ void processPendingActions() {
 }
 
 void resetDimensionSession() {
+    schematic::retireActiveProjection();
+    uiState().cancelMenuRoutes();
     uiState().clearMaterialHud();
 }
 
@@ -752,8 +812,13 @@ void renderHud() {
             5.0f
         );
     }
-    auto const hudMetrics = lholo::ui::calculateMetrics(displaySize, uiScale);
+    auto const customLayout=uiState().hudLayout(0);
+    auto hudMetrics = lholo::ui::calculateMetrics(displaySize, uiScale);
     lholo::ui::applyFluentTheme(hudMetrics);
+    // Per-window scaling retains the existing theme and shared font atlas.
+    float const panelScale=lholo::ui::hudScaleMultiplier(hudMetrics.scale,customLayout);
+    hudMetrics.scale*=panelScale;hudMetrics.gap*=panelScale;hudMetrics.outerPadding*=panelScale;
+    hudMetrics.sectionPadding*=panelScale;hudMetrics.rounding*=panelScale;
     auto const currentLayer = std::clamp(
         sessionSnapshot.transform.displayLayer,
         0,
@@ -765,9 +830,9 @@ void renderHud() {
     auto const bottom = (hudPosition & 1) != 0;
     auto const margin = hudMetrics.outerPadding;
     ImGui::SetNextWindowPos(
-        ImVec2(right ? displaySize.x - margin : margin, bottom ? displaySize.y - margin : margin),
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f*displaySize.x+customLayout.x,(customLayout.anchor/3)*.5f*displaySize.y+customLayout.y):ImVec2(right ? displaySize.x - margin : margin, bottom ? displaySize.y - margin : margin),
         ImGuiCond_Always,
-        ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f,(customLayout.anchor/3)*.5f):ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
     );
     ImGui::SetNextWindowBgAlpha(kOverlayWindowBgAlpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, hudMetrics.rounding * 0.7f);
@@ -783,7 +848,14 @@ void renderHud() {
         | ImGuiWindowFlags_NoNavInputs
         | ImGuiWindowFlags_NoNavFocus
         | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(ImGui::GetStyle().ItemSpacing.x*panelScale,ImGui::GetStyle().ItemSpacing.y*panelScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(ImGui::GetStyle().FramePadding.x*panelScale,ImGui::GetStyle().FramePadding.y*panelScale));
     if (ImGui::Begin("##LHoloHud", nullptr, flags)) {
+        ImGui::SetWindowFontScale(panelScale);
+        if(customLayout.custom) {
+            auto p=ImGui::GetWindowPos(),s=ImGui::GetWindowSize();
+            ImGui::SetWindowPos({std::clamp(p.x,0.f,std::max(0.f,displaySize.x-s.x)),std::clamp(p.y,0.f,std::max(0.f,displaySize.y-s.y))});
+        }
         if (showFileName) ImGui::Text(i18n::tr(i18n::TextKey::HudFileName), fileName.c_str());
         if (showLayer && layerAxis == LayerAxis::Material) {
             if (layerMode == LayerDisplayMode::All) {
@@ -812,21 +884,26 @@ void renderHud() {
                 i18n::tr(i18n::TextKey::HudCurrentLayer),
                 currentLayer,
                 maxLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
         } else if (showLayer && layerMode == LayerDisplayMode::UpToCurrent) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeFromZero),
                 currentLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
         } else if (showLayer) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudRangeBetween),
                 currentLayer,
                 maxLayer,
-                layerAxisLabel(layerAxis)
+                ui::layerAxisDisplayName(toInt(layerAxis))
             );
+        }
+        if(showLayer) {
+            auto const& t=sessionSnapshot.transform;
+            ImGui::Text(i18n::tr(i18n::TextKey::HudTransform),t.offsetX,t.offsetY,t.offsetZ,(t.rotation&3)*90,
+                t.mirror==1?"X":t.mirror==2?"Z":"-");
         }
         auto const showAnyProgress = showOverallProgress || showProgress || showWrongState
             || showWrongType || showExtraBlocks;
@@ -845,6 +922,12 @@ void renderHud() {
                 static_cast<unsigned long long>(progress.visiblePlaced),
                 static_cast<unsigned long long>(progress.visibleTotal)
             );
+            auto const summary=lholo::ui::hudProgress(progress.visiblePlaced,progress.visibleTotal);
+            if(summary.ratio) {
+                char label[32]{};std::snprintf(label,sizeof(label),"%.1f%%",*summary.ratio*100.f);
+                ImGui::ProgressBar(*summary.ratio,ImVec2(240*hudMetrics.scale,0),label);
+                ImGui::Text(i18n::tr(i18n::TextKey::HudRemaining),static_cast<unsigned long long>(summary.remaining));
+            } else ImGui::TextDisabled("%s",i18n::tr(i18n::TextKey::HudProgressUnknown));
         }
         if (showWrongState && progress.wrongState != 0) {
             ImGui::TextColored(
@@ -889,12 +972,12 @@ void renderHud() {
         // Record our rect + corner so the material HUD (drawn right after) can
         // stack clear of us when it shares this corner, instead of overlapping.
         gProjectionHudLayout.frame = ImGui::GetFrameCount();
-        gProjectionHudLayout.position = hudPosition;
+        gProjectionHudLayout.position = customLayout.custom?-1:hudPosition;
         gProjectionHudLayout.topY = ImGui::GetWindowPos().y;
         gProjectionHudLayout.bottomY = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(4);
 }
 
 void renderMaterialHud() {
@@ -920,7 +1003,7 @@ void renderMaterialHud() {
     std::vector<Row> missing;
     for (std::size_t index = 0; index < materials.size(); ++index) {
         auto const need = materials[index].count;
-        auto const have = index < available.size() ? available[index] : 0;
+        auto const have = index < available.size() ? std::max(0,available[index]) : 0;
         auto const miss = static_cast<std::uint64_t>(have) >= need
             ? 0ULL : need - static_cast<std::uint64_t>(have);
         if (miss > 0) {
@@ -942,8 +1025,13 @@ void renderMaterialHud() {
     if (uiScale <= 0.0f) {
         uiScale = std::clamp(std::min(displaySize.x / 1920.0f, displaySize.y / 1080.0f), 1.0f, 5.0f);
     }
-    auto const metrics = lholo::ui::calculateMetrics(displaySize, uiScale);
+    auto const customLayout=uiState().hudLayout(1);
+    auto metrics = lholo::ui::calculateMetrics(displaySize, uiScale);
     lholo::ui::applyFluentTheme(metrics);
+    // Per-window scaling retains the existing theme and shared font atlas.
+    float const panelScale=lholo::ui::hudScaleMultiplier(metrics.scale,customLayout);
+    metrics.scale*=panelScale;metrics.gap*=panelScale;metrics.outerPadding*=panelScale;
+    metrics.sectionPadding*=panelScale;metrics.rounding*=panelScale;
     auto const margin = metrics.outerPadding;
     auto const position = std::clamp(materialHudPosition(), 0, 3);
     bool const right = position >= 2;
@@ -961,7 +1049,7 @@ void renderMaterialHud() {
         }
     }
     ImGui::SetNextWindowPos(
-        ImVec2(anchorX, anchorY), ImGuiCond_Always, ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
+        customLayout.custom?ImVec2((customLayout.anchor%3)*.5f*displaySize.x+customLayout.x,(customLayout.anchor/3)*.5f*displaySize.y+customLayout.y):ImVec2(anchorX, anchorY), ImGuiCond_Always, customLayout.custom?ImVec2((customLayout.anchor%3)*.5f,(customLayout.anchor/3)*.5f):ImVec2(right ? 1.0f : 0.0f, bottom ? 1.0f : 0.0f)
     );
     ImGui::SetNextWindowBgAlpha(kOverlayWindowBgAlpha);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, metrics.rounding * 0.7f);
@@ -974,7 +1062,14 @@ void renderMaterialHud() {
         | ImGuiWindowFlags_NoNavInputs
         | ImGuiWindowFlags_NoNavFocus
         | ImGuiWindowFlags_NoInputs;
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(ImGui::GetStyle().ItemSpacing.x*panelScale,ImGui::GetStyle().ItemSpacing.y*panelScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(ImGui::GetStyle().FramePadding.x*panelScale,ImGui::GetStyle().FramePadding.y*panelScale));
     if (ImGui::Begin("##LHoloMaterialHud", nullptr, flags)) {
+        ImGui::SetWindowFontScale(panelScale);
+        if(customLayout.custom) {
+            auto p=ImGui::GetWindowPos(),s=ImGui::GetWindowSize();
+            ImGui::SetWindowPos({std::clamp(p.x,0.f,std::max(0.f,displaySize.x-s.x)),std::clamp(p.y,0.f,std::max(0.f,displaySize.y-s.y))});
+        }
         ImGui::TextUnformatted(i18n::tr(i18n::TextKey::MaterialHudTitle));
         ImGui::Separator();
         if (!snapshot.ready) {
@@ -986,6 +1081,9 @@ void renderMaterialHud() {
                 i18n::tr(i18n::TextKey::MaterialHudComplete)
             );
         } else {
+            lholo::ui::MissingTotal total;for(auto const& row:missing)total.add(row.missing);
+            if(total.exact)ImGui::Text(i18n::tr(i18n::TextKey::MaterialHudSummary),missing.size(),static_cast<unsigned long long>(total.value));
+            else ImGui::Text(i18n::tr(i18n::TextKey::MaterialHudTypes),missing.size());
             constexpr std::size_t kMaxRows = 14;
             for (std::size_t index = 0; index < missing.size() && index < kMaxRows; ++index) {
                 auto const& row = missing[index];
@@ -1005,7 +1103,7 @@ void renderMaterialHud() {
         }
     }
     ImGui::End();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(4);
 }
 
 void renderGui() {
@@ -1072,6 +1170,7 @@ void loadSettings() {
             std::clamp(settings.guiHotkeyModifiers, 0, 7)
         );
         uiState().setAltWheelOffsetEnabled(settings.altWheelOffsetEnabled);
+        for(unsigned i=0;i<2;++i)uiState().setHudLayout(i,settings.hudLayouts[i]);
         uiState().setHotkey(
             kLayerIncreaseHotkeyIndex,
             std::clamp(settings.layerIncreaseHotkey, 0, 255),
@@ -1104,6 +1203,10 @@ void loadSettings() {
             std::clamp(settings.toggleManualHotkey, 0, 255),
             std::clamp(settings.toggleManualHotkeyModifiers, 0, 7)
         );
+        for(std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index)
+            uiState().setHotkey(input::kDirectMenuHotkeyFirst+index,
+                std::clamp(settings.directMenuHotkeys[index],0,255),
+                std::clamp(settings.directMenuHotkeyModifiers[index],0,7));
         session.setSavedProjection({
             settings.hasSavedProjection,
             settings.savedAnchorX,
@@ -1169,6 +1272,7 @@ void saveSettings() {
         settings.hudShowExtraBlocks = hud.showExtraBlocks;
         settings.hudShowProjectedBlockName = hud.showProjectedBlockName;
         settings.hudPosition = hud.position;
+        for(unsigned i=0;i<2;++i)settings.hudLayouts[i]=uiState().hudLayout(i);
         auto const guiHotkey = uiState().hotkey(kGuiHotkeyIndex);
         auto const layerIncreaseHotkey = uiState().hotkey(kLayerIncreaseHotkeyIndex);
         auto const layerDecreaseHotkey = uiState().hotkey(kLayerDecreaseHotkeyIndex);
@@ -1192,6 +1296,11 @@ void saveSettings() {
         settings.closeProjectionHotkeyModifiers = closeProjectionHotkey.modifiers;
         settings.toggleManualHotkey = toggleManualHotkey.key;
         settings.toggleManualHotkeyModifiers = toggleManualHotkey.modifiers;
+        for(std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index) {
+            auto const hotkey=uiState().hotkey(input::kDirectMenuHotkeyFirst+index);
+            settings.directMenuHotkeys[index]=hotkey.key;
+            settings.directMenuHotkeyModifiers[index]=hotkey.modifiers;
+        }
         settings.altWheelOffsetEnabled = uiState().altWheelOffsetEnabled();
         settings.hasSavedProjection = sessionSnapshot.saved.available;
         settings.savedAnchorX = sessionSnapshot.saved.anchorX;
@@ -1239,6 +1348,10 @@ void recordProjectionAnchor(int x, int y, int z) {
     detail::StructureSession::getInstance().recordProjectionAnchor(x, y, z);
     saveSettings();
 }
+bool recordProjectionAnchor(std::shared_ptr<LoadedStructure const> const& expected,std::uint64_t generation,int x,int y,int z) {
+    if(!detail::StructureSession::getInstance().recordProjectionAnchor(expected,generation,x,y,z))return false;
+    saveSettings();return true;
+}
 
 // Hotbar lock for the Alt+wheel projection offset: engages only while the
 // gesture is enabled, a projection is loaded AND the Alt key is held.
@@ -1260,13 +1373,18 @@ void requestStructureFileLoad(std::string pathText) {
     }
 
     auto const path = detail::pathFromUtf8(pathText);
+    auto const request = schematic::beginProjectionRequest();
+    bool handedOff{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
-        (void)startPreparedStructureLoad(
+        handedOff=startPreparedStructureLoad(
             PendingStructureLoadMode::Normal,
             std::move(pathText),
-            ticket
+            ticket,
+            {},
+            request
         );
         return;
     }
@@ -1280,23 +1398,27 @@ void requestStructureFileLoad(std::string pathText) {
         logger().error("Could not load structure {}: {}", pathText, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText); });
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText, request);handedOff=true; });
 }
 
-void restoreSavedProjection() {
+void restoreSavedProjection(std::uint64_t placementId) {
     auto& session = detail::StructureSession::getInstance();
     auto const saved = session.savedProjection();
     auto const& savedPath = saved.structurePath;
 
     auto const path = detail::pathFromUtf8(savedPath);
+    auto const request = schematic::beginProjectionRequest(placementId);
+    bool handedOff{};
+    app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
-        (void)startPreparedStructureLoad(
+        handedOff=startPreparedStructureLoad(
             PendingStructureLoadMode::Restore,
             savedPath,
             ticket,
-            saved
+            saved,
+            request
         );
         return;
     }
@@ -1310,7 +1432,7 @@ void restoreSavedProjection() {
         logger().error("Could not restore structure {}: {}", savedPath, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitRestoredStructureLoad(std::move(loaded), saved); });
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitRestoredStructureLoad(std::move(loaded), saved, request);handedOff=true; });
 }
 
 namespace {
@@ -1358,7 +1480,8 @@ void shutdownPendingStructureLoad() {
     });
 }
 
-void clear() {
+void clear(bool preserveQueuedVerification) {
+    schematic::retireActiveProjection(preserveQueuedVerification);
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusProjectionClosed});
     uiState().clearMaterials();
 }
