@@ -19,6 +19,7 @@ void PlacementState::setEnabled(bool enabled) {
     std::lock_guard lock(mManualInputMutex);
     if (mEnabled.load(std::memory_order_relaxed) == enabled) return;
     mEnabled.store(enabled, std::memory_order_release);
+    invalidateManualInputLocked(true);
     ++mModesRevision;
 }
 
@@ -27,6 +28,7 @@ void PlacementState::setRangeEnabled(bool enabled) {
     std::lock_guard lock(mManualInputMutex);
     if (mRangeEnabled.load(std::memory_order_relaxed) == enabled) return;
     mRangeEnabled.store(enabled, std::memory_order_release);
+    invalidateManualInputLocked(true);
     ++mModesRevision;
 }
 
@@ -54,7 +56,9 @@ bool PlacementState::applyModes(PlacementModes const& modes) {
     mEnabled.store(modes.enabled, std::memory_order_release);
     mRangeEnabled.store(modes.range, std::memory_order_release);
     mManualMode.store(modes.manual, std::memory_order_release);
-    if (manualChanged) invalidateManualInputLocked(true);
+    // Any effective mode change retires the old input, even if the manual flag
+    // stays set while Range or Easy becomes the active executor route.
+    invalidateManualInputLocked(true);
     ++mModesRevision;
     return true;
 }
@@ -250,6 +254,14 @@ std::string PlacementState::aimedProjectedBlockName() const {
     return mAimedProjectedBlockName;
 }
 
+std::size_t PlacementState::rangePlanCursor() const {
+    return mRangePlanCursor.load(std::memory_order_acquire);
+}
+
+void PlacementState::setRangePlanCursor(std::size_t cursor) {
+    mRangePlanCursor.store(cursor, std::memory_order_release);
+}
+
 void PlacementState::setAimedProjectedBlockName(std::string name) {
     std::lock_guard lock(mAimedProjectedBlockNameMutex);
     mAimedProjectedBlockName = std::move(name);
@@ -259,6 +271,7 @@ void PlacementState::resetDimensionSession() {
     resetManualInput();
     mNextPlaceAt.store(0, std::memory_order_release);
     mNextSwapAt.store(0, std::memory_order_release);
+    mRangePlanCursor.store(0, std::memory_order_release);
     mNextAutoPlacementSuppressionExpiry.store(0, std::memory_order_release);
     {
         std::lock_guard lock(mSessionCacheMutex);

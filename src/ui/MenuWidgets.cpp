@@ -88,7 +88,7 @@ void renderCheckboxRow(char const* id, char const* label, bool& value, UiMetrics
     ImGui::PopStyleVar(2);
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
+    ImGui::TextWrapped("%s",label);
 }
 
 void drawCenteredInputValue(char const* text, ImVec2 minimum, ImVec2 maximum) {

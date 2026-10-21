@@ -24,6 +24,9 @@
 #include "overlay/ImGuiFrameRecovery.h"
 #include "block/BlockPlacementRules.h"
 #include "ManualPlacementChecks.h"
+#include "ManualVerificationChecks.h"
+#include "DirectMenuChecks.h"
+#include "ActiveProjectionChecks.h"
 #include "CompanionCallbackChecks.h"
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
@@ -44,6 +47,7 @@
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "SectionSnapshotChecks.h"
 #include "projection/mesh/TransparentQuadSort.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
@@ -55,10 +59,21 @@
 #include "structure/StructureUiState.h"
 #include "structure/java_to_bedrock/JavaBlockEntityToBedrock.h"
 #include "ui/HotkeyFormat.h"
+#include "HudControlChecks.h"
 
 #include <Windows.h>
 #include "SchematicChecks.h"
 #include "io/AtomicOutput.h"
+
+#ifdef near
+#undef near
+#endif
+#ifdef far
+#undef far
+#endif
+#ifdef DELETE
+#undef DELETE
+#endif
 
 namespace {
 
@@ -1287,6 +1302,8 @@ void testSettingsStore() {
     settings.guiHotkeyModifiers = 1;
     settings.toggleManualHotkey = 'R';
     settings.toggleManualHotkeyModifiers = 0;
+    settings.directMenuHotkeys = {'P','F','V','M'};
+    settings.directMenuHotkeyModifiers = {1,2,4,7};
     settings.hudShowProjectedBlockName = false;
     settings.hudShowExtraBlocks = false;
     settings.autoPlacementBreakCooldownSeconds = 27;
@@ -1328,6 +1345,8 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.guiHotkeyModifiers == 1);
     LHOLO_CHECK(loaded.toggleManualHotkey == 'R');
     LHOLO_CHECK(loaded.toggleManualHotkeyModifiers == 0);
+    LHOLO_CHECK(loaded.directMenuHotkeys == settings.directMenuHotkeys);
+    LHOLO_CHECK(loaded.directMenuHotkeyModifiers == settings.directMenuHotkeyModifiers);
     LHOLO_CHECK(!loaded.hudShowProjectedBlockName);
     LHOLO_CHECK(!loaded.hudShowExtraBlocks);
     LHOLO_CHECK(loaded.autoPlacementBreakCooldownSeconds == 27);
@@ -1419,6 +1438,8 @@ void testSettingsStore() {
     LHOLO_CHECK(migrated.toggleManualHotkeyModifiers == 0);
     // Likewise, a config written before the Alt+wheel switch existed keeps the
     // gesture enabled, so upgrading never silently changes input behavior.
+    LHOLO_CHECK((migrated.directMenuHotkeys == std::array<int,4>{}));
+    LHOLO_CHECK((migrated.directMenuHotkeyModifiers == std::array<int,4>{}));
     LHOLO_CHECK(migrated.altWheelOffsetEnabled);
     // Move bindings survive the rename of the move slots from world axes to
     // view-relative directions: the old key names are still read as a fallback.
@@ -1566,7 +1587,11 @@ void testStructureSession() {
     session.setLayerAxis(LayerAxis::X);
     session.setDisplayLayer(4);
 
-    session.recordProjectionAnchor(10, 20, 30);
+    auto const activeGeneration=session.loaded()->generation;
+    LHOLO_CHECK(!session.recordProjectionAnchor({},activeGeneration,90,91,92));
+    LHOLO_CHECK(!session.recordProjectionAnchor(loaded,activeGeneration+1,90,91,92));
+    LHOLO_CHECK(!session.savedProjection().available);
+    LHOLO_CHECK(session.recordProjectionAnchor(loaded,activeGeneration,10,20,30));
     auto const saved = session.savedProjection();
     LHOLO_CHECK(saved.available);
     LHOLO_CHECK(saved.anchorX == 10);
@@ -1585,12 +1610,16 @@ void testStructureSession() {
         "layered.mcstructure",
         lholo::i18n::Message{lholo::i18n::TextKey::StatusRestoredPending}
     );
+    LHOLO_CHECK(!session.recordProjectionAnchor(loaded,activeGeneration,90,91,92));
+    LHOLO_CHECK(session.savedProjection().anchorX==10);
     session.setLayerDisplayMode(LayerDisplayMode::UpToCurrent);
     session.setDisplayLayer(7);
     session.setLayerAxis(LayerAxis::Y);
     session.recordProjectionAnchor(40, 50, 60);
     session.clearLoaded(lholo::i18n::Message{lholo::i18n::TextKey::StatusProjectionClosed});
     session.setDisplayLayer(0); // Empty-menu clamping must not alter the saved layer.
+    LHOLO_CHECK(!session.recordProjectionAnchor(layered,layered->generation,90,91,92));
+    LHOLO_CHECK(session.savedProjection().anchorX==40);
     auto const layeredSaved = session.savedProjection();
     LHOLO_CHECK(layeredSaved.transform.layerDisplayMode == LayerDisplayMode::UpToCurrent);
     LHOLO_CHECK(layeredSaved.transform.displayLayer == 7);
@@ -2336,6 +2365,7 @@ void testI18n() {
 int main() {
     try {
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
     testLiquidReplayRules();
     testProjectionCoordinateBounds();
@@ -2356,12 +2386,15 @@ int main() {
     testImGuiFrameRecovery();
     testSingleTaskWorker();
     testSectionBlockSnapshot();
+    lholo::tests::runSectionSnapshotChecks([](bool ok) { LHOLO_CHECK(ok); });
     testMeshDiagnosticGate();
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runVerifierHighlightChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runProjectedPistonChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runManualPlacementChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runManualVerificationChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
     testNativeLiquidInternalFaceCull();
@@ -2380,6 +2413,7 @@ int main() {
     testBlockPlacementRules();
     testJavaTextComponents();
     testI18n();
+    lholo::tests::runHudControlChecks([](bool ok) { LHOLO_CHECK(ok); });
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
     } catch (std::exception const& exception) {

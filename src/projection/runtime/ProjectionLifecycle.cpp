@@ -90,6 +90,7 @@ bool prepareProjectionState(
     state.correctionStates.resize(
         state.structure->renderBlocks.size(), CorrectionState::Unknown
     );
+    state.missingLayers.resize(state.structure->renderBlocks.size(), MissingLayerBoth);
     state.progressCorrect.resize(state.structure->renderBlocks.size(), 0);
     state.progressErrorKind.resize(state.structure->renderBlocks.size(), 0);
     state.blockActorRendererAvailable.resize(state.structure->renderBlocks.size(), 0);

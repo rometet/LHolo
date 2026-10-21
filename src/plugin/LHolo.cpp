@@ -44,6 +44,10 @@ bool LHolo::disable() {
     return app::AppKernel::getInstance().disable();
 }
 
+bool LHolo::unload() {
+    return app::AppKernel::getInstance().unload();
+}
+
 } // namespace lholo
 
 LL_REGISTER_MOD(lholo::LHolo, lholo::LHolo::getInstance());

@@ -1,4 +1,5 @@
 #include "structure/capture/StructureCapture.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "i18n/Message.h"
 #include "structure/capture/McstructureExporter.h"
@@ -6,6 +7,9 @@
 #include "structure/capture/CaptureRequests.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
 #include "app/ListenerRetirement.h"
+#include "ll/api/service/Bedrock.h"
+#include "mc/client/game/ClientInstance.h"
+#include <Windows.h>
 
 #include <algorithm>
 #include <mutex>
@@ -40,6 +44,7 @@ void resetLocked();
 class CaptureLevelListener final : public LevelListener {
 public:
     void onLevelDestruction(std::string const&) override {
+        resourcepacks::state().invalidate();
         std::lock_guard lifecycleLock(gLifecycleMutex);
         std::lock_guard lock(gMutex);
         gLevel = nullptr;
@@ -105,6 +110,14 @@ std::optional<Bounds> getBounds() {
     if (!gLevel || !gDraft.first || !gDraft.second) return std::nullopt;
     if (!detail::captureBoundsSupported(*gDraft.first, *gDraft.second)) return std::nullopt;
     return normalizedBounds(gDraft);
+}
+
+bool publishMenuRouteIfCurrent(std::optional<structure::detail::ClientViewSnapshot> const& expected,
+    std::function<bool(std::optional<structure::detail::ClientViewSnapshot> const&)> const& publish) {
+    std::lock_guard lock(gMutex);
+    auto const current=gClientView.snapshot();
+    if(current.has_value()!=expected.has_value() || (current && current->worldEpoch!=expected->worldEpoch))return false;
+    return publish(current);
 }
 
 void updateDraft(Draft const& draft, std::uint64_t revision) {
@@ -191,12 +204,18 @@ void tick(LocalPlayer& player) {
     }
 
     std::optional<detail::CaptureRequests::Export> request;
+    // Native queries stay in the owning player's tick. Immediate text focus
+    // is tracked by HID callbacks, independently of this copied tick state.
+    auto const client=ll::service::getClientInstance();
+    bool const gameplayInputEnabled=client && client->getLocalPlayer()==&player
+        && client->isInGameInputEnabled();
+    auto const sampledAtMillis=GetTickCount64();
     {
         std::lock_guard lock(gMutex);
         syncContextLocked(context);
         auto const forward = player.getViewVector(1.0f);
         gClientView.publish(context.level, context.dimension, player.getRotation().y,
-            {forward.x, forward.y, forward.z});
+            {forward.x, forward.y, forward.z},gameplayInputEnabled,sampledAtMillis);
         auto const points = gRequests.takePoints();
         if (points) {
             auto const position = player.getFeetPos();
