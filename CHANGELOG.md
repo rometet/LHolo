@@ -1,5 +1,20 @@
 # Changelog
 
+## [v26.51.2-ja.9-rc.1] - 2026-10-21
+
+### Glass R5 and native resource reload ABI v4
+- Preserve Glass R5 private projection blend, stationary-camera transparency
+  guards, immutable original quad source and liquid proxy face occlusion.
+- Restore the real lholo_resource_reload_v4 participant with owned GPU/CPU
+  readers, exact epoch state receipts, BeginNative ordering and fail-closed
+  cancellation for Praxis R33 native Global Resources switching.
+- Preserve the LHolo Companion GUI v2/v3 and HUD control v1 APIs.
+- With Praxis R33, on 2026-10-21 the single offline-clone resource pack
+  OFF test completed and the player's third-person model remained visible.
+- No stable generic-world/server-pack support claimed; Glass R5 config-save
+  and hook teardown errors are still separate known issues.
+
+
 ## [26.51.2] - 2026-09-23
 
 ### Fixed

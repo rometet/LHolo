@@ -19,6 +19,9 @@
 #include "place/PlacementState.h"
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementDirectionRules.h"
+#include "place/PlacementRotation.h"
+#include "place/PlacementRotationDelivery.h"
+#include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
 #include "place/PlacementQuantization.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
@@ -300,11 +303,12 @@ ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
 // slots swap their items, so it stays valid whether the target slot is empty
 // or occupied, and the server keeps its item-stack-net bookkeeping consistent
 // (unlike a direct container mutation, which the net manager reverts).
-void sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, ItemStack const& toItem) {
+// True means a packet reached the sender call, not server acceptance/apply.
+bool sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, ItemStack const& toItem) {
     auto transaction = ComplexInventoryTransaction::fromType(
         ComplexInventoryTransaction::Type::NormalTransaction, InventoryTransaction{}
     );
-    if (!transaction) return;
+    if (!transaction) return false;
     auto& invTx = transaction->mTransaction.get();
     InventorySource const source{
         InventorySourceType::ContainerInventory,
@@ -317,8 +321,9 @@ void sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, Item
         InventoryTransactionPacketPayload(std::move(transaction), true)
     );
     auto client = ll::service::getClientInstance();
-    if (!client) return;
+    if (!client) return false;
     client->getPacketSender().sendToServer(packet);
+    return true;
 }
 
 // Pick which hotbar slot a backpack item should swap into. Prefer an empty slot
@@ -343,6 +348,7 @@ struct ProjectionTarget {
     uchar        face;
     Block const* block;
     Vec3         clickPos{};  // Exact click point; chosen to reproduce the ghost.
+    std::optional<float> interactionYaw{};
 };
 
 // Which face of a cell points most along the given (unit) direction.
@@ -507,6 +513,14 @@ bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, I
     // the server misaligns the stream while reading and silently drops the
     // packet before the transaction is ever validated.
     transaction.mItem.get().mIncludeNetIds = true;
+
+    if (target.interactionYaw) {
+        detail::queueRotationPlacement(player,target.cell,packBlockPos(target.cell),
+            target.block->mNetworkId,slot,item,*target.interactionYaw,std::move(transactionBase));
+        // A fresh native AuthInput must carry both the use and interaction yaw.
+        // Queue admission does not consume a Manual tap or start the cell lock.
+        return false;
+    }
 
     InventoryTransactionPacket packet(
         InventoryTransactionPacketPayload(std::move(transactionBase), true)
@@ -709,15 +723,15 @@ bool placementPredictionMatches(
         return sameSerializedState(predicted, ghost, "pillar_axis");
     }
     if (isTwoBlockDoor(ghost)) {
-        // A door item places both cells. The lower ghost owns direction/open,
-        // the upper owns the hinge. 26.51 structures may expose either the new
+        // A door item places both cells. The lower ghost owns direction,
+        // the upper owns the hinge. Open is a post-placement interaction state,
+        // not selected by the DoorItem use, in every assisted-placement mode.
+        // 26.51 structures may expose either the new
         // cardinal string key or the legacy integer direction key.
         bool matched = sameSerializedState(predicted, ghost, "upper_block_bit")
             && sameFirstPresentSerializedState(
                 predicted, ghost, "minecraft:cardinal_direction", "direction"
-            )
-            && (placementState().manualMode()
-                || sameSerializedState(predicted, ghost, "open_bit"));
+            );
         if (matched && expectedDoorUpper) {
             std::string const expectedHinge = serializedState(*expectedDoorUpper, "door_hinge_bit");
             matched = !expectedHinge.empty()
@@ -927,7 +941,23 @@ bool resolveOrientedPlacement(
         return false;
     };
 
-    return searchCurrentRotation(out);
+    if (searchCurrentRotation(out)) return true;
+    // Keep the verified current-rotation path for every other family. Search
+    // native trapdoor permutations with scoped logic yaw, not a guessed mapping
+    // between serialized direction and yaw. Wrong half/direction still rejects.
+    auto const name=ghost.getTypeName();
+    if (!name.starts_with("minecraft:")) return false;
+    if (name!="minecraft:trapdoor" && !name.ends_with("_trapdoor")) return false;
+    auto& logicRotation=const_cast<Vec2&>(player.getRotation());
+    for (float yaw : {0.0f,90.0f,180.0f,-90.0f}) {
+        detail::ScopedPlacementYaw rotation(logicRotation,yaw);
+        bool matched=false;
+        auto const ok=app::invokeNativeCallback([&] { matched=searchCurrentRotation(out); },
+            [](char const* reason) noexcept { app::reportNativeCallbackFailure("trapdoor rotation prediction",reason); });
+        if (!ok) return false;
+        if (matched) { out.interactionYaw=yaw;return true; }
+    }
+    return false;
 }
 
 void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementContext) {
@@ -937,11 +967,16 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     auto& region = player.getDimensionBlockSource();
 
     auto candidates = projection::queryMissingCellsInRange(player, center, radius);
+    if (candidates.empty()) return;
+    auto const start = placementState().rangePlanCursor() % candidates.size();
     bool const suppressionsActive = placementState().autoPlacementSuppressionsActive(now);
     auto const inventorySnapshot = snapshotInventory(player);
     int complexPlannedCandidates = 0;
     int fastPlannedCandidates = 0;
-    for (auto const& cand : candidates) {
+    bool resumeFixed = false;
+    for (std::size_t offset = 0; offset < candidates.size(); ++offset) {
+        auto const candidateIndex = (start + offset) % candidates.size();
+        auto const& cand = candidates[candidateIndex];
         BlockPos const cell{cand.x, cand.y, cand.z};
 
         // Skip stale/already-filled cells before inventory scans and geometry
@@ -981,6 +1016,17 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             ++complexPlannedCandidates;
         }
 
+        // Restart after the last admitted plan, not at the sorted prefix on
+        // every tick. With 16 plans/50ms and a 250ms failure cache, a permanent
+        // prefix of 80 failures otherwise starves all later complex candidates.
+        // Freeze at the FIRST exhausted budget: later fast plans must not move
+        // the cursor back past the complex candidates deferred this tick.
+        if (!resumeFixed) {
+            placementState().setRangePlanCursor((candidateIndex + 1) % candidates.size());
+            resumeFixed = complexPlannedCandidates >= kRangePlanBudgetPerTick
+                || fastPlannedCandidates >= kRangeFastPlanBudgetPerTick;
+        }
+
         // Use the actual inventory stack's aux value for the same prediction
         // the server will perform. Reject impossible placements before sending.
         ProjectionTarget target;
@@ -1004,7 +1050,12 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             auto& inventory = player.getInventory();
             int const hotbarSlot = chooseHotbarSwapTarget(player);
             auto const& toItem = inventory.getItem(hotbarSlot);
-            sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem);
+            if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) {
+                // No packet was sent. Keep later hotbar candidates eligible in
+                // this tick; a local factory/sender failure is not a pending swap.
+                cacheFailedPlan(failedKey, now);
+                continue;
+            }
             placementState().setNextSwapAt(now + kSwapRetryMs);
             return;
         }
@@ -1021,11 +1072,13 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
 void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     auto client = ll::service::getClientInstance();
     if (!client) {
+        placementState().cancelManualPress();
         updateAimedProjectedBlockName(nullptr);
         return;
     }
     auto* player = &activePlayer;
     if (client->getLocalPlayer() != player) {
+        placementState().cancelManualPress();
         updateAimedProjectedBlockName(nullptr);
         return;
     }
@@ -1034,6 +1087,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     // Only act during gameplay: menus, pause screens and the LHolo GUI itself
     // disable in-game input.
     if (!client->isInGameInputEnabled() || structure::isGuiVisible()) {
+        placementState().cancelManualPress();
         updateAimedProjectedBlockName(nullptr);
         return;
     }
@@ -1155,7 +1209,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         auto& inventory = player->getInventory();
         int const hotbarSlot = chooseHotbarSwapTarget(*player);
         auto const& toItem = inventory.getItem(hotbarSlot);
-        sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem);
+        if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
         placementState().setNextSwapAt(now + kSwapRetryMs);
         return;
     }

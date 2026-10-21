@@ -9,6 +9,7 @@ struct MenuInputGuardStatus {
     bool mouseInputHookInstalled{};
     bool keyDownInputHookInstalled{};
     bool keyUpInputHookInstalled{};
+    bool textInputHooksInstalled{};
 };
 
 class MenuInputHandoffScope final {

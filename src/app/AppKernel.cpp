@@ -2,9 +2,12 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "app/AppKernel.h"
+#include "resourcepacks/WorldPackReloadState.h"
+#include "ui/BlockIconRuntime.h"
 
 #include "app/HookLifecycle.h"
 #include "app/InitializationRetention.h"
+#include "app/MaterialExportDisable.h"
 #include "i18n/LanguageStore.h"
 #include "input/MenuInputGuard.h"
 #include "overlay/ImGuiOverlay.h"
@@ -24,6 +27,7 @@ namespace {
 // failure. Preserve the module/library/logger if rollback cannot detach every
 // callback. Never release this last owner from inside the DLL being retained.
 std::shared_ptr<ll::mod::NativeMod> gFailedInitializationOwner;
+std::shared_ptr<ll::mod::NativeMod> gExportShutdownOwner;
 }
 
 AppKernel& AppKernel::getInstance() {
@@ -51,9 +55,17 @@ bool AppKernel::enable() {
     }
 
     return initializeWithRetainedRollback(owner, gFailedInitializationOwner, [&] {
+        if (!io::materialExportJob().openSession()) {
+            logger.error("Material export from a previous session is still owned; refusing enable");
+            return false;
+        }
         projection::detail::resetMeshWorkerForSession();
         if (!projection::detail::projectionController().installHooks()) {
             logger.error("Failed to install required projection hooks");
+            return false;
+        }
+        if (!ui::icons::installHooks()) {
+            logger.error("Failed to install block icon resource lifetime hooks");
             return false;
         }
         if (!place::installHook()) {
@@ -71,9 +83,13 @@ bool AppKernel::enable() {
         if (!overlay::ensureInstalled()) {
             logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
         }
+        if(!resourcepacks::state().enable(owner))return false;
         logger.info("LHolo enabled. Type lholo to open the projection menu.");
+        // Glass R5 remains the authoritative transparency path.
         logger.info("LHoloGlassR5 build=private-projection-blend-depthwrite0 test-only");
         logger.info("LHoloGlassR3 build=stationary-camera-fail-closed diagnostics=bounded-4s");
+        if(!menuInputGuardStatus.textInputHooksInstalled)
+            logger.warn("Direct page hotkeys disabled: native text input tracking hooks are not ready");
         logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
         return true;
     }, [this]() noexcept {
@@ -98,6 +114,21 @@ bool AppKernel::disable() {
         return false;
     }
 
+    // A common save dialog (or filesystem operation) has no guaranteed OS
+    // completion deadline. Cancel cooperatively and wait at most 250 ms. A
+    // timeout returns BEFORE quiescing/removing hooks or releasing UI state.
+    // The owned future and NativeMod stay resident; never detach that worker.
+    auto const owner = ll::mod::NativeMod::current();
+    if (!prepareMaterialExportDisable(io::materialExportJob(), owner, gExportShutdownOwner,
+                                      std::chrono::milliseconds{250})) {
+        logger.error("LHolo disable refused: material export is cancelling/finishing or module ownership is unavailable. Hooks remain intact; close any save prompt and retry disable/unload.");
+        return false;
+    }
+
+    if(!resourcepacks::state().beginDisable()) {
+        logger.error("LHolo resource reload invalidated; retaining native/GPU owners and module, refusing disable");
+        return false;
+    }
     // First make every newly-entering typed detour origin-only. Keep world and
     // projection state intact through both admitted-body and origin-only drains.
     hook_lifecycle::beginQuiesce();
@@ -110,6 +141,7 @@ bool AppKernel::disable() {
     bool hooksRemoved = true;
     hooksRemoved = input::uninstallMenuInputGuard() && hooksRemoved;
     hooksRemoved = place::uninstallHook() && hooksRemoved;
+    hooksRemoved = ui::icons::uninstallHooks() && hooksRemoved;
     hooksRemoved = projection::detail::projectionController().uninstallHooks()
         && hooksRemoved;
     if (!hooksRemoved) {
@@ -124,6 +156,7 @@ bool AppKernel::disable() {
     // released until every already-entered typed detour has returned.
     hook_lifecycle::waitForQuiescence();
     structure::capture::shutdown();
+    ui::icons::closeSession();
 
     // No typed render callback can reinstall the overlay after this point.
     // The overlay has its own callback drain for Present/WndProc/D3D detours and
@@ -146,7 +179,23 @@ bool AppKernel::disable() {
     structure::capture::clear();
 
     hook_lifecycle::markDisabled();
+    resourcepacks::state().disableInactive();
     logger.info("LHolo disabled");
+    return true;
+}
+
+bool AppKernel::unload() {
+    auto& logger = LHolo::getInstance().getSelf().getLogger();
+    // RegisterHelper binds this boolean onUnload callback. Reject attempts
+    // that bypass disable or follow any incomplete teardown.
+    // Even an unload that bypasses disable cancels/closes export admission and
+    // retains the module if that worker has not returned. This gate never waits.
+    bool const exportDrained=prepareMaterialExportDisable(io::materialExportJob(), ll::mod::NativeMod::current(),
+                                                          gExportShutdownOwner, std::chrono::milliseconds{0});
+    if (!exportDrained || hook_lifecycle::state() != hook_lifecycle::State::Disabled) {
+        logger.error("LHolo unload refused: disable/owned material export drain must complete first");
+        return false;
+    }
     return true;
 }
 

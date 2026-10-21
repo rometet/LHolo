@@ -7,10 +7,14 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionSectionBuilder.h"
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+#include "projection/mesh/NativeGeometryProbe.h"
+#endif
 #include "projection/core/ComparisonStyle.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
 #include "projection/core/ProjectionLiquidUv.h"
@@ -71,6 +75,9 @@ std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic_bool gSubmergedPlantLogged{};
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+std::atomic<std::uint32_t> gGeometryProbeBuilds{};
+#endif
 
 // A UV failure must return the cell to LiquidProxy ownership. Restore every
 // typed Tessellator stream and the small amount of public builder state that
@@ -460,7 +467,8 @@ void buildProjectionSection(
         return;
     }
     for (auto const index : state.sectionBlockIndices[section]) {
-        if (index >= blockCount || !state.hasBuildBlockState(index)) {
+        if (index >= blockCount || !state.hasBuildBlockState(index)
+            || !state.hasBuildMissingLayers(index)) {
             logger().error(
                 "Projection section build rejected index {} >= {} in section {}",
                 index,
@@ -508,14 +516,11 @@ void buildProjectionSection(
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correctionState = state.buildCorrectionState(index);
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
         // only their red/yellow outline below. This removes the
         // coincident textured surfaces that caused correction flicker.
-        if (correctionState == CorrectionState::Correct
-            || correctionState == CorrectionState::WrongType
-            || correctionState == CorrectionState::WrongState) {
+        if (!state.buildBodyShouldRender(index)) {
             continue;
         }
         auto const& entry = state.structure->renderBlocks[index];
@@ -604,6 +609,18 @@ void buildProjectionSection(
         *state.expectedWorldBlockActors,
         &state.nativeLiquidTelemetry
     );
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+    NativeGeometryProbe geometryProbe;
+    if (std::any_of(compositeBodyOutcomes.begin(), compositeBodyOutcomes.end(), [&](auto const& cell) {
+            return state.buildCorrectionState(cell.structureIndex) == CorrectionState::Missing;
+        })) {
+        geometryProbe.batch = gGeometryProbeBuilds.fetch_add(1, std::memory_order_relaxed);
+        geometryProbe.active = geometryProbe.batch < 16;
+        geometryProbe.generation = state.structureGeneration;
+        geometryProbe.section = section;
+    }
+    ScopedNativeGeometryProbe probeScope{geometryProbe};
+#endif
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
          ++bucketIndex) {
@@ -652,9 +669,26 @@ void buildProjectionSection(
             );
             auto const firstPosition = tessellator.mMeshData->mPositions.get().size();
             auto const firstColor = tessellator.mMeshData->mColors.get().size();
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+            auto const firstUv = tessellator.mMeshData->mTextureUVs[0].get().size();
+            auto const extraBefore = blockTessellator.mRenderingExtra;
+#endif
             auto const rendered = blockTessellator.tessellateInWorld(
                 tessellator, renderBlock, layered.position, true
             );
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+            if (geometryProbe.select(layered.structureIndex)) {
+                auto const& entry = state.structure->renderBlocks[layered.structureIndex];
+                auto const& data = tessellator.mMeshData.get();
+                geometryProbe.dump("body", "native", layered.structureIndex,
+                    layered.block->getTypeName(), entry.liquid ? entry.liquid->getTypeName() : "none",
+                    static_cast<int>(layered.layer), static_cast<int>(data.mMode),
+                    extraBefore, blockTessellator.mRenderingExtra, rendered, data.mIndices.get().size(),
+                    data.mPositions.get(), data.mTextureUVs[0].get(), data.mColors.get(),
+                    firstPosition, firstUv, firstColor, 0, 0, 0,
+                    [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+            }
+#endif
             // Several legacy shape tessellators (notably doors) return
             // false after successfully appending vertices. The return
             // value describes the dispatch path, not mesh production.
@@ -836,6 +870,21 @@ void buildProjectionSection(
             sectionBuildSettings
         );
     }
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+    if (auto const* compat = state.praxisCompatLiquidSections[section].get(); compat && compat->ready()) {
+        auto const& data = *compat->nativeStream;
+        geometryProbe.dump("liquid", "final", 0, "section", "section", 3, static_cast<int>(data.mMode),
+            false, false, true, data.mIndices.get().size(),
+            data.mPositions.get(), data.mTextureUVs[0].get(), data.mColors.get(),
+            0, 0, 0, origin.x, origin.y, origin.z,
+            [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+    }
+    try {
+        if (geometryProbe.active) logger().info("PRAXIS_GEOMETRY_OWNER batch={} generation={} compatReady={} nativeMesh={} section={} cellsLimit=16 nativeVerticesLimit=256 finalVerticesLimit=4096",
+            geometryProbe.batch, geometryProbe.generation, state.praxisCompatLiquidSections[section] ? 1 : 0,
+            state.nativeLiquidSectionMeshes[section] ? 1 : 0, section);
+    } catch (...) { /* Diagnostic failure preserves the original draw path. */ }
+#endif
     auto const& liquidOwnership = state.praxisCompatLiquidSections[section]
         ? praxisCompatLiquidSucceeded
         : nativeLiquidSucceeded;
@@ -882,7 +931,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!entry.liquid || !state.buildLiquidShouldRender(index)) continue;
         candidates.push_back(index);
     }
 
@@ -1256,7 +1305,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
-        if (!entry.liquid || state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!entry.liquid || !state.buildLiquidShouldRender(index)) continue;
         candidates.push_back(index);
     }
     std::vector<std::size_t> succeeded;
@@ -1319,6 +1368,11 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         auto& uvs = tessellator.mMeshData->mTextureUVs[0].get();
         auto const positionsBefore = positions.size();
         auto const uvsBefore = uvs.size();
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        auto const firstProbeColor = tessellator.mMeshData->mColors.get().size();
+        auto const extraBefore = blockTessellator.mRenderingExtra;
+        auto* probe = gActiveNativeGeometryProbe;
+#endif
         bool rendered{};
         try {
             rendered = blockTessellator.tessellateInWorld(
@@ -1369,6 +1423,17 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             continue;
         }
 
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        if (probe && probe->select(index)) {
+            auto const& data = tessellator.mMeshData.get();
+            probe->dump("liquid", "native", index,
+                entry.block ? entry.block->getTypeName() : "none", expectedLiquid->getTypeName(),
+                3, static_cast<int>(data.mMode), extraBefore, blockTessellator.mRenderingExtra,
+                rendered, data.mIndices.get().size(), positions, uvs, data.mColors.get(),
+                positionsBefore, uvsBefore, firstProbeColor, 0, 0, 0,
+                [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+        }
+#endif
         auto const addedVertices = positionsAfter - positionsBefore;
         auto const addedUvs = uvsAfter > uvsBefore ? uvsAfter - uvsBefore : 0U;
         auto const uvRemapped = addedUvs == addedVertices
@@ -1382,6 +1447,17 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             continue;
         }
 
+#ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
+        if (probe && probe->select(index)) {
+            auto const& data = tessellator.mMeshData.get();
+            probe->dump("liquid", "atlas", index,
+                entry.block ? entry.block->getTypeName() : "none", expectedLiquid->getTypeName(),
+                3, static_cast<int>(data.mMode), extraBefore, blockTessellator.mRenderingExtra,
+                rendered, data.mIndices.get().size(), positions, uvs, data.mColors.get(),
+                positionsBefore, uvsBefore, firstProbeColor, 0, 0, 0,
+                [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
+        }
+#endif
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
@@ -1468,9 +1544,9 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         auto const source = colors[vertex];
         auto const isWater = liquidKinds[vertex] == PraxisCompatLiquidKind::Water;
         auto const seed = selectPraxisCompatLiquidColorSeed(source, isWater);
-        auto const derived = applyPraxisCompatLiquidAlpha(
-            applyPraxisCompatMissingAbgr(seed.packed),
-            isWater
+        auto const derived = applyLiquidProjectionOpacity(
+            applyPraxisCompatLiquidAlpha(applyPraxisCompatMissingAbgr(seed.packed), isWater),
+            settings.structureOpacity
         );
         compat->derivedColors.push_back(derived);
         if (seed.waterSeedApplied) {
@@ -1613,7 +1689,7 @@ void buildLiquidProxySectionMesh(
     std::vector<std::size_t> liquidProxyIndices;
     for (auto const index : state.sectionBlockIndices[section]) {
         if (state.structure->renderBlocks[index].liquid == nullptr) continue;
-        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (!state.buildLiquidShouldRender(index)) continue;
         if (std::binary_search(
                 nativeLiquidSucceeded.begin(),
                 nativeLiquidSucceeded.end(),
@@ -1633,7 +1709,7 @@ void buildLiquidProxySectionMesh(
             false
         );
         auto const alpha = static_cast<uint>(std::lround(
-            std::clamp(structureOpacity, 0.05f, 1.0f) * 255.0f
+            normalizedLiquidProjectionOpacity(structureOpacity) * 255.0f
         ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
@@ -1771,6 +1847,10 @@ void buildLiquidProxySectionMesh(
             auto const tint = isLava
                 ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
                 : (LiquidWaterTintAbgrRgb | (alpha << 24U));
+            auto const topColor = liquidProxyFaceColor(tint, LiquidProxyFace::Top);
+            auto const bottomColor = liquidProxyFaceColor(tint, LiquidProxyFace::Bottom);
+            auto const nsColor = liquidProxyFaceColor(tint, LiquidProxyFace::NorthSouth);
+            auto const ewColor = liquidProxyFaceColor(tint, LiquidProxyFace::EastWest);
             float const x0 = static_cast<float>(p.x);
             float const y0 = static_cast<float>(p.y);
             float const z0 = static_cast<float>(p.z);
@@ -1785,9 +1865,9 @@ void buildLiquidProxySectionMesh(
                 Vec3 const& p0, float ua, float va,
                 Vec3 const& p1, float ub, float vb,
                 Vec3 const& p2, float uc, float vc,
-                Vec3 const& p3, float ud, float vd
+                Vec3 const& p3, float ud, float vd, std::uint32_t color
             ) {
-                setColorAbgr(tessellator, tint);
+                setColorAbgr(tessellator, color);
                 tessellator.tex2({ua, va}); tessellator.vertex(p0.x, p0.y, p0.z);
                 tessellator.tex2({ub, vb}); tessellator.vertex(p1.x, p1.y, p1.z);
                 tessellator.tex2({uc, vc}); tessellator.vertex(p2.x, p2.y, p2.z);
@@ -1799,7 +1879,7 @@ void buildLiquidProxySectionMesh(
                     {x0,y0,z1}, u0s,v1s,
                     {x0,y0,z0}, u0s,v0s,
                     {x1,y0,z0}, u1s,v0s,
-                    {x1,y0,z1}, u1s,v1s
+                    {x1,y0,z1}, u1s,v1s, bottomColor
                 );
             }
             if (!neighborOccludesFace(0, 1, 0)) {
@@ -1807,13 +1887,13 @@ void buildLiquidProxySectionMesh(
                     {x0,yc00,z0}, u0s,v0s,
                     {x0,yc01,z1}, u0s,v1s,
                     {x1,yc11,z1}, u1s,v1s,
-                    {x1,yc10,z0}, u1s,v0s
+                    {x1,yc10,z0}, u1s,v0s, topColor
                 );
             }
 
             auto addSideFace = [&](
                 float xa, float za, float yca,
-                float xb, float zb, float ycb
+                float xb, float zb, float ycb, std::uint32_t color
             ) {
                 float const ha = std::clamp(yca - y0, 0.0f, 1.0f);
                 float const hb = std::clamp(ycb - y0, 0.0f, 1.0f);
@@ -1821,13 +1901,15 @@ void buildLiquidProxySectionMesh(
                     {xa,y0, za}, u0f,v1f,
                     {xa,yca,za}, u0f,v1f - dvf * ha,
                     {xb,ycb,zb}, u1f,v1f - dvf * hb,
-                    {xb,y0, zb}, u1f,v1f
+                    {xb,y0, zb}, u1f,v1f, color
                 );
             };
-            if (!neighborOccludesFace( 0, 0,-1)) addSideFace(x0,z0,yc00,x1,z0,yc10);
-            if (!neighborOccludesFace( 0, 0, 1)) addSideFace(x1,z1,yc11,x0,z1,yc01);
-            if (!neighborOccludesFace(-1, 0, 0)) addSideFace(x0,z1,yc01,x0,z0,yc00);
-            if (!neighborOccludesFace( 1, 0, 0)) addSideFace(x1,z0,yc10,x1,z1,yc11);
+            // Preserve R5's opaque/same-liquid occlusion and R9's distinct
+            // north-south/east-west face shading without changing pass order.
+            if (!neighborOccludesFace( 0, 0,-1)) addSideFace(x0,z0,yc00,x1,z0,yc10,nsColor);
+            if (!neighborOccludesFace( 0, 0, 1)) addSideFace(x1,z1,yc11,x0,z1,yc01,nsColor);
+            if (!neighborOccludesFace(-1, 0, 0)) addSideFace(x0,z1,yc01,x0,z0,yc00,ewColor);
+            if (!neighborOccludesFace( 1, 0, 0)) addSideFace(x1,z0,yc10,x1,z1,yc11,ewColor);
         }
         state.liquidProxySectionMeshes[section] = std::make_unique<mce::Mesh>(tessellator.end(
             uploadMode,
@@ -1863,7 +1945,8 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.buildCorrectionState(index) != CorrectionState::Missing) continue;
+        if (state.buildCorrectionState(index) != CorrectionState::Missing
+            || (state.buildMissingLayers(index) & MissingLayerBody) == 0) continue;
         if (state.buildActorRendererAvailable(index)) continue;
         blockEntityIndices.push_back(index);
     }
