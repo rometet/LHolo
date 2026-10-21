@@ -1,3 +1,18 @@
+# LHolo v26.51.2-ja.9-rc.1 corresponding source
+
+Windows x64 / Minecraft Bedrock 1.26.51.01 / LeviLamina Client 26.51.5.
+Tagged product source src/ is byte-for-byte equal to the tested integration
+build, paired with Praxis R33. Release binary uses the tested LHolo DLL
+and matching PDB; independent builds are not claimed byte-identical.
+
+Use xmake to build the LHolo product and LHoloWorldPackReloadTests plus
+LHoloTranslucencyTests. Real ABI v4 tests exercise native owner/epoch/GPU
+state; translucent water fixture is synthetic on clean public builds.
+Third-party license/notice and preferred dependency source obligations
+remain documented under licenses/, THIRD_PARTY_NOTICES.md and LICENSE.
+
+---
+
 # Corresponding source and build information
 
 This is the Windows x64 / Minecraft Bedrock 1.26.51.01 / LeviLamina Client

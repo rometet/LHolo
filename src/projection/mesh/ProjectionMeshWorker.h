@@ -7,6 +7,7 @@
 #pragma once
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/mesh/ResourceReloadCancellation.h"
 
 #include <array>
 #include <cstddef>
@@ -35,6 +36,9 @@ struct AsyncSectionBuildResult {
     std::uint64_t actualVertexCount{};
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)>
         sectionMeshes;
+    // Captured before the worker MeshData is moved into the render-thread
+    // upload path. It must remain independent of sectionMeshes[Blend].
+    std::unique_ptr<mce::MeshData> blendSource;
     std::unique_ptr<mce::Mesh> warningFillMesh;
     std::unique_ptr<mce::Mesh> correctionOutlineMesh;
     std::unique_ptr<mce::Mesh> wrongFillMesh;
@@ -57,6 +61,7 @@ bool submitMeshWorkerTask(
 );
 
 std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limit);
+std::vector<CancelledSectionBuild> takeCancelledSectionBuilds();
 
 bool meshWorkerIsBusy();
 bool consumeMeshWorkerFatalFailure();

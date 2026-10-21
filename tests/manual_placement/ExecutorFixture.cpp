@@ -1,3 +1,4 @@
+#include "resourcepacks/WorldPackReloadState.h"
 // Actual PlacementExecutor bodies with explicit offline boundary doubles.
 // These doubles supply query/planner/packet results, never native/server success.
 #include "place/PlacementState.h"

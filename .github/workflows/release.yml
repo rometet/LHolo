@@ -93,6 +93,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           xmake run LHoloGraphicsTests
 
+      - name: Build and run native resource reload ABI v4 tests
+        run: |
+          xmake -v -y LHoloWorldPackReloadTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          xmake run LHoloWorldPackReloadTests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build and run translucency tests
         run: |
           xmake -v -y LHoloTranslucencyTests

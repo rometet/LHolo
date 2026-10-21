@@ -1,6 +1,7 @@
 // GPL-3.0-or-later. Native calls are CPU fixtures, never product DLL loads.
 #pragma once
 #include "projection/mesh/NativeReplaySort.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include <functional>
 #include <glm/vec2.hpp>
 #include <glm/vec4.hpp>
@@ -9,6 +10,23 @@ using namespace lholo::projection::detail;
 inline std::size_t checks{},copies{},failOnCopy{},submits{},begins{};
 inline bool beginFlag{};
 #define WC(c) do{++checks;if(!(c)){std::cerr<<"water FAIL "<<__LINE__<<": "<<#c<<'\n';std::exit(1);}}while(0)
+// The source-extracted renderer keeps its real Resource submission notification.
+// Adapt only the fixture boundary, forwarding to the exact production State.
+namespace resourcepacks {
+using Domain = lholo::resourcepacks::Domain;
+inline lholo::resourcepacks::State participant;
+inline std::size_t notifications{};
+struct SubmissionOwner {
+    void submitted(Domain domain) {
+        WC(domain==Domain::Projection);
+        WC(submits==notifications); // one admission notification before native work
+        ++notifications;
+        participant.submitted(domain);
+        WC(participant.snapshot()->domainGpu[0]==lholo::resourcepacks::OwnedGpuFence::NativeManaged);
+    }
+};
+inline SubmissionOwner& state(){static SubmissionOwner owner;return owner;}
+}
 template<class T>struct Field{T value{};T& get(){return value;}T const& get()const{return value;}};
 namespace mce {
 enum class PrimitiveMode {QuadList=1,TriangleList=2};
@@ -61,6 +79,7 @@ inline Log& logger(){static Log l;return l;}
 struct MeshHelpers {
     static void renderMeshImmediately(ScreenContext&,Tessellator& t,mce::MaterialPtr const& m,
         std::initializer_list<std::reference_wrapper<mce::TexturePtr const>> textures,int capture){
+        WC(resourcepacks::notifications==submits+1); // missing/late/duplicate is rejected
         WC(m.id==17);WC(textures.size()==1);WC(textures.begin()->get().id==23);WC(capture==0);WC(beginFlag);
         submitted=std::make_unique<mce::MeshData>(t.mMeshData.get());submittedMetadata=t.mQuadInfoList.get();submittedCount=t.mCount;++submits;
     }
@@ -98,11 +117,15 @@ inline void verify(Data const& d,std::span<std::size_t const> order) {
     for(std::size_t i=0;i<d.nativeStream->mColors.get().size();++i)WC(d.nativeStream->mColors.get()[i]==i);
 }
 inline void runWaterCommands() {
+    WC(resourcepacks::participant.enable(std::make_shared<int>(1)));
+    lholo::resourcepacks::Owner const owner{123,456,789,111};
+    resourcepacks::participant.observe(owner);
+    WC(resourcepacks::participant.nativeResourcesObserved(owner));
     ScreenContext screen;mce::MaterialPtr material;mce::TexturePtr texture;auto d=makeData();
     auto& shared=screen.tessellator.mMeshData.get();shared.mPositions.get().push_back({91,92,93});
     NativeReplaySortBudget budget;
     auto r=submitPraxisExactReplayImmediately(screen,d,material,texture,{0,0,0},budget);
-    WC(r.vertices==12);WC(submits==1);WC(budget.attempts==1);WC(d.cameraSort.keyValid);
+    WC(r.vertices==12);WC(submits==1);WC(resourcepacks::notifications==submits);WC(budget.attempts==1);WC(d.cameraSort.keyValid);
     WC(d.cameraSort.order==std::vector<std::size_t>({1,2,0}));verify(d,d.cameraSort.order);
     auto cached=d.cameraSort.order;submitPraxisExactReplayImmediately(screen,d,material,texture,{0,0,0.1f},budget);WC(budget.attempts==1);WC(d.cameraSort.order==cached);
     NativeReplaySortBudget moved;submitPraxisExactReplayImmediately(screen,d,material,texture,{0,0,10},moved);WC(moved.attempts==1);WC(d.cameraSort.order==std::vector<std::size_t>({0,2,1}));verify(d,d.cameraSort.order);
@@ -126,8 +149,8 @@ inline void runWaterCommands() {
     auto captured=makeData(capturedPositions());NativeReplaySortBudget cb;auto cp=glm::vec3{0,80,100};
     submitPraxisExactReplayImmediately(screen,captured,material,texture,cp,cb);WC(captured.cameraSort.keyValid);verify(captured,captured.cameraSort.order);
     auto fresh=makeData();WC(!fresh.cameraSort.keyValid);WC(fresh.cameraSort.order.empty());
-    std::cout<<"Water replay command fixture: PASS checks="<<checks<<" fixture_vertices="<<captured.nativeStream->mPositions.get().size()<<" native_GPU=NOT_RUN\n";
+    WC(resourcepacks::notifications==submits);
+    std::cout<<"Water replay command fixture: PASS checks="<<checks<<" captured_vertices="<<captured.nativeStream->mPositions.get().size()<<" native_GPU=NOT_RUN\n";
 }
 #undef WC
 } // namespace water_commands
-

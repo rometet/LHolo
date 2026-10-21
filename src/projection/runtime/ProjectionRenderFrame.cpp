@@ -8,6 +8,7 @@
 // ProjectionSession contract.
 
 #include "projection/runtime/ProjectionRenderFrame.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "projection/runtime/ProjectionSession.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
@@ -25,6 +26,8 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/runtime/VerifierHighlightRules.h"
 #include "projection/world/ProjectionPlacement.h"
+
+#include "app/ScopeExit.h"
 
 #include "overlay/BoundsWireframe.h"
 #include "place/PlaceHelper.h"
@@ -63,9 +66,10 @@
 namespace lholo::projection::detail {
 namespace {
 
-Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
+std::optional<Vec3> renderCameraPosition(BaseActorRenderContext const& renderContext) {
     auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
-    return camera ? Vec3{camera->x, camera->y, camera->z} : Vec3{};
+    if (!camera) return std::nullopt;
+    return Vec3{camera->x, camera->y, camera->z};
 }
 
 void resetWorldAfterExit() {
@@ -80,6 +84,71 @@ void resetWorldAfterExit() {
 
 auto& logger() {
     return LHolo::getInstance().getSelf().getLogger();
+}
+
+void recordGlassR3CameraSample(
+    ProjectionState& state,
+    std::optional<Vec3> const& camera
+) noexcept {
+    ++state.glassR3RenderCallbacks;
+    if (!camera) {
+        ++state.glassR3InvalidCameraCallbacks;
+        return;
+    }
+    if (state.glassR3LastCamera) {
+        auto const dx = std::fabs(camera->x - state.glassR3LastCamera->x);
+        auto const dy = std::fabs(camera->y - state.glassR3LastCamera->y);
+        auto const dz = std::fabs(camera->z - state.glassR3LastCamera->z);
+        auto const delta = (std::max)(dx, (std::max)(dy, dz));
+        if (delta > 0.00001F) {
+            ++state.glassR3CameraChangedSamples;
+            if (delta <= 0.01F) ++state.glassR3CameraJitterSamples;
+        }
+    }
+    state.glassR3LastCamera = *camera;
+}
+
+void maybeLogGlassR3(
+    ProjectionState& state,
+    bool cameraValid,
+    Vec3 const* camera
+) noexcept {
+    auto const now = static_cast<std::uint64_t>(GetTickCount64());
+    if (state.glassR3LastDiagnosticMs != 0
+        && now - state.glassR3LastDiagnosticMs < 4000) return;
+    state.glassR3LastDiagnosticMs = now;
+    auto const cameraX = camera ? camera->x : 0.0F;
+    auto const cameraY = camera ? camera->y : 0.0F;
+    auto const cameraZ = camera ? camera->z : 0.0F;
+    logger().info(
+        "LHoloGlassR3 cameraValid={} camera=({},{},{}) callbacks={} invalidCamera={} "
+        "cameraChanged={} cameraJitter={} retainedDrawCalls={} blendDrawCalls={} "
+        "revisionChurn={} unsupportedLayouts={} sortInvalid={} sortChanged={}",
+        cameraValid ? 1 : 0,
+        cameraX,
+        cameraY,
+        cameraZ,
+        state.glassR3RenderCallbacks,
+        state.glassR3InvalidCameraCallbacks,
+        state.glassR3CameraChangedSamples,
+        state.glassR3CameraJitterSamples,
+        state.glassR3RetainedDrawCalls,
+        state.glassR3BlendDrawCalls,
+        state.glassR3RevisionChurn,
+        state.glassR3UnsupportedLayoutObservations,
+        state.glassR3SortInvalid,
+        state.glassR3SortChanged
+    );
+    state.glassR3RenderCallbacks = 0;
+    state.glassR3InvalidCameraCallbacks = 0;
+    state.glassR3CameraChangedSamples = 0;
+    state.glassR3CameraJitterSamples = 0;
+    state.glassR3RetainedDrawCalls = 0;
+    state.glassR3BlendDrawCalls = 0;
+    state.glassR3RevisionChurn = 0;
+    state.glassR3UnsupportedLayoutObservations = 0;
+    state.glassR3SortInvalid = 0;
+    state.glassR3SortChanged = 0;
 }
 
 bool enableStructureProjection(
@@ -181,7 +250,20 @@ void renderProjection(
     }
 
     auto& tessellator = renderContext.mScreenContext.tessellator;
-    Vec3 const camera = renderCameraPosition(renderContext);
+    auto const cameraPosition = renderCameraPosition(renderContext);
+    recordGlassR3CameraSample(state, cameraPosition);
+    if (!cameraPosition) {
+        // An invalid/temporarily unreadable native context must not turn into
+        // the origin. The origin is a valid projection coordinate and would
+        // make both the world matrix and transparent sort appear plausible
+        // while using the wrong camera for this callback.
+        maybeLogGlassR3(state, false, nullptr);
+        return;
+    }
+    Vec3 const camera = *cameraPosition;
+    app::ScopeExit glassR3Log([&]() noexcept {
+        maybeLogGlassR3(state, true, &camera);
+    });
     if (!renderAlphaLayer) {
         auto const transform = structure::detail::StructureSession::getInstance().transform();
         auto const mirrorMode = transform.mirror;
@@ -536,6 +618,66 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
 }
 
 void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlphaLayer) {
+    auto& reload=resourcepacks::state();
+    // Observe physical owner identities even when admission is closed. Query
+    // itself never invokes these normal-engine-owner getters.
+    {
+        std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+        bool const destroyed=consumeWorldExitRequest() || projectionDimensionSourceDestroyed();
+        if(destroyed) {
+            if(reload.snapshot()->closed){reload.invalidate();return;}
+            // The open path below performs existing world/dimension cleanup.
+            // Do not dereference the old player/Level before that cleanup.
+        } else {
+            auto& observedClient=renderContext.mClientInstance;
+            auto* observedPlayer=observedClient.getLocalPlayer();
+            auto* observedRenderer=observedClient.getLevelRenderer();
+            if(observedPlayer && observedRenderer) {
+                resourcepacks::Owner const physicalOwner{
+                    reinterpret_cast<std::uintptr_t>(&observedPlayer->getLevel()),reinterpret_cast<std::uintptr_t>(&observedClient),
+                    reinterpret_cast<std::uintptr_t>(observedRenderer),reinterpret_cast<std::uintptr_t>(&observedPlayer->getDimension())};
+                reload.observe(physicalOwner);
+                // Register normal engine-service lifetime before bounds/mesh
+                // submission. This is not a private GPU completion receipt.
+                reload.nativeResourcesObserved(physicalOwner);
+            }
+            else if(reload.snapshot()->closed){reload.invalidate();return;}
+        }
+    }
+    auto checkpoint=reload.snapshot();
+    if(checkpoint->closed) {
+        if(checkpoint->reply.phase!=resourcepacks::WorldPackReloadPhase::Reacquiring || checkpoint->ready[0])return;
+        auto lease=reload.enter(resourcepacks::Role::Projection,true);if(!lease)return;
+        ProjectionSession::getInstance().withLockedState([&](ProjectionState& state,overlay::BoundsWireframe& captureBounds) {
+            std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+            auto current=reload.ownerCallbackSnapshot(lease,*checkpoint,resourcepacks::WorldPackReloadPhase::Reacquiring,
+                consumeWorldExitRequest(),projectionDimensionSourceDestroyed());
+            if(!current || current->ready[0])return;
+            // Intent survives an unsuccessful reacquisition and a later rollback.
+            static bool wanted{};
+            static std::shared_ptr<structure::LoadedStructure const> source;
+            static BlockPos anchor;
+            if(!current->retired[0]) {
+                if(state.enabled){wanted=true;source=state.structure;anchor=state.anchor;}
+                resetProjectionState(state);captureBounds.clear();
+                reload.retiredOwner(resourcepacks::Domain::Projection,current->serial);
+                reload.gpuReceipt(resourcepacks::Domain::Projection,current->serial,resourcepacks::OwnedGpuFence::NoOwnedSubmission);
+            }
+            bool rebuilt=!wanted;
+            if(wanted) {
+                // Reacquire atlas/tessellator/UVs through this normal render
+                // owner after the game's reload has settled. CPU recreation
+                // submits no frame and does not manufacture a GPU receipt.
+                ProjectionSession::getInstance().requestAnchor(anchor.x,anchor.y,anchor.z);
+                rebuilt=enableStructureProjection(state,renderContext,source);
+                if(rebuilt){wanted=false;source.reset();}
+            }
+            reload.rebuilt(resourcepacks::Domain::Projection,current->serial,rebuilt);
+        });
+        return;
+    }
+    auto lease=reload.enter(resourcepacks::Role::Projection);if(!lease)return;
+    if(reload.snapshot()->closed)return;
     bool clearStructure = false;
     bool worldExitPending = consumeWorldExitRequest();
     if (worldExitPending) {

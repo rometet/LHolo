@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionRenderer.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
 
@@ -28,6 +29,7 @@
 #include <numeric>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -74,6 +76,8 @@ std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
+std::atomic_bool gTransparentQuadSortSourceFailureLogged{};
+std::atomic<std::int64_t> gTransparentSortLastDiagnosticMs{};
 
 // Candidate A remains available as an explicit diagnostic build. Phase 4B
 // uses Candidate B and changes only the MaterialPtr passed to Exact Replay.
@@ -101,6 +105,12 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
     if (!corners) return TransparentMeshSortResult::Invalid;
     auto& indices = data.mIndices.get();
     if (!indices.empty()) {
+        // Indexed primitives reorder only the index stream, but every enabled
+        // vertex stream must still address the same position domain. Reject a
+        // malformed native layout before publishing a replacement mesh.
+        if (!transparentIndexedStreamsCompatible(data, positions.size())) {
+            return TransparentMeshSortResult::Invalid;
+        }
         auto const order = transparentIndexedPrimitiveOrder(
             std::span<glm::vec3 const>{positions.data(), positions.size()},
             std::span<unsigned int const>{indices.data(), indices.size()}, corners, camera);
@@ -146,9 +156,91 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
     return TransparentMeshSortResult::Changed;
 }
 
+std::string_view transparentMeshLayoutIssue(mce::MeshData const& data) {
+    auto const corners = data.mMode == mce::PrimitiveMode::QuadList ? 4U
+        : (data.mMode == mce::PrimitiveMode::TriangleList ? 3U : 0U);
+    if (!corners) return "unsupported_primitive_mode";
+    auto const& positions = data.mPositions.get();
+    if (positions.empty() || positions.size() % corners != 0) {
+        return "positions_not_primitive_aligned";
+    }
+    auto const& indices = data.mIndices.get();
+    if (!indices.empty()) {
+        if (indices.size() % corners != 0) return "indices_not_primitive_aligned";
+        for (auto const index : indices) {
+            if (index >= positions.size()) return "index_out_of_range";
+        }
+    }
+    auto const vertexCount = positions.size();
+    auto issue = [vertexCount](auto const& field, std::string_view name) {
+        return field.empty() || field.size() == vertexCount ? std::string_view{} : name;
+    };
+    if (auto const value = issue(data.mNormals.get(), "normals_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTangents.get(), "tangents_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mColors.get(), "colors_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mBoneId0s.get(), "boneIds_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[0].get(), "uv0_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[1].get(), "uv1_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mTextureUVs[2].get(), "uv2_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mPBRTextureIndices.get(), "pbr_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mMERS.get(), "mers_size_mismatch"); !value.empty()) return value;
+    if (auto const value = issue(data.mGeoType.get(), "geoType_size_mismatch"); !value.empty()) return value;
+    return "sort_contract_rejected";
+}
+
 mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     auto* info = material.mRenderMaterialInfoPtr.get();
     return info ? info->mPtr.get() : nullptr;
+}
+
+// R5 A/B experiment: use a material owned only by this projection rather
+// than modifying the vanilla ItemInHandRenderer's shared material around a
+// deferred GPU draw call. Preserve the source material shader, vertex layout,
+// blend factors, sampler states and depth test. Change depth WRITE only.
+// Never hold a global cache across texture/resource-pack/world reloads.
+mce::MaterialPtr const& projectionPrivateBlendMaterial(
+    ProjectionState& state, mce::MaterialPtr const& vanillaBlend
+) {
+    auto const current = vanillaBlend.mRenderMaterialInfoPtr.get();
+    if (!current || !current->mPtr || !current->mPtr->blendStateDescription->enableBlend) {
+        return vanillaBlend;
+    }
+    if (state.glassPrivateBlendMaterial
+        && state.glassPrivateBlendBase.lock().get() == current) {
+        return *state.glassPrivateBlendMaterial;
+    }
+    // Do not change the already-live material if a new resource pack makes
+    // source creation fail. The original vanilla render material remains safe.
+    try {
+        auto privateInfo = std::make_shared<mce::RenderMaterialInfo>();
+        privateInfo->mHashedName.get() = current->mHashedName.get();
+        privateInfo->mPtr = std::make_unique<mce::RenderMaterial>(*current->mPtr.get());
+        // Native DepthWriteMask is a binary HAL flag on 26.51: 0=none, 1=all.
+        // Keep depth testing; projected alpha must be occluded by opaque world.
+        auto& depth = privateInfo->mPtr->depthStencilStateDescription.get();
+        depth.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
+        mce::MaterialPtr privatePtr{vanillaBlend};
+        privatePtr.mRenderMaterialInfoPtr = privateInfo;
+        auto privateOwner = std::make_unique<mce::MaterialPtr>(privatePtr);
+        state.glassPrivateBlendMaterial = std::move(privateOwner);
+        state.glassPrivateBlendBase = current->weak_from_this();
+        logger().info(
+            "LHoloGlassR5 privateMaterial=1 material={} baseDepthWrite={} "
+            "privateDepthWrite={} depthTest={} blend={}",
+            current->mHashedName->getString(),
+            static_cast<unsigned int>(current->mPtr->depthStencilStateDescription->depthWriteMask),
+            static_cast<unsigned int>(depth.depthWriteMask),
+            depth.depthTestEnabled ? 1 : 0,
+            privateInfo->mPtr->blendStateDescription->enableBlend ? 1 : 0
+        );
+        return *state.glassPrivateBlendMaterial;
+    } catch (std::exception const& exception) {
+        logger().warn("LHoloGlassR5 privateMaterial=0 fallback=vanilla reason={}", exception.what());
+        return vanillaBlend;
+    } catch (...) {
+        logger().warn("LHoloGlassR5 privateMaterial=0 fallback=vanilla reason=unknown");
+        return vanillaBlend;
+    }
 }
 
 OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
@@ -675,6 +767,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     // equivalent of the texture-ref MeshHelpers entry used by old Praxis. It
     // is a different exported overload from TextureVariant + generation mode.
     auto const submitStarted = std::chrono::steady_clock::now();
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     MeshHelpers::renderMeshImmediately(
         screenContext,
         tessellator,
@@ -700,6 +793,7 @@ void submitProjectedBlockActorPass(
     float                   structureOpacity,
     bool                    renderAlphaLayer
 ) {
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (state.projectedBlockActors.empty()
         || !state.expectedWorldBlocks
         || !state.expectedWorldLiquids
@@ -789,6 +883,7 @@ void submitProjectionMeshPass(
     bool                    correctionSeeThrough,
     bool                    missingSeeThrough
 ) {
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (!state.terrainTextureVariant || state.sections.empty()) return;
 
     auto& itemRenderer = renderContext.mItemInHandRenderer;
@@ -1068,6 +1163,11 @@ void submitProjectionMeshPass(
     };
     auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
         if (!materialExists(material)) return;
+        auto const usingBlendMaterial = material.mRenderMaterialInfoPtr.get()
+            == blendMaterial.mRenderMaterialInfoPtr.get()
+            || (state.glassPrivateBlendMaterial
+                && material.mRenderMaterialInfoPtr.get()
+                    == state.glassPrivateBlendMaterial->mRenderMaterialInfoPtr.get());
         for (auto const& visible : meshes) {
             auto& mesh = *state.sections[visible.section].meshes[visible.bucket];
             mesh.renderMesh(
@@ -1079,6 +1179,8 @@ void submitProjectionMeshPass(
                 emptyOffscreenCaptureDescription(),
                 nullptr
             );
+            ++state.glassR3RetainedDrawCalls;
+            if (usingBlendMaterial) ++state.glassR3BlendDrawCalls;
         }
     };
     auto collectBucket = [&](std::size_t bucket) {
@@ -1110,51 +1212,189 @@ void submitProjectionMeshPass(
         constexpr std::size_t kMaxResortsPerFrame = 4;
         auto const started = std::chrono::steady_clock::now();
         std::size_t resorts{};
+        std::size_t validBlendMeshes{};
+        std::size_t unsupportedBlendMeshes{};
+        std::size_t staleBlendMeshes{};
+        std::size_t changedBlendMeshes{};
+        std::size_t unchangedBlendMeshes{};
+        std::size_t revisionChurn{};
+        std::size_t originalCacheOccupancy{};
+        std::size_t originalCacheVertices{};
+        for (auto const& sectionState : state.sections) {
+            if (!sectionState.blendSource) continue;
+            ++originalCacheOccupancy;
+            originalCacheVertices += sectionState.blendSource->mPositions.get().size();
+        }
         for (std::size_t checked = 0; checked < state.sections.size(); ++checked) {
             if (resorts >= kMaxResortsPerFrame
                 || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
             auto const section = state.blendSortCursor++ % state.sections.size();
             auto& sectionState = state.sections[section];
+            if (sectionState.requestedRevision != sectionState.uploadedRevision) {
+                ++revisionChurn;
+                ++state.glassR3RevisionChurn;
+            }
+            if (sectionState.blendSortUnsupported) {
+                ++unsupportedBlendMeshes;
+                ++state.glassR3UnsupportedLayoutObservations;
+            }
             if (sectionState.blendSortUnsupported || (sectionState.blendSortKeyValid
                 && sectionState.blendSortKey == *cameraSortKey)) continue;
             auto& mesh = sectionState.meshes[blendBucket];
             if (!mesh || !mesh->isValid()) continue;
+            ++validBlendMeshes;
+            ++staleBlendMeshes;
             ++resorts;
+            ++state.glassR4SortAttempts;
             try {
-                auto sortedData = mesh->mMeshData.get();
+                auto const* originalSource = sectionState.blendSource.get();
+                if (!originalSource || originalSource->mPositions.get().empty()) {
+                    // A GPU-resident Mesh is still drawable, so retain it and
+                    // fail closed when its independent CPU source is missing.
+                    sectionState.blendSortUnsupported = true;
+                    ++state.glassR4SortSourceUnavailable;
+                    ++state.glassR3UnsupportedLayoutObservations;
+                    if (!gTransparentQuadSortSourceFailureLogged.exchange(
+                            true, std::memory_order_acq_rel
+                        )) {
+                        logger().warn(
+                            "TRANSPARENT_PRIMITIVE_SORT skipped blend mesh without original CPU source section={}",
+                            section
+                        );
+                    }
+                    continue;
+                }
+                // Always start from the immutable original. Sorting the
+                // current GPU mesh would make camera reversal non-reversible,
+                // and its mMeshData may already have been consumed by upload.
+                auto sortedData = *originalSource;
                 auto const vertexCount = sortedData.mPositions.get().size();
                 auto const result = sortTransparentMeshDataBackToFront(sortedData, localCamera);
                 if (result == TransparentMeshSortResult::Invalid) {
                     // A new upload clears this flag. Do not destroy/rebuild an
                     // unknown engine layout and do not retry it every frame.
                     sectionState.blendSortUnsupported = true;
+                    ++unsupportedBlendMeshes;
+                    ++state.glassR3SortInvalid;
+                    ++state.glassR3UnsupportedLayoutObservations;
+                    ++state.glassR4SortInvalid;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
-                        logger().warn("TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout");
+                        logger().warn(
+                            "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
+                            "reason={} section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
+                            "uv0={} uv1={} uv2={} pbr={} mers={} geoType={}",
+                            transparentMeshLayoutIssue(sortedData),
+                            section,
+                            sortedData.mPositions.get().size(),
+                            sortedData.mIndices.get().size(),
+                            sortedData.mNormals.get().size(),
+                            sortedData.mTangents.get().size(),
+                            sortedData.mColors.get().size(),
+                            sortedData.mBoneId0s.get().size(),
+                            sortedData.mTextureUVs[0].get().size(),
+                            sortedData.mTextureUVs[1].get().size(),
+                            sortedData.mTextureUVs[2].get().size(),
+                            sortedData.mPBRTextureIndices.get().size(),
+                            sortedData.mMERS.get().size(),
+                            sortedData.mGeoType.get().size()
+                        );
                     }
                     continue;
                 }
-                if (result == TransparentMeshSortResult::Changed) {
-                    auto replacement = std::make_unique<mce::Mesh>(
-                        bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
-                    if (!replacement->isValid()) {
-                        if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
-                            logger().warn("TRANSPARENT_PRIMITIVE_SORT upload failed; retaining previous blend mesh");
-                        }
-                        continue;
+                // Even an identity order needs a replacement: the currently
+                // published GPU mesh may still carry a previous camera's
+                // order. Rebuilding from originalSource restores identity.
+                auto replacement = std::make_unique<mce::Mesh>(
+                    bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
+                if (!replacement->isValid()) {
+                    ++state.glassR4SortUploadFailures;
+                    if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
+                        logger().warn("TRANSPARENT_PRIMITIVE_SORT upload failed; retaining previous blend mesh");
                     }
-                    mesh = std::move(replacement);
+                    continue;
+                }
+                mesh = std::move(replacement);
+                ++state.glassR4SortReplacements;
+                if (result == TransparentMeshSortResult::Changed) {
+                    ++changedBlendMeshes;
+                    ++state.glassR3SortChanged;
                     if (!gTransparentQuadSortLogged.exchange(true, std::memory_order_acq_rel)) {
                         logger().info("TRANSPARENT_PRIMITIVE_SORT enabled=1 quantum=0.25 budget=4/1ms firstSection={} vertices={}",
                             section, vertexCount);
                     }
+                } else {
+                    ++unchangedBlendMeshes;
+                    ++state.glassR4SortIdentityRestores;
                 }
                 sectionState.blendSortKey = *cameraSortKey;
                 sectionState.blendSortKeyValid = true;
             } catch (std::exception const& exception) {
+                ++state.glassR4SortUploadFailures;
                 app::reportNativeCallbackFailure("transparent primitive sort", exception.what());
             } catch (...) {
+                ++state.glassR4SortUploadFailures;
                 app::reportNativeCallbackFailure("transparent primitive sort", "unknown C++ exception");
             }
+        }
+
+        auto const nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+        auto lastMs = gTransparentSortLastDiagnosticMs.load(std::memory_order_acquire);
+        if ((unsupportedBlendMeshes != 0 || staleBlendMeshes != 0 || revisionChurn != 0)
+            && nowMs - lastMs >= 2000
+            && gTransparentSortLastDiagnosticMs.compare_exchange_strong(
+                lastMs, nowMs, std::memory_order_acq_rel
+            )) {
+            auto* material = tryRenderMaterial(blendMaterial);
+            auto const* info = blendMaterial.mRenderMaterialInfoPtr.get();
+            auto const blendEnabled = material && material->blendStateDescription->enableBlend;
+            auto const depthTestEnabled = material
+                && material->depthStencilStateDescription->depthTestEnabled;
+            auto const depthWriteMask = material
+                ? static_cast<unsigned int>(material->depthStencilStateDescription->depthWriteMask)
+                : 0U;
+            logger().info(
+                "TRANSPARENT_PRIMITIVE_SORT_SUMMARY sections={} valid={} stale={} changed={} "
+                "unchanged={} unsupported={} revisionChurn={} cursor={} budget=4/1ms "
+                "material={} blend={} depthTest={} depthWriteMask={}",
+                state.sections.size(),
+                validBlendMeshes,
+                staleBlendMeshes,
+                changedBlendMeshes,
+                unchangedBlendMeshes,
+                unsupportedBlendMeshes,
+                revisionChurn,
+                state.blendSortCursor,
+                info ? info->mHashedName->getString() : std::string{"<unresolved>"},
+                blendEnabled ? 1 : 0,
+                depthTestEnabled ? 1 : 0,
+                depthWriteMask
+            );
+        }
+        if (state.glassR4LastDiagnosticMs == 0
+            || nowMs - state.glassR4LastDiagnosticMs >= 4000) {
+            state.glassR4LastDiagnosticMs = static_cast<std::uint64_t>(nowMs);
+            logger().info(
+                "LHoloGlassR4 R4_BUILT/active=1 originalCacheOccupancy={}/{} originalCacheVertices={} "
+                "sortAttempts={} sortReplacements={} identityRestores={} uploadFailures={} "
+                "sourceUnavailable={} sortInvalid={} budget=4/1ms",
+                originalCacheOccupancy,
+                state.sections.size(),
+                originalCacheVertices,
+                state.glassR4SortAttempts,
+                state.glassR4SortReplacements,
+                state.glassR4SortIdentityRestores,
+                state.glassR4SortUploadFailures,
+                state.glassR4SortSourceUnavailable,
+                state.glassR4SortInvalid
+            );
+            state.glassR4SortAttempts = 0;
+            state.glassR4SortReplacements = 0;
+            state.glassR4SortIdentityRestores = 0;
+            state.glassR4SortUploadFailures = 0;
+            state.glassR4SortSourceUnavailable = 0;
+            state.glassR4SortInvalid = 0;
         }
     };
 
@@ -1196,7 +1436,7 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, blendMaterial);
+            renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
         }
     } else if (renderAlphaLayer) {
         // True projection transparency needs a blending material even for
@@ -1212,7 +1452,7 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
-        renderMeshes(transparentMeshes, blendMaterial);
+        renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
     }
 
     // Textured liquid hulls travel the proven glass path: blend-block material

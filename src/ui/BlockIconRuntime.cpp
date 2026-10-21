@@ -1,4 +1,5 @@
 #include "ui/BlockIconRuntime.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "ui/BlockIconCatalog.h"
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
@@ -6,6 +7,7 @@
 #include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/game/ClientInstance.h"
+#include "mc/client/player/LocalPlayer.h"
 #include "mc/resources/ResourcePackManager.h"
 #include "mc/resources/ResourcePackStack.h"
 #include "mc/resources/PackInstance.h"
@@ -29,19 +31,24 @@ std::uintptr_t lastClient{};
 std::uint64_t catalogGeneration{};
 std::unique_ptr<Catalog> catalog;
 unsigned decodeDiagnostics{};
+struct ReloadPlan {std::uint64_t epoch{},serial{};std::vector<Key> keys;std::size_t queued{};bool catalogFresh{},ready{};};
+std::mutex reloadMutex;
+std::shared_ptr<ReloadPlan> reloadPlan;
 
 LL_TYPE_INSTANCE_HOOK(IconPackComposeHook,ll::memory::HookPriority::Normal,
     ResourcePackManager,&ResourcePackManager::_composeFullStack,void) {
     app::hook_lifecycle::DetourGuard guard;
     if(!guard){origin();return;}
-    store().beginChange();app::ScopeExit end{[]() noexcept {store().endChange();}};
+    auto mutation=resourcepacks::state().beginMutation([] {store().beginChange();});
+    app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
     origin();
 }
 LL_TYPE_INSTANCE_HOOK(IconTextureReloadHook,ll::memory::HookPriority::Normal,
     mce::TextureGroup,&mce::TextureGroup::reloadAllTextures,void) {
     app::hook_lifecycle::DetourGuard guard;
     if(!guard){origin();return;}
-    store().beginChange();app::ScopeExit end{[]() noexcept {store().endChange();}};
+    auto mutation=resourcepacks::state().beginMutation([] {store().beginChange();});
+    app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
     origin();
 }
 LL_TYPE_INSTANCE_HOOK(IconImagesReloadHook,ll::memory::HookPriority::Normal,
@@ -50,7 +57,8 @@ LL_TYPE_INSTANCE_HOOK(IconImagesReloadHook,ll::memory::HookPriority::Normal,
     std::vector<ResourceLocation> keep,ImageCacheMode mode) {
     app::hook_lifecycle::DetourGuard guard;
     if(!guard){origin(asyncImages,immediateImages,std::move(keep),mode);return;}
-    store().beginChange();app::ScopeExit end{[]() noexcept {store().endChange();}};
+    auto mutation=resourcepacks::state().beginMutation([] {store().beginChange();});
+    app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
     origin(asyncImages,immediateImages,std::move(keep),mode);
 }
 std::string text(ResourcePackManager const& manager,char const* path) {
@@ -111,12 +119,34 @@ bool uninstallHooks() {
     if(composeInstalled) {if(IconPackComposeHook::unhook())composeInstalled=false;else ok=false;}
     return ok;
 }
-void closeSession() {store().reset(false);catalog.reset();catalogGeneration=0;lastClient=0;decodeDiagnostics=0;}
+void closeSession() {
+    store().reset(false);catalog.reset();catalogGeneration=0;lastClient=0;decodeDiagnostics=0;
+    std::lock_guard lock{reloadMutex};reloadPlan.reset();
+}
+void startResourceReload(std::uint64_t epoch,std::uint64_t serial,std::vector<Key> keys) {
+    store().resetResourceEpoch(epoch);
+    auto next=std::make_shared<ReloadPlan>();next->epoch=epoch;next->serial=serial;next->keys=std::move(keys);
+    std::lock_guard lock{reloadMutex};reloadPlan=std::move(next);
+}
+bool resourceReloadReady(std::uint64_t serial) {
+    std::lock_guard lock{reloadMutex};return reloadPlan && reloadPlan->serial==serial && reloadPlan->ready;
+}
 void tick() {
+    auto& reload=resourcepacks::state();
+    // Identity-only observation on the existing normal game owner. This does
+    // not borrow pack/atlas/image/mesh owners and also runs while work is paused.
+    auto client=ll::service::getClientInstance();
+    auto* player=client?client->getLocalPlayer():nullptr;
+    auto* renderer=client?client->getLevelRenderer():nullptr;
+    if(!player || !renderer){if(reload.snapshot()->closed)reload.invalidate();return;}
+    auto* interface=static_cast<IClientInstance*>(&*client);
+    reload.observe({reinterpret_cast<std::uintptr_t>(&player->getLevel()),reinterpret_cast<std::uintptr_t>(interface),reinterpret_cast<std::uintptr_t>(renderer),reinterpret_cast<std::uintptr_t>(&player->getDimension())});
+    auto checkpoint=reload.snapshot();
+    bool const rebuilding=checkpoint->closed && checkpoint->reply.phase==resourcepacks::WorldPackReloadPhase::Reacquiring;
+    auto lease=reload.enter(resourcepacks::Role::IconDecode,rebuilding);if(!lease)return;
     if(!store().readable() || ticking.test_and_set(std::memory_order_acquire))return;
     app::ScopeExit untick{[]() noexcept {ticking.clear(std::memory_order_release);}};
-    auto client=ll::service::getClientInstance();
-    if(!client)return;
+    if(!reload.mayPublish(lease))return;
     auto const identity=reinterpret_cast<std::uintptr_t>(&*client);
     if(lastClient && identity!=lastClient)store().reset(true);
     lastClient=identity;
@@ -125,18 +155,41 @@ void tick() {
     // concurrent pack switching still needs real-client validation. Do not read BlockGraphics/ItemRenderer registries,
     // cached ImageBuffer pointers or game GPU textures during a reload.
     auto& manager=client->getResourcePackManager();
+    std::shared_ptr<ReloadPlan> plan;
+    if(rebuilding) {
+        {std::lock_guard lock{reloadMutex};plan=reloadPlan;}
+        if(!plan || plan->serial!=lease.serial || plan->epoch!=lease.epoch)return;
+        if(!plan->catalogFresh) {
+            auto const generation=store().revision();auto next=readCatalog(manager,generation);
+            if(next.busy || !next.value)return;
+            if(!reload.publishIfCurrent(lease,[&] {
+                if(store().revision()!=generation || !store().readable())return false;
+                catalog.swap(next.value);catalogGeneration=generation;decodeDiagnostics=0;plan->catalogFresh=true;return true;
+            }))return;
+        }
+        while(plan->queued<plan->keys.size() && store().queueRebuild(plan->keys[plan->queued]))++plan->queued;
+    }
     for(unsigned budget=0;budget<2;++budget) {
-        auto const request=store().take();if(!request)return;
+        auto const request=store().take();if(!request) {
+            if(plan && plan->queued==plan->keys.size() && store().drained()) {
+                std::lock_guard lock{reloadMutex};if(reloadPlan==plan)plan->ready=true;
+            }
+            return;
+        }
         bool finished=false;
         app::ScopeExit finishRequest{[&]() noexcept {
-            if(!finished)try {(void)store().publish(*request,{});}catch(...) {}
+            if(!finished)try {store().discard(*request);}catch(...) {}
         }};
         if(catalogGeneration!=request->generation) {
             auto next=readCatalog(manager,request->generation);
             if(next.busy || store().revision()!=request->generation || !store().readable()) {
-                (void)store().retry(*request);finished=true;return;
+                bool const retried=reload.publishIfCurrent(lease,[&] {return store().retry(*request);});
+                if(!retried)store().discard(*request);finished=true;return;
             }
-            catalog=std::move(next.value);catalogGeneration=request->generation;decodeDiagnostics=0;
+            if(!reload.publishIfCurrent(lease,[&] {
+                if(store().revision()!=request->generation || !store().readable())return false;
+                catalog.swap(next.value);catalogGeneration=request->generation;decodeDiagnostics=0;return true;
+            }))return;
             LHolo::getInstance().getSelf().getLogger().info(
                 "BLOCK_ICON_CATALOG generation={} layers={} order={} blocks={} terrain={} ready={}",
                 catalogGeneration,next.layers,catalog?catalog->order():std::string_view{"unresolved"},
@@ -158,7 +211,10 @@ void tick() {
                 request->key.block,path,static_cast<unsigned>(image.imageFormat),image.mWidth,image.mHeight,image.mDepth,
                 bytes.size(),static_cast<bool>(pixels));
         }
-        (void)store().publish(*request,std::move(pixels));finished=true;
+        bool const published=request->resourceEpoch==lease.epoch
+            && reload.publishIfCurrent(lease,[&] {return store().publish(*request,std::move(pixels));});
+        if(!published)store().discard(*request);
+        finished=true;
     }
 }
 } // namespace lholo::ui::icons

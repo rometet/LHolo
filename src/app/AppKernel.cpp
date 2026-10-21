@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "app/AppKernel.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "ui/BlockIconRuntime.h"
 
 #include "app/HookLifecycle.h"
@@ -82,7 +83,11 @@ bool AppKernel::enable() {
         if (!overlay::ensureInstalled()) {
             logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
         }
+        if(!resourcepacks::state().enable(owner))return false;
         logger.info("LHolo enabled. Type lholo to open the projection menu.");
+        // Glass R5 remains the authoritative transparency path.
+        logger.info("LHoloGlassR5 build=private-projection-blend-depthwrite0 test-only");
+        logger.info("LHoloGlassR3 build=stationary-camera-fail-closed diagnostics=bounded-4s");
         if(!menuInputGuardStatus.textInputHooksInstalled)
             logger.warn("Direct page hotkeys disabled: native text input tracking hooks are not ready");
         logger.info("PHASE2_NATIVE_LIQUID_BUILD enabled=1 mesh=LHoloNativeLiquid");
@@ -120,6 +125,10 @@ bool AppKernel::disable() {
         return false;
     }
 
+    if(!resourcepacks::state().beginDisable()) {
+        logger.error("LHolo resource reload invalidated; retaining native/GPU owners and module, refusing disable");
+        return false;
+    }
     // First make every newly-entering typed detour origin-only. Keep world and
     // projection state intact through both admitted-body and origin-only drains.
     hook_lifecycle::beginQuiesce();
@@ -170,6 +179,7 @@ bool AppKernel::disable() {
     structure::capture::clear();
 
     hook_lifecycle::markDisabled();
+    resourcepacks::state().disableInactive();
     logger.info("LHolo disabled");
     return true;
 }

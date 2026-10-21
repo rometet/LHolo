@@ -49,4 +49,3 @@ bool reorderReplayQuadMetadata(std::vector<Value>& field,std::span<std::size_t c
     field=std::move(sorted);return true;
 }
 } // namespace lholo::projection::detail
-

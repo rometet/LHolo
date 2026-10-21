@@ -16,6 +16,7 @@
 
 #include "overlay/ImGuiOverlay.h"
 #include "overlay/BlockIconGpu.h"
+#include "resourcepacks/WorldPackReloadGpuOwner.h"
 #include "overlay/OverlayFonts.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
@@ -942,7 +943,11 @@ void render(IDXGISwapChain* swapChain) {
     // D3D12 startup may not have exposed its command queue yet, so a failed
     // attempt is intentionally retried on the next Present.
     if (!initializeImGui(swapChain)) return;
-    structure::processPendingActions();
+    resourcepacks::gpuOwner().pump(resourcepacks::state(),blockIconGpu(),gDevice,gDeviceContext);
+    {
+        auto lease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+        if(lease)structure::processPendingActions();
+    }
 
     auto const showLholoGui = structure::isGuiVisible();
     auto const showCompanionGui = companion::isVisible();

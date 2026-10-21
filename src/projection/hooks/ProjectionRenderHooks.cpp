@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/hooks/ProjectionRenderHooks.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
@@ -100,6 +101,8 @@ LL_TYPE_INSTANCE_HOOK(
         origin(renderContext, region, pos, fancyGraphics);
         return;
     }
+    auto lease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!lease){origin(renderContext,region,pos,fancyGraphics);return;}
     try {
         if (shouldSuppressProjectionHitSelect(pos)) return;
     } catch (std::exception const& exception) {

@@ -1,6 +1,7 @@
 #pragma once
 #include "ui/BlockIcon.h"
 #include "ui/BlockIconStore.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <map>
@@ -21,15 +22,55 @@ class BlockIconGpu {
     std::vector<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>> frame;
 public:
     void beginFrame(ID3D11Device* current) {
+        if(resourcepacks::state().snapshot()->closed) {
+            if(cacheDevice && cacheDevice!=current)resourcepacks::state().invalidate();
+            device=nullptr;return;
+        }
         frame.clear();
         if(cacheDevice!=current){cache.clear();cacheDevice=current;}
         device=current;
     }
-    void endFrame() {frame.clear();device=nullptr;}
-    void reset() {frame.clear();cache.clear();device=nullptr;cacheDevice=nullptr;}
+    void endFrame() {if(!resourcepacks::state().snapshot()->closed)frame.clear();device=nullptr;}
+    void reset() {
+        if(resourcepacks::state().snapshot()->closed) {
+            resourcepacks::state().invalidate();device=nullptr;return;
+        }
+        frame.clear();cache.clear();device=nullptr;cacheDevice=nullptr;
+    }
     std::size_t cached() const {return cache.size();}
     std::size_t pinned() const {return frame.size();}
     ui::BlockIconView lookup(std::string_view block,std::string_view item) {
+        auto lease=resourcepacks::state().enter(resourcepacks::Role::IconRender);
+        if(!lease)return {};
+        auto result=lookupOwned(block,item);
+        if(result.status==ui::BlockIconStatus::Ready)
+            resourcepacks::state().submitted(resourcepacks::Domain::Icons);
+        return result;
+    }
+    // Only the existing Present owner calls these after the old event query
+    // completed. No engine handles or shared ImGui/backend owners are retired.
+    std::vector<ui::icons::Key> retireForReload() {
+        std::vector<ui::icons::Key> keys;keys.reserve(cache.size());
+        for(auto const& [key,entry]:cache)keys.push_back(key);
+        frame.clear();cache.clear();device=nullptr;cacheDevice=nullptr;return keys;
+    }
+    bool rebuildViews(ID3D11Device* current,std::vector<ui::icons::Key> const& keys) {
+        auto lease=resourcepacks::state().enter(resourcepacks::Role::IconRender,true);
+        if(!lease || !current)return false;
+        if(cacheDevice && cacheDevice!=current){resourcepacks::state().invalidate();return false;}
+        cacheDevice=current;device=current;
+        if(!keys.empty())resourcepacks::state().submitted(resourcepacks::Domain::Icons);
+        struct ClearBorrow {ID3D11Device*& value;~ClearBorrow(){value=nullptr;}} clear{device};
+        for(auto const& key:keys) {
+            auto result=lookupOwned(key.block,key.item);
+            if(result.status==ui::BlockIconStatus::Pending)return false;
+            auto pixels=ui::icons::store().request(key).pixels;
+            if(pixels && result.status!=ui::BlockIconStatus::Ready)return false;
+        }
+        frame.clear();return resourcepacks::state().mayPublish(lease);
+    }
+private:
+    ui::BlockIconView lookupOwned(std::string_view block,std::string_view item) {
         using namespace ui::icons;
         auto const key=keyFor(block,item);
         if(air(key))return {{},ui::BlockIconStatus::Air};

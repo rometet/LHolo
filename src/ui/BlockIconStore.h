@@ -22,7 +22,7 @@ inline Key keyFor(std::string_view block, std::string_view item) {
     return {std::string{block},std::string{item}};
 }
 inline bool air(Key const& key) {return key.block=="minecraft:air" || key.block=="minecraft:cave_air" || key.block=="minecraft:void_air";}
-struct Request { Key key; std::uint64_t generation{}; };
+struct Request { Key key; std::uint64_t generation{}; std::uint64_t resourceEpoch{1}; };
 struct Result { std::shared_ptr<Pixels const> pixels; bool pending{}; std::uint64_t generation{}; };
 class Store {
 public:
@@ -37,22 +37,35 @@ public:
     std::optional<Request> take() {
         std::lock_guard lock{mutex};
         if(changing || !enabled || pending.empty())return {};
-        auto key=std::move(pending.front());pending.pop_front();working.insert(key);return Request{std::move(key),generation};
+        auto key=std::move(pending.front());pending.pop_front();working.insert(key);return Request{std::move(key),generation,resourceEpoch};
     }
     bool publish(Request const& request, std::shared_ptr<Pixels const> pixels) {
         std::lock_guard lock{mutex};
-        if(changing || !enabled || request.generation!=generation)return false;
+        if(changing || !enabled || request.generation!=generation || request.resourceEpoch!=resourceEpoch)return false;
         working.erase(request.key);
         if(entries.size()>=Capacity && !entries.contains(request.key))entries.erase(entries.begin());
         entries.insert_or_assign(request.key,std::move(pixels));return true;
     }
     bool retry(Request const& request) {
         std::lock_guard lock{mutex};
-        if(changing || !enabled || request.generation!=generation)return false;
+        if(changing || !enabled || request.generation!=generation || request.resourceEpoch!=resourceEpoch)return false;
         if(!working.erase(request.key))return false;
         if(std::find(pending.begin(),pending.end(),request.key)==pending.end())pending.push_front(request.key);
         return true;
     }
+    void discard(Request const& request) {
+        std::lock_guard lock{mutex};if(request.generation==generation && request.resourceEpoch==resourceEpoch)working.erase(request.key);
+    }
+    void resetResourceEpoch(std::uint64_t next) {
+        std::lock_guard lock{mutex};++generation;resourceEpoch=next;enabled=true;entries.clear();pending.clear();working.clear();
+    }
+    bool queueRebuild(Key const& key) {
+        std::lock_guard lock{mutex};
+        if(entries.contains(key) || working.contains(key) || std::find(pending.begin(),pending.end(),key)!=pending.end())return true;
+        if(changing || !enabled || pending.size()+working.size()>=PendingCapacity)return false;
+        pending.push_back(key);return true;
+    }
+    bool drained() const {std::lock_guard lock{mutex};return pending.empty() && working.empty();}
     void beginChange() {std::lock_guard lock{mutex};++changing;++generation;entries.clear();pending.clear();working.clear();}
     void endChange() {std::lock_guard lock{mutex};if(changing)--changing;}
     void reset(bool admit) {std::lock_guard lock{mutex};++generation;enabled=admit;entries.clear();pending.clear();working.clear();}
@@ -60,7 +73,7 @@ public:
     bool readable() const {std::lock_guard lock{mutex};return enabled && !changing;}
 private:
     mutable std::mutex mutex;
-    std::uint64_t generation{1}; unsigned changing{}; bool enabled{true};
+    std::uint64_t generation{1},resourceEpoch{1}; unsigned changing{}; bool enabled{true};
     std::deque<Key> pending; std::set<Key> working; std::map<Key,std::shared_ptr<Pixels const>> entries;
 };
 inline Store& store() {static Store value;return value;}

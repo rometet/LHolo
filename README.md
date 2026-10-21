@@ -1,3 +1,21 @@
+# LHolo Glass R5 + Praxis Resource ABI v4
+
+Experimental prerelease, designed for PraxisCompanion v0.1.3-rc.1 (R33).
+
+Includes the genuine native LHolo resource_reload_v4 participant with
+GPU/owner lifetime checks, plus Glass R5 projection rendering fixes.
+
+2026-10-21: user-confirmed that RP OFF in a disposable offline cloned world
+left the third-person avatar visible with Praxis R33. Both participants
+resumed the new resource epoch. This is not tested for multiplayer, servers
+or general production worlds. The current Praxis gate admits only one
+ordinary local texture pack in the exact disposable clone.
+
+LHolo settings-save Access is denied and hook teardown warnings remain.
+See docs/R5_V4_RESOURCE_RELOAD_RELEASE.md.
+
+---
+
 # LHolo
 
 [日本語](docs/README_JA.md) | [English](docs/README_EN.md)

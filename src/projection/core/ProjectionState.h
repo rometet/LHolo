@@ -30,6 +30,8 @@
 #include "mc/deps/minecraft_renderer/resources/ClientTexture.h"
 #include "mc/deps/minecraft_renderer/resources/ServerTexture.h"
 #include "mc/deps/minecraft_renderer/renderer/Mesh.h"
+#include "mc/deps/minecraft_renderer/renderer/MaterialPtr.h"
+#include "mc/deps/core/renderer/RenderMaterialInfo.h"
 #include "mc/deps/minecraft_renderer/renderer/TexturePtr.h"
 
 class Dimension;
@@ -58,6 +60,10 @@ struct SectionState {
     bool                        blendSortKeyValid{};
     bool                        blendSortUnsupported{};
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)> meshes;
+    // Immutable pre-upload source for the Blend bucket. The engine consumes
+    // Mesh::mMeshData while creating GPU buffers, so the renderer must never
+    // use the uploaded Mesh as the source for a later camera sort.
+    std::unique_ptr<mce::MeshData> blendSource;
 };
 
 struct ProjectionState {
@@ -71,6 +77,11 @@ struct ProjectionState {
     int                             dimensionId{};
     std::optional<mce::TexturePtr>  terrainTexture;
     std::optional<TextureVariant>   terrainTextureVariant;
+    // R5 experimental per-projection material variant. This is a separately
+    // owned copy of the vanilla blend material with depth-write disabled;
+    // never mutate the shared ItemInHandRenderer material.
+    std::unique_ptr<mce::MaterialPtr> glassPrivateBlendMaterial;
+    std::weak_ptr<mce::RenderMaterialInfo> glassPrivateBlendBase;
     std::shared_ptr<structure::LoadedStructure const> structure;
     std::uint64_t                   structureGeneration{};
     std::uint64_t                   activationGeneration{};
@@ -219,6 +230,32 @@ struct ProjectionState {
     NativeLiquidTelemetry                   nativeLiquidTelemetry;
     bool                                    meshPreflightDone{};
     MeshDiagnosticGate                      meshDiagnosticGate;
+
+    // Bounded stationary-glass diagnostics. These counters are sampled by
+    // the existing render callback and reset only when the R3 summary is
+    // emitted; they never drive rendering decisions.
+    std::uint64_t glassR3LastDiagnosticMs{};
+    std::uint64_t glassR3RenderCallbacks{};
+    std::uint64_t glassR3InvalidCameraCallbacks{};
+    std::uint64_t glassR3CameraChangedSamples{};
+    std::uint64_t glassR3CameraJitterSamples{};
+    std::uint64_t glassR3RetainedDrawCalls{};
+    std::uint64_t glassR3BlendDrawCalls{};
+    std::uint64_t glassR3RevisionChurn{};
+    std::uint64_t glassR3UnsupportedLayoutObservations{};
+    std::uint64_t glassR3SortInvalid{};
+    std::uint64_t glassR3SortChanged{};
+    std::optional<Vec3> glassR3LastCamera;
+
+    // R4 bounded source-cache/sort diagnostics. These are reset when the
+    // periodic R4_BUILT line is emitted; they never drive rendering.
+    std::uint64_t glassR4LastDiagnosticMs{};
+    std::uint64_t glassR4SortAttempts{};
+    std::uint64_t glassR4SortReplacements{};
+    std::uint64_t glassR4SortIdentityRestores{};
+    std::uint64_t glassR4SortUploadFailures{};
+    std::uint64_t glassR4SortSourceUnavailable{};
+    std::uint64_t glassR4SortInvalid{};
 };
 
 } // namespace lholo::projection::detail

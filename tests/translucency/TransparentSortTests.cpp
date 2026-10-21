@@ -1,4 +1,6 @@
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/core/LiquidProxyRules.h"
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -18,6 +20,22 @@ std::vector<glm::vec3> quads(std::initializer_list<float> zs) {
     }
     return vertices;
 }
+struct FakeStream {
+    std::vector<int> values;
+    bool empty() const noexcept { return values.empty(); }
+    std::size_t size() const noexcept { return values.size(); }
+    auto const& get() const noexcept { return values; }
+};
+struct FakeIndexedStreams {
+    FakeStream mNormals;
+    FakeStream mTangents;
+    FakeStream mColors;
+    FakeStream mBoneId0s;
+    std::array<FakeStream, 3> mTextureUVs;
+    FakeStream mPBRTextureIndices;
+    FakeStream mMERS;
+    FakeStream mGeoType;
+};
 void keys() {
     auto const a=transparentSortKey({1.24f,-0.01f,2.0f});
     auto const b=transparentSortKey({1.25f,-0.26f,2.0f});
@@ -48,6 +66,69 @@ void orderAndAttributes() {
     auto duplicate=quads({-5,5,5});
     auto tie=transparentQuadOrder(duplicate,{0,0,0});
     CHECK(tie && *tie==std::vector<std::size_t>({0,1,2}));
+}
+void sectionBoundariesAndViewChanges() {
+    // Adjacent positive sections must reverse order when the camera crosses
+    // their shared boundary; this is the primitive contract the render owner
+    // relies on for a camera-local resort.
+    auto positiveBoundary=quads({15.5f,16.5f});
+    auto fromNegativeSide=transparentQuadOrder(positiveBoundary,{0,0,0});
+    auto fromPositiveSide=transparentQuadOrder(positiveBoundary,{0,0,32});
+    CHECK(fromNegativeSide && *fromNegativeSide==std::vector<std::size_t>({1,0}));
+    CHECK(fromPositiveSide && *fromPositiveSide==std::vector<std::size_t>({0,1}));
+
+    // Minecraft's negative coordinate section boundary is between -16 and
+    // -15. Keep it explicit so truncating division cannot silently change the
+    // expected order.
+    auto negativeBoundary=quads({-16.5f,-15.5f});
+    auto fromPositiveSideNegative=transparentQuadOrder(negativeBoundary,{0,0,0});
+    auto fromNegativeSideNegative=transparentQuadOrder(negativeBoundary,{0,0,-32});
+    CHECK(fromPositiveSideNegative && *fromPositiveSideNegative==std::vector<std::size_t>({0,1}));
+    CHECK(fromNegativeSideNegative && *fromNegativeSideNegative==std::vector<std::size_t>({1,0}));
+
+    auto movingView=quads({1,5,9});
+    auto firstView=transparentQuadOrder(movingView,{0,0,0});
+    auto secondView=transparentQuadOrder(movingView,{0,0,10});
+    CHECK(firstView && secondView);
+    CHECK(*firstView==std::vector<std::size_t>({2,1,0}));
+    CHECK(*secondView==std::vector<std::size_t>({0,1,2}));
+    CHECK(transparentQuadOrderChanged(*firstView));
+    CHECK(!transparentQuadOrderChanged(*secondView));
+    CHECK(*firstView != *secondView);
+}
+void immutableOriginalSourceAndIdentityRestoration() {
+    // Model the R4 ownership boundary: the source is never reordered, while
+    // each published view is a fresh copy. This makes camera reversal
+    // reversible and restores the original order for an identity result.
+    auto const original = quads({9,5,1});
+    auto current = original;
+    auto publishFromSource = [&](glm::vec3 camera) {
+        current = original;
+        auto const order = transparentQuadOrder(current, camera);
+        CHECK(order);
+        CHECK(reorderQuadVertexField(current, *order));
+    };
+    publishFromSource({0,0,10});
+    CHECK(current == quads({1,5,9}));
+    CHECK(original == quads({9,5,1}));
+    publishFromSource({0,0,0});
+    CHECK(current == original);
+    CHECK(original == quads({9,5,1}));
+
+    // An unavailable source is fail-closed: no replacement is published.
+    auto retained = current;
+    std::vector<glm::vec3> unavailable;
+    auto const noOrder = transparentQuadOrder(unavailable, {0,0,0});
+    CHECK(!noOrder);
+    CHECK(retained == current);
+
+    // A malformed source is likewise rejected before any source mutation.
+    auto malformedSource = original;
+    malformedSource.pop_back();
+    auto malformedRetained = current;
+    auto const malformedOrder = transparentQuadOrder(malformedSource, {0,0,0});
+    CHECK(!malformedOrder);
+    CHECK(malformedRetained == current);
 }
 void indices() {
     auto p=quads({1,5});
@@ -96,6 +177,31 @@ void malformed() {
     auto extreme=quads({(std::numeric_limits<float>::max)(),-(std::numeric_limits<float>::max)()});
     CHECK(transparentQuadOrder(extreme,{0,0,0}));
 }
+void liquidProxyGuards() {
+    CHECK(isValidLiquidProxyUvRect({0.1f, 0.2f, 0.3f, 0.4f}));
+    CHECK(!isValidLiquidProxyUvRect({0.1f, 0.2f, 0.1f, 0.4f}));
+    CHECK(!isValidLiquidProxyUvRect({0.1f, std::numeric_limits<float>::quiet_NaN(), 0.3f, 0.4f}));
+    CHECK(!liquidProxyFaceOccluded(false, false));
+    CHECK(liquidProxyFaceOccluded(false, true));
+    CHECK(liquidProxyFaceOccluded(true, false));
+
+    FakeIndexedStreams streams;
+    streams.mNormals.values.resize(8);
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
+    streams.mNormals.values.pop_back();
+    CHECK(!transparentIndexedStreamsCompatible(streams, 8));
+    streams.mNormals.values.resize(8);
+    streams.mTextureUVs[0].values.resize(8);
+    streams.mTextureUVs[1].values.resize(8);
+    streams.mTextureUVs[2].values.resize(8);
+    streams.mColors.values.resize(8);
+    streams.mGeoType.values.resize(8);
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
+    streams.mGeoType.values.resize(7);
+    CHECK(!transparentIndexedStreamsCompatible(streams, 8));
+    streams.mGeoType.values.clear();
+    CHECK(transparentIndexedStreamsCompatible(streams, 8));
+}
 void randomizedAndBudgetMeasurement() {
     std::mt19937 random(42);
     std::uniform_real_distribution<float> coord(-10000,10000);
@@ -128,7 +234,9 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
+    // Both test families: exact R9 water replay and validated Glass R5
+    // immutable quad-source, stationary-view, and proxy culling invariants.
     water_commands::runWaterCommands();
-    keys(); orderAndAttributes(); indices(); malformed(); randomizedAndBudgetMeasurement();
+    keys(); orderAndAttributes(); sectionBoundariesAndViewChanges(); immutableOriginalSourceAndIdentityRestoration(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }

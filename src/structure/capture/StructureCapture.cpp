@@ -1,4 +1,5 @@
 #include "structure/capture/StructureCapture.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "i18n/Message.h"
 #include "structure/capture/McstructureExporter.h"
@@ -43,6 +44,7 @@ void resetLocked();
 class CaptureLevelListener final : public LevelListener {
 public:
     void onLevelDestruction(std::string const&) override {
+        resourcepacks::state().invalidate();
         std::lock_guard lifecycleLock(gLifecycleMutex);
         std::lock_guard lock(gMutex);
         gLevel = nullptr;

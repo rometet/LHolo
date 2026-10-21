@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib, json, subprocess
+from NativeAdmissionBoundary import detach_native_admission
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/generated/render-contract'
@@ -79,6 +80,11 @@ for path, signature, call in [
     assert 'ScopedRegionWriteSuppression projectedWrites;' not in old_body
     assert body.index('ScopedRegionWriteSuppression projectedWrites;') < body.index(call)
     if path == renderer:
+        # Account for the existing reload admission notification independently:
+        # exactly once, as the first statement before any native owner work.
+        # The entire remaining drawing body must still match the historical
+        # implementation after the existing component-gate normalization.
+        body = detach_native_admission(body)
         # The independent component gate is checked by its production fixture.
         # Normalize precisely that gate to verify the earlier write scope and
         # all other block-actor command behavior remain unchanged.
