@@ -75,6 +75,7 @@ std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 std::atomic_bool gLiquidProxyR6Logged{};
+std::atomic_bool gExactReplayR7Logged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
 std::atomic_bool gTransparentQuadSortSourceFailureLogged{};
@@ -889,6 +890,13 @@ void submitProjectionMeshPass(
 
     auto& itemRenderer = renderContext.mItemInHandRenderer;
     auto const& blendMaterial = itemRenderer.mMatBlendBlock.get();
+    // R7: Exact Replay submits *before* the regular translucent ghost meshes.
+    // Resolve the R5 projection-owned material before native liquid submission,
+    // not after it.  Both can then share depthTest=on, blend=on, depthWrite=off
+    // without mutating the vanilla material used by Minecraft.
+    auto const& projectedBlendMaterial = renderAlphaLayer
+        ? projectionPrivateBlendMaterial(state, blendMaterial)
+        : blendMaterial;
 
     auto worldCenter = [&](std::size_t section) {
         return Vec3{
@@ -964,7 +972,7 @@ void submitProjectionMeshPass(
                 auto const* exactReplayMaterial =
                     ActivePraxisLiquidMaterial
                             == PraxisLiquidMaterialCandidate::BlendBlock
-                        ? &blendMaterial
+                        ? &projectedBlendMaterial
                         : (signText ? &*signText : nullptr);
                 auto const exactReplayMaterialReady =
                     liquidReplayMaterialReady(ActivePraxisLiquidMaterial, signTextReady, blendMaterialReady);
@@ -1003,6 +1011,26 @@ void submitProjectionMeshPass(
                 }
 
                 if (!exactSections.empty()) {
+                    if (!gExactReplayR7Logged.exchange(true, std::memory_order_acq_rel)) {
+                        auto const* vanilla = tryRenderMaterial(blendMaterial);
+                        auto const* effective = exactReplayMaterial
+                            ? tryRenderMaterial(*exactReplayMaterial) : nullptr;
+                        logger().info(
+                            "LHoloExactR7 path=PraxisExactReplay sections={} private={} "
+                            "sourceDepthWrite={} effectiveDepthWrite={} "
+                            "effectiveDepthTest={} blend={}",
+                            exactSections.size(),
+                            vanilla && effective && vanilla != effective ? 1 : 0,
+                            vanilla ? static_cast<unsigned int>(
+                                vanilla->depthStencilStateDescription->depthWriteMask
+                            ) : 0U,
+                            effective ? static_cast<unsigned int>(
+                                effective->depthStencilStateDescription->depthWriteMask
+                            ) : 0U,
+                            effective && effective->depthStencilStateDescription->depthTestEnabled ? 1 : 0,
+                            effective && effective->blendStateDescription->enableBlend ? 1 : 0
+                        );
+                    }
                     if (state.praxisCompatLiquidAggregateDirty
                         || state.praxisCompatLiquidAggregateOrder != exactSections) {
                         auto const aggregateStarted = std::chrono::steady_clock::now();
@@ -1076,7 +1104,8 @@ void submitProjectionMeshPass(
 
                 auto const retainedCandidate = retainedLiquidMaterial(signTextReady, blendMaterialReady);
                 auto const* retainedMaterial = !retainedCandidate ? nullptr
-                    : (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText ? &*signText : &blendMaterial);
+                    : (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText
+                        ? &*signText : &projectedBlendMaterial);
                 for (auto const section : retainedSections) {
                     auto const& mesh = state.nativeLiquidSectionMeshes[section];
                     if (!retainedMaterial || !mesh || !mesh->isValid()) continue;
@@ -1399,16 +1428,7 @@ void submitProjectionMeshPass(
         }
     };
 
-    // R6: every ghost alpha draw that samples the terrain atlas must use the
-    // same projection-owned, no-depth-write material. R5 previously covered
-    // normal blend meshes only, leaving liquid proxy and block-entity fallback
-    // hulls on the shared vanilla material with depth writes enabled.
-    // Resolve once per alpha pass so a resource epoch cannot select different
-    // owners for body and fallback draws within the same call.
-    auto const& projectedBlendMaterial = renderAlphaLayer
-        ? projectionPrivateBlendMaterial(state, blendMaterial)
-        : blendMaterial;
-
+    // R6 fallback hulls and R7 Exact Replay use the same R5 material owner.
     if (structureOpacity >= 0.999f) {
         auto opaqueMeshes = collectBucket(opaqueBucket);
         auto alphaMeshes = collectBucket(alphaBucket);
