@@ -1,4 +1,5 @@
 #include "projection/core/WaterloggedFaceClip.h"
+#include "projection/core/WaterloggedClipFamily.h"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -89,8 +90,64 @@ void multiBody() {
     near(result->front().u0,.5F);
     near(waterloggedRectArea(result->front()),.5F);
 }
+void safeFamilyPolicy() {
+    CHECK(waterloggedClipCandidate("minecraft:oak_stairs") == WaterloggedClipFamily::Stairs);
+    CHECK(waterloggedSafeClipFamily("minecraft:quartz_stairs",true) == WaterloggedClipFamily::Stairs);
+    CHECK(waterloggedSafeClipFamily("minecraft:quartz_stairs",false) == WaterloggedClipFamily::None);
+    for (auto const& name: {"minecraft:oak_slab","minecraft:stone_slab",
+                             "minecraft:wooden_slab","minecraft:stone_block_slab2",
+                             "minecraft:stone_block_slab3","minecraft:stone_block_slab4"}) {
+        CHECK(waterloggedSafeClipFamily(name,true) == WaterloggedClipFamily::Slab);
+        CHECK(waterloggedSafeClipFamily(name,false) == WaterloggedClipFamily::None);
+    }
+    CHECK(waterloggedSafeClipFamily("minecraft:trapdoor",true) == WaterloggedClipFamily::Trapdoor);
+    CHECK(waterloggedSafeClipFamily("minecraft:oak_trapdoor",true) == WaterloggedClipFamily::Trapdoor);
+    CHECK(waterloggedSafeClipFamily("minecraft:iron_trapdoor",false) == WaterloggedClipFamily::None);
+    CHECK(waterloggedSafeClipFamily("minecraft:oak_trapdoor",false) == WaterloggedClipFamily::None);
+    for (auto const& name: {"minecraft:glass_pane","minecraft:water","minecraft:lava",
+                             "minecraft:flowing_water","minecraft:flowing_lava",
+                             "minecraft:bubble_column","minecraft:kelp","minecraft:oak_fence",
+                             "othermod:stone_slab"}) {
+        CHECK(waterloggedClipCandidate(name) == WaterloggedClipFamily::None);
+    }
+}
+void slabGeometry() {
+    auto const waterSide=quad(0.F,0,0.F,1.F,0.F,1.F);
+    auto const slabSolidSide=waterloggedAxisRect(quad(.0009F,0,0.F,.5F,0.F,1.F));
+    CHECK(slabSolidSide);
+    auto clipped=clipWaterloggedNativeFace(waterSide,std::span{&*slabSolidSide,1U});
+    CHECK(clipped && clipped->size()==1);
+    near(waterloggedRectArea((*clipped)[0]),.5F);
+    near((*clipped)[0].u0,.5F);
+    // Slab body top at half-height is not near full water source surface.
+    auto waterTop=quad(.99899F,1,0.F,1.F,0.F,1.F);
+    auto slabTop=waterloggedAxisRect(quad(.5001F,1,0.F,1.F,0.F,1.F));
+    CHECK(slabTop);
+    CHECK(!clipWaterloggedNativeFace(waterTop,std::span{&*slabTop,1U}));
+    // Bottom slab fully hides the face coincident with the bottom of water.
+    auto bottomWater=quad(0.F,1,0.F,1.F,0.F,1.F);
+    auto bottomSlab=waterloggedAxisRect(quad(.0009F,1,0.F,1.F,0.F,1.F));
+    CHECK(bottomSlab);
+    auto bottom=clipWaterloggedNativeFace(bottomWater,std::span{&*bottomSlab,1U});
+    CHECK(bottom && bottom->empty());
+}
+void opaqueTrapdoorGeometry() {
+    auto const waterSide=quad(0.F,0,0.F,1.F,0.F,1.F);
+    auto const solidOpaqueFace=waterloggedAxisRect(quad(.0009F,0,.8F,.9F,0.F,1.F));
+    CHECK(solidOpaqueFace);
+    auto clipped=clipWaterloggedNativeFace(waterSide,std::span{&*solidOpaqueFace,1U});
+    CHECK(clipped && clipped->size()==2U);
+    float area{};
+    for (auto const& rect : *clipped) area += waterloggedRectArea(rect);
+    near(area,.9F);
+    // Perforated/alpha-test trapdoors may have a rectangular native
+    // outline, but the family guard must reject them before this stage.
+    CHECK(waterloggedSafeClipFamily("minecraft:oak_trapdoor",false)
+          == WaterloggedClipFamily::None);
+}
 }
 int main(){
     staircaseTop();staircaseSide();fullOcclusion();unrelatedOrUnsafe();multiBody();
+    safeFamilyPolicy();slabGeometry();opaqueTrapdoorGeometry();
     std::cout<<"LHoloWaterloggedClipTests PASS checks="<<checks<<" GPU=NOT_RUN\n";
 }

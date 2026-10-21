@@ -4,6 +4,7 @@
 #pragma once
 
 #include "projection/core/WaterloggedFaceClip.h"
+#include "projection/core/WaterloggedClipFamily.h"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -17,6 +18,7 @@ enum class PraxisCompatLiquidKind : std::uint8_t;
 struct WaterloggedBodyCellCoverage {
     std::size_t structureIndex{};
     std::vector<WaterloggedFaceRect> solidFaces;
+    WaterloggedClipFamily family{WaterloggedClipFamily::None};
 };
 struct WaterloggedClipReport {
     std::size_t beforeVertices{};
@@ -24,6 +26,9 @@ struct WaterloggedClipReport {
     std::size_t clippedSourceQuads{};
     std::size_t removedSourceQuads{};
     std::size_t addedFragmentQuads{};
+    std::size_t stairClippedQuads{};
+    std::size_t slabClippedQuads{};
+    std::size_t trapdoorClippedQuads{};
     bool committed{};
 };
 

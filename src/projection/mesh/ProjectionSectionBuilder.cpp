@@ -77,6 +77,8 @@ std::atomic_bool gNativeLiquidCullSkipLogged{};
 std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
+std::atomic<std::uint32_t> gWaterloggedR9TrapdoorDeferredLogCount{};
+std::atomic<std::uint32_t> gLiquidR9CellOwnerDiagnostics{};
 std::atomic_bool gSubmergedPlantLogged{};
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 std::atomic<std::uint32_t> gGeometryProbeBuilds{};
@@ -715,16 +717,21 @@ void buildProjectionSection(
                 auto& composite =
                     compositeBodyOutcomes[layered.compositeOutcomeIndex];
                 composite.vertices += verticesAdded;
-                // Reuse the exact native solid stair geometry. Capture only
-                // axis-aligned opaque faces from the composite cell so later
-                // water clipping does not guess shape from palette direction.
-                // Ordinary water, slabs, panes and translucent blocks retain
-                // the accepted Exact Replay geometry unchanged.
-                if (geometryAdded && layered.bucket == RenderBucket::Opaque
-                    && std::string_view{composite.body->getTypeName()}.ends_with("_stairs")
+                // R9 extends R8's verified native-face path to opaque slab
+                // models and opaque trapdoors only. Alpha-test trapdoors have
+                // texture cutouts which cannot be inferred from a quad outline:
+                // they must retain the original water stream (fail closed).
+                // No block-state/rotation geometry is guessed.
+                auto const clipFamily = waterloggedSafeClipFamily(
+                    layered.block->getTypeName(),
+                    layered.bucket == RenderBucket::Opaque
+                );
+                if (geometryAdded && clipFamily != WaterloggedClipFamily::None
                     && verticesAdded % 4U == 0U && verticesAdded <= 512U
                     && tessellator.mMeshData->mMode == mce::PrimitiveMode::QuadList) {
-                    auto& faces = bodyFaceCoverage[layered.compositeOutcomeIndex].solidFaces;
+                    auto& coverage = bodyFaceCoverage[layered.compositeOutcomeIndex];
+                    coverage.family = clipFamily;
+                    auto& faces = coverage.solidFaces;
                     auto const& vertices = tessellator.mMeshData->mPositions.get();
                     for (std::size_t begin = firstPosition;
                          begin + 4U <= vertices.size()
@@ -739,6 +746,19 @@ void buildProjectionSection(
                             faces.push_back(*rect);
                         }
                     }
+                } else if (geometryAdded && clipFamily == WaterloggedClipFamily::None
+                    && waterloggedClipCandidate(layered.block->getTypeName())
+                        == WaterloggedClipFamily::Trapdoor
+                    && gWaterloggedR9TrapdoorDeferredLogCount.fetch_add(
+                        1U, std::memory_order_acq_rel
+                    ) < 4U) {
+                    logger().info(
+                        "LHoloWaterloggedR9 trapdoorClippingDeferred=1 body={} "
+                        "layer={} bucket={} reason=non_opaque_or_unsupported",
+                        layered.block->getTypeName(),
+                        static_cast<unsigned int>(layered.layer),
+                        static_cast<unsigned int>(layered.bucket)
+                    );
                 }
                 auto const logIndex = gSubmergedBodyLogCount.fetch_add(
                     1U,
@@ -1524,6 +1544,28 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
+    // Diagnostic only: observe secondary-water ownership for bubble columns
+    // and native water/lava source-vs-flow families before modifying geometry.
+    // Do not modify the already-accepted liquid classification here.
+    auto const diagIndex = gLiquidR9CellOwnerDiagnostics.fetch_add(
+        1U, std::memory_order_acq_rel
+    );
+    if (diagIndex < 8U) {
+        std::size_t waterCells{}, lavaCells{}, bubbleCells{};
+        for (auto const index : succeeded) {
+            auto const& entry = state.structure->renderBlocks[index];
+            if (entry.liquid && entry.liquid->getBlockType().mMaterial.mSuperHot)
+                ++lavaCells;
+            else ++waterCells;
+            if (entry.block && entry.block->getTypeName() == "minecraft:bubble_column")
+                ++bubbleCells;
+        }
+        logger().info(
+            "LHoloLiquidR9 exactOwnedCells={} waterCells={} lavaCells={} "
+            "bubbleColumnWithWater={} nativeStreamValidBeforeCull=1",
+            succeeded.size(), waterCells, lavaCells, bubbleCells
+        );
+    }
     auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds, &liquidOwners);
     state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
@@ -1550,6 +1592,13 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             "removedQuads={} resultingFragments={} nativeMaterialUnchanged=1",
             r8.beforeVertices, r8.afterVertices, r8.clippedSourceQuads,
             r8.removedSourceQuads, r8.addedFragmentQuads
+        );
+        logger().info(
+            "LHoloWaterloggedR9 clippedStairQuads={} clippedSlabQuads={} "
+            "clippedOpaqueTrapdoorQuads={} before={} after={} "
+            "opaqueGeometryOnly=1 ordinaryLiquidUnchanged=1",
+            r8.stairClippedQuads, r8.slabClippedQuads,
+            r8.trapdoorClippedQuads, r8.beforeVertices, r8.afterVertices
         );
     }
 

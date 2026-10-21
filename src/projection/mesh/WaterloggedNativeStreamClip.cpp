@@ -91,6 +91,18 @@ WaterloggedClipReport clipWaterloggedNativeStream(
         || !data.mGeoType.get().empty()) {
         return report;
     }
+    // R9 keeps the original per-cell ownership but avoids a linear lookup
+    // for every liquid quad on dense multi-thousand-cell projections.
+    std::vector<WaterloggedBodyCellCoverage const*> eligible;
+    eligible.reserve(coverage.size());
+    for (auto const& cell : coverage) {
+        if (!cell.solidFaces.empty() && cell.family != WaterloggedClipFamily::None)
+            eligible.push_back(&cell);
+    }
+    if (eligible.empty()) return report;
+    std::sort(eligible.begin(), eligible.end(), [](auto const* a, auto const* b) {
+        return a->structureIndex < b->structureIndex;
+    });
     // No changed data is ever published until the entire replacement stream
     // is validated, including attribute alignment and nonempty sections.
     auto stagedPositions = positions;
@@ -140,23 +152,32 @@ WaterloggedClipReport clipWaterloggedNativeStream(
             appendOriginal();
             continue;
         }
-        auto const it = std::find_if(coverage.begin(), coverage.end(),
-            [&](WaterloggedBodyCellCoverage const& cell) {
-                return cell.structureIndex == owners[base] && !cell.solidFaces.empty();
-            });
-        if (it == coverage.end()) {
+        auto const it = std::lower_bound(
+            eligible.begin(), eligible.end(), owners[base],
+            [](WaterloggedBodyCellCoverage const* cell, std::size_t owner) {
+                return cell->structureIndex < owner;
+            }
+        );
+        if (it == eligible.end() || (*it)->structureIndex != owners[base]) {
             appendOriginal();
             continue;
         }
+        auto const& cell = **it;
         auto const rawPoints = pointsForQuad(sourcePos);
         auto const sourceRect = waterloggedAxisRect(rawPoints);
-        auto const fragments = clipWaterloggedNativeFace(rawPoints, it->solidFaces);
+        auto const fragments = clipWaterloggedNativeFace(rawPoints, cell.solidFaces);
         if (!sourceRect || !fragments) {
             appendOriginal();
             continue;
         }
         changed = true;
         ++report.clippedSourceQuads;
+        switch (cell.family) {
+        case WaterloggedClipFamily::Stairs: ++report.stairClippedQuads; break;
+        case WaterloggedClipFamily::Slab: ++report.slabClippedQuads; break;
+        case WaterloggedClipFamily::Trapdoor: ++report.trapdoorClippedQuads; break;
+        case WaterloggedClipFamily::None: break;
+        }
         if (fragments->empty()) {
             ++report.removedSourceQuads;
             continue;
