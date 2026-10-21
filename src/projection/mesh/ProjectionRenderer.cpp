@@ -74,6 +74,7 @@ std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
+std::atomic_bool gLiquidProxyR6Logged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
 std::atomic_bool gTransparentQuadSortSourceFailureLogged{};
@@ -1398,6 +1399,16 @@ void submitProjectionMeshPass(
         }
     };
 
+    // R6: every ghost alpha draw that samples the terrain atlas must use the
+    // same projection-owned, no-depth-write material. R5 previously covered
+    // normal blend meshes only, leaving liquid proxy and block-entity fallback
+    // hulls on the shared vanilla material with depth writes enabled.
+    // Resolve once per alpha pass so a resource epoch cannot select different
+    // owners for body and fallback draws within the same call.
+    auto const& projectedBlendMaterial = renderAlphaLayer
+        ? projectionPrivateBlendMaterial(state, blendMaterial)
+        : blendMaterial;
+
     if (structureOpacity >= 0.999f) {
         auto opaqueMeshes = collectBucket(opaqueBucket);
         auto alphaMeshes = collectBucket(alphaBucket);
@@ -1436,7 +1447,7 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
+            renderMeshes(transparentMeshes, projectedBlendMaterial);
         }
     } else if (renderAlphaLayer) {
         // True projection transparency needs a blending material even for
@@ -1452,7 +1463,7 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
-        renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
+        renderMeshes(transparentMeshes, projectedBlendMaterial);
     }
 
     // Textured liquid hulls travel the proven glass path: blend-block material
@@ -1477,11 +1488,30 @@ void submitProjectionMeshPass(
                 return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
             }
         );
+        if (!liquidSections.empty()
+            && !gLiquidProxyR6Logged.exchange(true, std::memory_order_acq_rel)) {
+            auto const* source = tryRenderMaterial(blendMaterial);
+            auto const* effective = tryRenderMaterial(projectedBlendMaterial);
+            logger().info(
+                "LHoloLiquidR6 fallbackProxySections={} projectionPrivate={} "
+                "sourceDepthWrite={} effectiveDepthWrite={} effectiveDepthTest={} blend={}",
+                liquidSections.size(),
+                source && effective && source != effective ? 1 : 0,
+                source ? static_cast<unsigned int>(
+                    source->depthStencilStateDescription->depthWriteMask
+                ) : 0U,
+                effective ? static_cast<unsigned int>(
+                    effective->depthStencilStateDescription->depthWriteMask
+                ) : 0U,
+                effective && effective->depthStencilStateDescription->depthTestEnabled ? 1 : 0,
+                effective && effective->blendStateDescription->enableBlend ? 1 : 0
+            );
+        }
         for (auto const liquidSection : liquidSections) {
             auto& mesh = *state.liquidProxySectionMeshes[liquidSection];
             mesh.renderMesh(
                 renderContext.mScreenContext,
-                blendMaterial,
+                projectedBlendMaterial,
                 *state.terrainTextureVariant,
                 0,
                 mesh.mVertexCount.get().value_or(0u),
@@ -1497,7 +1527,7 @@ void submitProjectionMeshPass(
             if (!placeholder || !placeholder->isValid()) continue;
             placeholder->renderMesh(
                 renderContext.mScreenContext,
-                blendMaterial,
+                projectedBlendMaterial,
                 *state.terrainTextureVariant,
                 0,
                 placeholder->mVertexCount.get().value_or(0u),
