@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionSectionBuilder.h"
+#include "projection/mesh/WaterloggedNativeStreamClip.h"
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 #include "projection/mesh/NativeGeometryProbe.h"
 #endif
@@ -17,6 +18,7 @@
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
+#include "projection/core/WaterloggedFaceClip.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
@@ -34,6 +36,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -262,7 +265,8 @@ struct NativeLiquidCullOutcome {
 
 NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     Tessellator&                              tessellator,
-    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr
+    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr,
+    std::vector<std::size_t>*              owners = nullptr
 ) {
     NativeLiquidCullOutcome outcome{};
     auto& data = tessellator.mMeshData.get();
@@ -300,6 +304,10 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     }
     if (liquidKinds && liquidKinds->size() != positions.size()) {
         outcome.skipReason = "liquid_kind_count_mismatch";
+        return outcome;
+    }
+    if (owners && owners->size() != positions.size()) {
+        outcome.skipReason = "liquid_owner_count_mismatch";
         return outcome;
     }
 
@@ -344,6 +352,9 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
         compactPerVertexField(data.mGeoType.get(), mask.removeQuads);
         if (liquidKinds) {
             compactPerVertexField(*liquidKinds, mask.removeQuads);
+        }
+        if (owners) {
+            compactPerVertexField(*owners, mask.removeQuads);
         }
         compactPerQuadField(quadInfo, mask.removeQuads);
 
@@ -409,7 +420,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     Tessellator&,
     BlockTessellator&,
     std::size_t,
-    ProjectionSectionBuildSettings const&
+    ProjectionSectionBuildSettings const&,
+    std::span<WaterloggedBodyCellCoverage const>
 );
 
 void buildBlockEntityPlaceholderSectionMesh(
@@ -514,6 +526,7 @@ void buildProjectionSection(
     std::vector<std::size_t> failedTessellationIndices;
     std::vector<LayeredBlock> layeredBlocks;
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
+    std::vector<WaterloggedBodyCellCoverage> bodyFaceCoverage;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
         // Never draw a projected block model on top of an existing
@@ -539,6 +552,7 @@ void buildProjectionSection(
                 entry.liquid,
                 0U
             });
+            bodyFaceCoverage.push_back({index, {}});
         }
         auto const appendBlock = [&](Block const* source) {
             auto const* transformedBlock = transformExpectedBlock(source, sectionTransformSettings, identityTransform);
@@ -701,6 +715,31 @@ void buildProjectionSection(
                 auto& composite =
                     compositeBodyOutcomes[layered.compositeOutcomeIndex];
                 composite.vertices += verticesAdded;
+                // Reuse the exact native solid stair geometry. Capture only
+                // axis-aligned opaque faces from the composite cell so later
+                // water clipping does not guess shape from palette direction.
+                // Ordinary water, slabs, panes and translucent blocks retain
+                // the accepted Exact Replay geometry unchanged.
+                if (geometryAdded && layered.bucket == RenderBucket::Opaque
+                    && std::string_view{composite.body->getTypeName()}.ends_with("_stairs")
+                    && verticesAdded % 4U == 0U && verticesAdded <= 512U
+                    && tessellator.mMeshData->mMode == mce::PrimitiveMode::QuadList) {
+                    auto& faces = bodyFaceCoverage[layered.compositeOutcomeIndex].solidFaces;
+                    auto const& vertices = tessellator.mMeshData->mPositions.get();
+                    for (std::size_t begin = firstPosition;
+                         begin + 4U <= vertices.size()
+                         && faces.size() < WaterloggedMaxBodyRects;
+                         begin += 4U) {
+                        WaterloggedQuadPositions points{};
+                        for (std::size_t corner = 0; corner < 4U; ++corner) {
+                            auto const& v = vertices[begin + corner];
+                            points[corner] = {v.x, v.y, v.z};
+                        }
+                        if (auto const rect = waterloggedAxisRect(points)) {
+                            faces.push_back(*rect);
+                        }
+                    }
+                }
                 auto const logIndex = gSubmergedBodyLogCount.fetch_add(
                     1U,
                     std::memory_order_acq_rel
@@ -836,7 +875,8 @@ void buildProjectionSection(
             tessellator,
             blockTessellator,
             section,
-            sectionBuildSettings
+            sectionBuildSettings,
+            bodyFaceCoverage
         );
         if (state.praxisCompatLiquidSections[section]) {
             // The exact replay stream owns this section. Do not spend a second
@@ -1286,7 +1326,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     Tessellator&                          tessellator,
     BlockTessellator&                     blockTessellator,
     std::size_t                           section,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& settings,
+    std::span<WaterloggedBodyCellCoverage const> bodyCoverage
 ) {
     static_assert(
         static_cast<unsigned int>(BlockRenderLayer::RenderlayerBlend) == 3U,
@@ -1302,6 +1343,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     };
     std::vector<std::size_t> candidates;
     std::vector<PraxisCompatLiquidKind> liquidKinds;
+    std::vector<std::size_t> liquidOwners;
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
@@ -1465,6 +1507,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             ? PraxisCompatLiquidKind::Lava
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
+        liquidOwners.insert(liquidOwners.end(), addedVertices, index);
         succeeded.push_back(index);
     }
 
@@ -1481,7 +1524,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
-    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
+    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds, &liquidOwners);
     state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
     if (!cull.processed) {
@@ -1496,6 +1539,19 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     }
     state.nativeLiquidTelemetry.praxisCompatVerticesCulled += cull.culled;
     state.nativeLiquidTelemetry.praxisCompatFacePairsCulled += cull.pairs;
+    // R8: remove only source-solid coincident water rectangles. Normal
+    // water and other waterlogged families use the old exact replay stream.
+    auto const r8 = clipWaterloggedNativeStream(
+        tessellator, liquidKinds, liquidOwners, bodyCoverage
+    );
+    if (r8.committed) {
+        logger().info(
+            "LHoloWaterloggedR8 before={} after={} clippedQuads={} "
+            "removedQuads={} resultingFragments={} nativeMaterialUnchanged=1",
+            r8.beforeVertices, r8.afterVertices, r8.clippedSourceQuads,
+            r8.removedSourceQuads, r8.addedFragmentQuads
+        );
+    }
 
     auto& meshData = tessellator.mMeshData.get();
     auto& positions = meshData.mPositions.get();
