@@ -15,12 +15,15 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "place/PlaceHelper.h"
+#include "ui/BlockIconRuntime.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
 #include "i18n/Message.h"
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
+#include "place/PlacementRotationDelivery.h"
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
@@ -68,6 +71,7 @@ struct PlaceHookStatus {
     bool manualUseItem{};
     bool manualStop{};
     bool manualBuild{};
+    bool rotation{};
 };
 
 PlaceHookStatus gHookStatus;
@@ -86,6 +90,10 @@ LL_TYPE_INSTANCE_HOOK(
         origin(currentTick);
         return;
     }
+    app::invokeNativeCallback([] { ui::icons::tick(); },
+        [](char const* reason) noexcept { app::reportNativeCallbackFailure("block icon tick", reason); });
+    auto resourceLease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!resourceLease){origin(currentTick);return;}
     app::invokeNativeCallback([&] { structure::capture::tick(*this); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("capture game tick", reason); });
     app::invokeNativeCallback([&] {
@@ -147,6 +155,8 @@ LL_TYPE_INSTANCE_HOOK(
         origin(pos, face, handSlot);
         return;
     }
+    auto resourceLease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!resourceLease){origin(pos,face,handSlot);return;}
     auto const inputEpoch = placementState().manualInputEpoch();
     bool handled{};
     auto const succeeded = app::invokeNativeCallback([&] {
@@ -200,6 +210,8 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     app::hook_lifecycle::DetourGuard guard;
     if (!guard) return origin(item, handSlot);
+    auto resourceLease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!resourceLease)return origin(item,handSlot);
     auto const inputEpoch = placementState().manualInputEpoch();
     bool handled{};
     auto const succeeded = app::invokeNativeCallback([&] {
@@ -273,6 +285,8 @@ LL_TYPE_INSTANCE_HOOK(
 ) {
     app::hook_lifecycle::DetourGuard guard;
     if (!guard) return origin(pos, face, handSlot, isSimTick);
+    auto resourceLease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+    if(!resourceLease)return origin(pos,face,handSlot,isSimTick);
     bool handled{};
     auto const succeeded = app::invokeNativeCallback([&] {
       if (isLocalManualBuild(*this)) {
@@ -415,6 +429,8 @@ bool installHook() {
         return false;
     }
     gPlacementHooksReady.store(true, std::memory_order_release);
+    gHookStatus.rotation=detail::installRotationDeliveryHook();
+    if (!gHookStatus.rotation) logger().warn("Placement rotation delivery unavailable; retaining current-facing placement");
     return true;
 }
 
@@ -426,6 +442,7 @@ bool uninstallHook() {
         if (unhook()) installed = false;
         else ok = false;
     };
+    remove(gHookStatus.rotation, [] { return detail::uninstallRotationDeliveryHook(); });
     remove(gHookStatus.manualBuild, [] { return GameModeBuildBlockHook::unhook(); });
     remove(gHookStatus.manualStop, [] { return GameModeStopBuildHook::unhook(); });
     remove(gHookStatus.manualUseItem, [] { return GameModeUseItemHook::unhook(); });

@@ -10,6 +10,7 @@
 #include "i18n/Message.h"
 #include "structure/LayerDisplayTypes.h"
 #include "structure/StructureLoader.h"
+#include "structure/ActiveProjection.h"
 
 #include <atomic>
 #include <memory>
@@ -49,6 +50,7 @@ struct StructureSessionSnapshot {
     int                                    maxLayerX{};
     StructureTransformSnapshot             transform;
     SavedProjectionSnapshot                saved;
+    ProjectionRequestStamp                 request;
 };
 
 class StructureSession {
@@ -61,6 +63,15 @@ public:
     StructureSession& operator=(StructureSession&&)      = delete;
 
     [[nodiscard]] StructureSessionSnapshot snapshot() const;
+    // Verification publishes value-only results while this generation and
+    // placement are still current. Lock order is StructureSession -> schematic;
+    // the callback must not re-enter this owner or perform native work.
+    template<class Publish>
+    bool publishVerificationIfCurrent(StructureSessionSnapshot const& expected,Publish&& publish) const {
+        std::lock_guard lock(mMutex);
+        if(!verificationContextCurrentLocked(expected))return false;
+        return publish();
+    }
     [[nodiscard]] std::shared_ptr<LoadedStructure const> loaded() const;
     [[nodiscard]] bool hasLoaded() const;
     [[nodiscard]] std::string lastPath() const;
@@ -73,7 +84,8 @@ public:
     void replaceLoaded(
         std::shared_ptr<LoadedStructure> loaded,
         std::string                      path,
-        i18n::Message                    status
+        i18n::Message                    status,
+        ProjectionRequestStamp          request = {}
     );
     void clearLoaded(i18n::Message status);
 
@@ -101,6 +113,7 @@ public:
     void setSavedProjection(SavedProjectionSnapshot const& saved);
     void refreshSavedTransformIfActive();
     void recordProjectionAnchor(int x, int y, int z);
+    bool recordProjectionAnchor(std::shared_ptr<LoadedStructure const> const& expected,std::uint64_t generation,int x,int y,int z);
 
 private:
     StructureSession() = default;
@@ -108,9 +121,12 @@ private:
     [[nodiscard]] StructureTransformSnapshot transformRelaxed() const;
     [[nodiscard]] SavedProjectionSnapshot savedProjectionLocked() const;
     void refreshSavedTransformLocked();
+    void recordProjectionAnchorLocked(int x,int y,int z);
+    [[nodiscard]] bool verificationContextCurrentLocked(StructureSessionSnapshot const& expected) const;
 
     mutable std::mutex              mMutex;
     std::shared_ptr<LoadedStructure> mLoaded;
+    ProjectionRequestStamp          mRequest;
     std::string                      mSavedStructurePath;
     std::string                      mLastPath;
     i18n::Message                    mStatus{i18n::TextKey::StatusNotLoaded};

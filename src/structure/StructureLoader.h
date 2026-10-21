@@ -17,6 +17,7 @@
 #pragma once
 
 #include "i18n/Message.h"
+#include "input/MenuRoute.h"
 #include "structure/LayerDisplayTypes.h"
 
 #include <cstdint>
@@ -77,7 +78,7 @@ bool isInputTransitionBlocked();
 // True while the LHolo menu owns keyboard and mouse input. Keep input guards
 // on every platform-facing path behind this single policy predicate.
 bool isMenuInputCaptured();
-bool handleGuiHotkeyKeyDown(unsigned int virtualKey);
+bool handleGuiHotkeyKeyDown(unsigned int virtualKey, bool allowDirectRoutes=false,std::uintptr_t gameWindow=0);
 bool handleGuiHotkeyKeyUp(unsigned int virtualKey);
 bool handleProjectionOffsetWheel(short wheelDelta);
 void resetHotkeyState();
@@ -127,10 +128,11 @@ LayerDisplayMode getLayerDisplayMode();
 int getDisplayLayer();
 LayerAxis getLayerAxis();
 void recordProjectionAnchor(int x, int y, int z);
+bool recordProjectionAnchor(std::shared_ptr<LoadedStructure const> const& expected,std::uint64_t generation,int x,int y,int z);
 // True when the Bedrock mouse-input boundary should give the wheel to projection
 // movement: a projection is loaded and the fixed Alt trigger is held.
 bool scrollLockActive();
-void clear();
+void clear(bool preserveQueuedVerification=false);
 // Drain any in-flight asynchronous structure preparation before native module
 // teardown. This is stronger than cancellation: it joins code executing inside
 // the LHolo DLL so no worker can return into an unloaded image.
@@ -140,7 +142,7 @@ void shutdownPendingStructureLoad();
 void requestStructureFileLoad(std::string path);
 // Reload the last saved projection at its saved anchor/transform. Standalone so
 // both the menu action and the load hotkey can trigger it.
-void restoreSavedProjection();
+void restoreSavedProjection(std::uint64_t placementId=0);
 // Status line for a freshly loaded structure. File names and dimensions are
 // language-neutral fragments; the table entry supplies the wording.
 i18n::Message makeLoadedStatusMessage(LoadedStructure const& loaded);

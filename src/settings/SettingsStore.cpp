@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "settings/SettingsStore.h"
+#include "input/MenuRoute.h"
 #include "projection/core/ComparisonStyle.h"
 #include "place/ManualPlacementRules.h"
 
@@ -152,6 +153,9 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         parsed.hudShowProjectedBlockName
     );
     parsed.hudPosition = json.value("hudPosition", parsed.hudPosition);
+    if(auto found=json.find("hudLayouts");found!=json.end()&&found->is_array()&&found->size()==2) {
+        for(unsigned i=0;i<2;++i)try {auto const& j=(*found)[i];ui::HudLayout v{j.value("custom",false),j.value("x",0.f),j.value("y",0.f),j.value("scale",1.f),j.value("anchor",0)};if(ui::validHudLayout(v))parsed.hudLayouts[i]=v;}catch(...){}
+    }
     parsed.guiHotkey = json.value("guiHotkey", parsed.guiHotkey);
     parsed.guiHotkeyModifiers = json.value("guiHotkeyModifiers", parsed.guiHotkeyModifiers);
     // Upstream schema 12 used Simplified Chinese and Alt+M as defaults. On the
@@ -184,6 +188,10 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         = json.value("toggleManualHotkeyModifiers", parsed.toggleManualHotkeyModifiers);
     parsed.altWheelOffsetEnabled
         = json.value("altWheelOffsetEnabled", parsed.altWheelOffsetEnabled);
+    for (std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index) {
+        parsed.directMenuHotkeys[index]=json.value(input::kDirectMenuSettingKeys[index],0);
+        parsed.directMenuHotkeyModifiers[index]=json.value(input::kDirectMenuModifierKeys[index],0);
+    }
 
     // Slot order: left, right, forward, backward, up, down. These are the
     // directions the slots produce now; configs written while the slots were
@@ -260,7 +268,7 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
     if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), error);
     if (error) throw std::runtime_error(error.message());
 
-    nlohmann::ordered_json const json{
+    nlohmann::ordered_json json{
         {"version", 13},
         {"lastStructurePath", settings.lastStructurePath},
         {"language", settings.language},
@@ -290,6 +298,9 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"hudShowExtraBlocks", settings.hudShowExtraBlocks},
         {"hudShowProjectedBlockName", settings.hudShowProjectedBlockName},
         {"hudPosition", settings.hudPosition},
+        {"hudLayouts", nlohmann::json::array({
+            {{"custom",settings.hudLayouts[0].custom},{"x",settings.hudLayouts[0].x},{"y",settings.hudLayouts[0].y},{"scale",settings.hudLayouts[0].scale},{"anchor",settings.hudLayouts[0].anchor}},
+            {{"custom",settings.hudLayouts[1].custom},{"x",settings.hudLayouts[1].x},{"y",settings.hudLayouts[1].y},{"scale",settings.hudLayouts[1].scale},{"anchor",settings.hudLayouts[1].anchor}}})},
         {"guiHotkey", settings.guiHotkey},
         {"guiHotkeyModifiers", settings.guiHotkeyModifiers},
         {"layerIncreaseHotkey", settings.layerIncreaseHotkey},
@@ -330,6 +341,10 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"savedDisplayLayer", settings.savedDisplayLayer},
         {"savedLayerAxis", settings.savedLayerAxis}
     };
+    for (std::size_t index=0;index<input::kDirectMenuHotkeyCount;++index) {
+        json[input::kDirectMenuSettingKeys[index]]=settings.directMenuHotkeys[index];
+        json[input::kDirectMenuModifierKeys[index]]=settings.directMenuHotkeyModifiers[index];
+    }
     // Serialize before touching the destination: invalid UTF-8/allocations can
     // throw. Replacement occurs only after a complete, flushed write succeeds.
     writeAtomically(path, json.dump(2));

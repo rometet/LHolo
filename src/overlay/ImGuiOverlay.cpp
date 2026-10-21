@@ -15,6 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "overlay/ImGuiOverlay.h"
+#include "overlay/BlockIconGpu.h"
+#include "resourcepacks/WorldPackReloadGpuOwner.h"
 #include "overlay/OverlayFonts.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
@@ -57,6 +59,7 @@
 #include "input/MenuInputGuard.h"
 #include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
+#include "structure/StructureUiState.h"
 #include "ui/FluentTheme.h"
 #include "ll/api/mod/NativeMod.h"
 #include "ll/api/service/TargetedBedrock.h"
@@ -244,6 +247,7 @@ HWND findProcessWindow() {
 }
 
 void releaseGraphicsBackend() {
+    blockIconGpu().reset();
     std::lock_guard imguiLock(gImGuiMutex);
     // A v3 companion owns its own ImGui/DX11 backend on the same device/context.
     // Tear it down before LHolo releases or recreates the shared graphics device.
@@ -660,6 +664,11 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
 
     auto const menuWasVisible = anyMenuVisible();
     auto const lholoWasVisible = structure::isGuiVisible();
+    // A click can activate an ImGui text field before the next Present has
+    // published WantTextInput. Conservatively block direct routes until that
+    // frame resolves the active widget; do not inspect another thread's ImGui.
+    if(lholoWasVisible && (message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK))
+        structure::detail::StructureUiState::getInstance().setUiInteractionBlocked(true);
 
     if (!gShuttingDown.load(std::memory_order_acquire) && gImGuiInitialized
         && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
@@ -674,7 +683,8 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
             if (menuWasVisible && !menuVisible) confineMouseToClientCenter(window);
             return 1;
         }
-        if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam))) {
+        if (structure::handleGuiHotkeyKeyDown(static_cast<unsigned int>(wParam),
+                isForegroundGameWindow(window) && !companion::isVisible(),reinterpret_cast<std::uintptr_t>(window))) {
             if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                 companion::close();
             }
@@ -690,6 +700,10 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         if (companion::handleHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
         if (structure::handleGuiHotkeyKeyUp(static_cast<unsigned int>(wParam))) return 1;
     }
+    if(lholoWasVisible && !structure::detail::StructureUiState::getInstance().hasPendingMenuRoute()
+        && (message==WM_CHAR || message==WM_UNICHAR || message==WM_IME_STARTCOMPOSITION || message==WM_IME_COMPOSITION
+            || ((message==WM_KEYDOWN || message==WM_SYSKEYDOWN) && (wParam==VK_TAB || wParam==VK_RETURN))))
+        structure::detail::StructureUiState::getInstance().setUiInteractionBlocked(true);
     if ((message == WM_KEYUP || message == WM_SYSKEYUP) && wParam == VK_ESCAPE
         && gConsumeEscapeRelease.exchange(false, std::memory_order_acq_rel)) {
         return 1;
@@ -716,7 +730,8 @@ std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wPa
         }
         if (mouseKey != 0) {
             if (message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
-                if (structure::handleGuiHotkeyKeyDown(mouseKey)) {
+                if (structure::handleGuiHotkeyKeyDown(mouseKey,
+                        isForegroundGameWindow(window) && !companion::isVisible(),reinterpret_cast<std::uintptr_t>(window))) {
                     if (!lholoWasVisible && structure::isGuiVisible() && companion::isVisible()) {
                         companion::close();
                     }
@@ -928,7 +943,11 @@ void render(IDXGISwapChain* swapChain) {
     // D3D12 startup may not have exposed its command queue yet, so a failed
     // attempt is intentionally retried on the next Present.
     if (!initializeImGui(swapChain)) return;
-    structure::processPendingActions();
+    resourcepacks::gpuOwner().pump(resourcepacks::state(),blockIconGpu(),gDevice,gDeviceContext);
+    {
+        auto lease=resourcepacks::state().enter(resourcepacks::Role::Projection);
+        if(lease)structure::processPendingActions();
+    }
 
     auto const showLholoGui = structure::isGuiVisible();
     auto const showCompanionGui = companion::isVisible();
@@ -992,6 +1011,8 @@ void render(IDXGISwapChain* swapChain) {
             ImGui_ImplDX11_NewFrame();
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
+            blockIconGpu().beginFrame(gDevice);
+            app::ScopeExit endIconFrame([]() noexcept {blockIconGpu().endFrame();});
             detail::ImGuiFrameRecovery frameRecovery;
 
             if (structure::isGuiVisible()) {

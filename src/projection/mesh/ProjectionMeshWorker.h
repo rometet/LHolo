@@ -7,6 +7,7 @@
 #pragma once
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/mesh/ResourceReloadCancellation.h"
 
 #include <array>
 #include <cstddef>
@@ -60,6 +61,7 @@ bool submitMeshWorkerTask(
 );
 
 std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limit);
+std::vector<CancelledSectionBuild> takeCancelledSectionBuilds();
 
 bool meshWorkerIsBusy();
 bool consumeMeshWorkerFatalFailure();

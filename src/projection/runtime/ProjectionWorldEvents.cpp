@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/runtime/ProjectionWorldEvents.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "projection/runtime/CoalescedEventQueue.h"
 #include "projection/runtime/ChunkAvailabilityQueue.h"
 #include "projection/runtime/EpochFailure.h"
@@ -55,6 +56,7 @@ public:
         // Worker-local BlockSources are unrelated. Do not make their teardown
         // wait on the render owner's barrier while that owner joins the worker.
         if (gAttachedBlockSource.load(std::memory_order_acquire) != &source) return;
+        resourcepacks::state().invalidate();
         std::lock_guard lifecycleLock(gWorldLifecycleMutex);
         auto* expected = &source;
         if (gAttachedBlockSource.compare_exchange_strong(
@@ -161,6 +163,7 @@ public:
     }
 
     void onLevelDestruction(std::string const&) override {
+        resourcepacks::state().invalidate();
         std::lock_guard lifecycleLock(gWorldLifecycleMutex);
         // Publish before waiting for the worker barrier so the render path
         // stops using the old session while engine teardown is in progress.

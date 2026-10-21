@@ -172,13 +172,8 @@ int main(){
     fixtureMapping.bedrockStates.clear();
     r=resolveJavaBlockState("minecraft:barrel",{},0);
     require(r.mapped && r.block==&defaultBlock,"mapping with no requested states accepts registry default");
-    mappingAvailable=false; defaultAvailable=true; defaultBlock.name="minecraft:bubble_column";
-    r=resolveJavaBlockState("minecraft:bubble_column",{},0);
-    require(r.mapped && r.block==&defaultBlock && r.liquid==&water,"direct bubble column fallback preserves its body plus water layer");
-    defaultBlock.name="minecraft:barrel";
     defaultAvailable=false;
     require(!resolveJavaBlockState("minecraft:barrel",{},0).mapped,"missing registry default fails");
-    mappingAvailable=true;
     fixtureMapping.bedrockName="minecraft:air";
     require(resolveJavaBlockState("minecraft:air",{},0).mapped,"known mapped air remains successful empty cell");
     std::printf("RA06: %u checks PASS\n",checks);

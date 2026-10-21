@@ -1,3 +1,28 @@
+## Latest experimental prerelease: v26.51.2-ja.9-rc.1 (Glass R5 + Praxis Resource ABI v4)
+
+This LHolo update preserves Glass R5 private-blend/transparent/depth fixes
+and restores the real lholo_resource_reload_v4 native state participant
+required by Praxis R33. Use Windows x64 / Minecraft Bedrock 1.26.51.01 /
+LeviLamina Client 26.51.5.
+
+On 2026-10-21 a user tested the two installed DLLs together in one disposable
+offline cloned world. A local pack was disabled from Minecraft's own Global
+Resources screen without exiting, both participants resumed in the next epoch,
+and the local player remained visible in third-person. This is not general
+world, multiplayer, server-pack or bulk toggle support. Praxis R33 owns the
+native editor, pack policy and avatar/geometry rebind; LHolo only implements
+its safe participant, and cannot toggle packs alone.
+
+Praxis release: https://github.com/rometet/praxis/releases/tag/v0.1.3-rc.1
+LHolo release notes: docs/R5_RESOURCE_ABI_V4_RELEASE.md
+
+Known unrelated problems: LHolo config save sometimes returns Access is denied;
+native hook teardown may warn on exit. Do not hot-unload native modules;
+fully close Minecraft before upgrading and keep existing world/config data.
+Back up the installed LHolo DLL and matching PDB before replacing either.
+
+---
+
 # LHolo
 
 [日本語](docs/README_JA.md) | [English](docs/README_EN.md)

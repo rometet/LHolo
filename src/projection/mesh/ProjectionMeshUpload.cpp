@@ -130,6 +130,8 @@ void mergeNativeLiquidTelemetry(
 } // namespace
 
 void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessellator) {
+    for(auto const& cancelled:takeCancelledSectionBuilds())
+        (void)recoverCancelledSection(cancelled,state.meshWorkerGeneration,state.structureGeneration,state.sections);
     if (auto bufferService = tessellator.mBufferResourceService.lock()) {
         auto const uploadStarted = std::chrono::steady_clock::now();
         for (std::size_t uploaded = 0; uploaded < 2; ++uploaded) {

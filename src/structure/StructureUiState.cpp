@@ -38,6 +38,10 @@ constexpr std::array<DefaultHotkey, input::kHotkeyCount> kDefaultHotkeys{{
     {0,       0},
     {0,       0},
     {0,       0},
+    {0,       0}, // OpenPlaced: direct routes start unassigned.
+    {0,       0}, // OpenFiles
+    {0,       0}, // OpenVerification
+    {0,       0}, // OpenMaterials
 }};
 
 // "Reset all hotkeys" restores this together with the bindings: it is an input
@@ -73,12 +77,97 @@ bool StructureUiState::guiVisible() const {
 
 bool StructureUiState::toggleGuiVisible() {
     auto const opening = !mGuiVisible.load(std::memory_order_acquire);
-    mGuiVisible.store(opening, std::memory_order_release);
+    setGuiVisible(opening);
     return opening;
 }
 
 void StructureUiState::setGuiVisible(bool visible) {
-    mGuiVisible.store(visible, std::memory_order_release);
+    std::lock_guard lock(mMenuRouteMutex);
+    cancelMenuRoutesLocked();
+    mGuiVisible.store(visible,std::memory_order_release);
+    mUiInteractionBlocked.store(false,std::memory_order_release);
+}
+
+void StructureUiState::cancelMenuRoutesLocked() {
+    mPendingMenuRoute.reset();
+    mMenuRouteGeneration.fetch_add(1,std::memory_order_acq_rel);
+    if(mMenuRouteOpeningGui) {
+        mGuiVisible.store(false,std::memory_order_release);
+        mBlockGameInputUntil.store(GetTickCount64()+180,std::memory_order_release);
+    }
+    mMenuRouteOpeningGui=false;
+}
+void StructureUiState::cancelMenuRoutes() {
+    std::lock_guard lock(mMenuRouteMutex);cancelMenuRoutesLocked();
+}
+std::uint64_t StructureUiState::menuRouteGeneration() const { return mMenuRouteGeneration.load(std::memory_order_acquire); }
+bool StructureUiState::queueMenuRoute(input::MenuRouteIntent intent) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.route<input::MenuRoute::Placed || intent.route>input::MenuRoute::Materials
+        || intent.uiGeneration!=menuRouteGeneration() || uiInteractionBlocked() || nativeTextInputBlocked())return false;
+    intent.uiGeneration=mMenuRouteGeneration.fetch_add(1,std::memory_order_acq_rel)+1;
+    mPendingMenuRoute=intent;
+    mMenuRouteOpeningGui=mMenuRouteOpeningGui || !guiVisible();
+    mGuiVisible.store(true, std::memory_order_release);
+    setOpeningInputBlockFrames(3);
+    return true;
+}
+std::optional<input::MenuRouteIntent> StructureUiState::consumeMenuRoute() {
+    std::lock_guard lock(mMenuRouteMutex);auto intent=mPendingMenuRoute;mPendingMenuRoute.reset();return intent;
+}
+bool StructureUiState::hasPendingMenuRoute() const {
+    std::lock_guard lock(mMenuRouteMutex);return mPendingMenuRoute.has_value();
+}
+bool StructureUiState::applyMenuRouteIfCurrent(input::MenuRouteIntent const& intent,bool currentInteractionBlocked,std::function<void()> const& apply) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.uiGeneration!=menuRouteGeneration())return false;
+    if(!guiVisible() || currentInteractionBlocked || uiInteractionBlocked() || nativeTextInputBlocked()) {
+        cancelMenuRoutesLocked();return false;
+    }
+    apply();mMenuRouteOpeningGui=false;return true;
+}
+void StructureUiState::discardMenuRoute(input::MenuRouteIntent const& intent) {
+    std::lock_guard lock(mMenuRouteMutex);
+    if(intent.uiGeneration==menuRouteGeneration())cancelMenuRoutesLocked();
+}
+void StructureUiState::setUiInteractionBlocked(bool blocked) {
+    std::lock_guard lock(mMenuRouteMutex);
+    mUiInteractionBlocked.store(blocked, std::memory_order_release);
+    if(blocked)cancelMenuRoutesLocked();
+}
+bool StructureUiState::uiInteractionBlocked() const {
+    return mUiInteractionBlocked.load(std::memory_order_acquire);
+}
+void StructureUiState::setNativeTextInputFlag(input::NativeTextInputFlag flag, bool blocked) {
+    if(blocked) {
+        std::lock_guard lock(mMenuRouteMutex);mNativeTextInput.gain(flag);cancelMenuRoutesLocked();
+    } else clearNativeTextInputFlagIfCurrent(flag,nativeTextInputToken(flag));
+}
+std::uint64_t StructureUiState::nativeTextInputToken(input::NativeTextInputFlag flag) const { return mNativeTextInput.token(flag); }
+void StructureUiState::clearNativeTextInputFlagIfCurrent(input::NativeTextInputFlag flag,std::uint64_t token) { mNativeTextInput.clearIfCurrent(flag,token); }
+void StructureUiState::setNativeTextInputHooksReady(bool ready) {
+    mNativeTextInputHooksReady.store(ready, std::memory_order_release);
+    if(!ready)cancelMenuRoutes();
+}
+bool StructureUiState::nativeTextInputBlocked() const {
+    return !mNativeTextInputHooksReady.load(std::memory_order_acquire)
+        || mNativeTextInput.blocked();
+}
+bool StructureUiState::nativeTextInputHooksReady() const {
+    return mNativeTextInputHooksReady.load(std::memory_order_acquire);
+}
+void StructureUiState::releaseHotkey(std::size_t index) {
+    if(auto* storage=hotkeyStorage(index))storage->held.store(false,std::memory_order_release);
+}
+std::optional<std::size_t> StructureUiState::firstHotkeyConflict(std::size_t index) const {
+    auto const target=inputHotkey(index);
+    if (!target.key) return std::nullopt;
+    for (std::size_t candidate=0;candidate<input::kHotkeyCount;++candidate) {
+        if (candidate==index) continue;
+        auto const other=inputHotkey(candidate);
+        if (target.key==other.key && target.modifiers==other.modifiers) return candidate;
+    }
+    return std::nullopt;
 }
 
 bool StructureUiState::openingInputBlocked() const {
@@ -103,6 +192,13 @@ void StructureUiState::setBlockGameInputUntil(std::uint64_t deadline) {
     mBlockGameInputUntil.store(deadline, std::memory_order_release);
 }
 
+ui::HudLayout StructureUiState::hudLayout(unsigned id) const {
+    std::lock_guard lock(mHudLayoutMutex);return id<mHudLayouts.size()?mHudLayouts[id]:ui::HudLayout{};
+}
+bool StructureUiState::setHudLayout(unsigned id,ui::HudLayout const& value) {
+    if(id>=mHudLayouts.size()||!ui::validHudLayout(value))return false;
+    std::lock_guard lock(mHudLayoutMutex);bool changed=mHudLayouts[id]!=value;mHudLayouts[id]=value;return changed;
+}
 HudStateSnapshot StructureUiState::hud() const {
     return {
         mHudEnabled.load(std::memory_order_relaxed),
@@ -209,6 +305,8 @@ void StructureUiState::bindCapturedHotkey(
     if (!target) return;
     for (std::size_t current = 0; current < mHotkeys.size(); ++current) {
         if (current == index) continue;
+        // Direct shortcuts never silently displace a configured binding.
+        if (input::isDirectMenuHotkey(index) || input::isDirectMenuHotkey(current)) continue;
         auto& candidate = mHotkeys[current];
         if (candidate.key.load(std::memory_order_relaxed) == key
             && candidate.modifiers.load(std::memory_order_relaxed) == modifiers) {
@@ -289,6 +387,7 @@ bool StructureUiState::releaseHotkeysForKey(unsigned int key, std::uint64_t now)
 }
 
 void StructureUiState::resetHotkeyState() {
+    cancelMenuRoutes();
     mControlHeld.store(false, std::memory_order_release);
     mAltHeld.store(false, std::memory_order_release);
     mShiftHeld.store(false, std::memory_order_release);
@@ -405,18 +504,71 @@ bool StructureUiState::materialListReady() const {
 }
 
 void StructureUiState::replaceMaterialRequirements(std::vector<MaterialRequirement> materials) {
+    (void)publishMaterialList(std::move(materials), {}, 0, {}, materialListToken());
+}
+std::vector<MaterialRequirement> StructureUiState::materialRequirements() const {
+    auto const snapshot=materialListView();
+    return snapshot ? snapshot->requirements : std::vector<MaterialRequirement>{};
+}
+std::uint64_t StructureUiState::materialListToken() const {
+    std::lock_guard lock(mMaterialMutex); return mMaterialListToken;
+}
+std::shared_ptr<MaterialListSnapshot const> StructureUiState::materialListView() const {
+    std::lock_guard lock(mMaterialMutex); return mMaterialList;
+}
+bool StructureUiState::publishMaterialList(std::vector<MaterialRequirement> materials,
+    std::vector<std::optional<int>> available, std::uint64_t generation, std::string source, std::uint64_t expectedToken) {
+    auto next=std::make_shared<MaterialListSnapshot>();
+    next->scope={generation,expectedToken};next->source=std::move(source);
+    next->requirements=std::move(materials);next->available=std::move(available);
+    std::shared_ptr<MaterialListSnapshot const> retired;
     {
         std::lock_guard lock(mMaterialMutex);
-        mMaterialRequirements = std::move(materials);
+        if(expectedToken!=mMaterialListToken)return false;
+        if(mMaterialList && mMaterialList->scope==next->scope)next->ignored=mMaterialList->ignored;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+        mMaterialListReady.store(true,std::memory_order_release);
     }
-    // Publish readiness only after the complete snapshot is visible. An empty
-    // list is also a valid cached result and must not trigger endless rescans.
-    mMaterialListReady.store(true, std::memory_order_release);
+    return true;
 }
-
-std::vector<MaterialRequirement> StructureUiState::materialRequirements() const {
-    std::lock_guard lock(mMaterialMutex);
-    return mMaterialRequirements;
+bool StructureUiState::setMaterialListAvailability(MaterialListScope scope,std::vector<std::optional<int>> counts) {
+    auto const previous=materialListView();
+    if(!previous || previous->scope!=scope || counts.size()!=previous->requirements.size())return false;
+    if(previous->available==counts)return true;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);next->available=std::move(counts);
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
+}
+bool StructureUiState::setMaterialIgnored(MaterialListScope scope,std::string const& key,bool ignored) {
+    auto const previous=materialListView();
+    if(!previous || !scope.generation || previous->scope!=scope || key.empty())return false;
+    if(std::none_of(previous->requirements.begin(),previous->requirements.end(),[&](auto const& row){return row.key==key;}))return false;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);
+    if(ignored)next->ignored.insert(key);else next->ignored.erase(key);
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
+}
+bool StructureUiState::clearMaterialIgnored(MaterialListScope scope) {
+    auto const previous=materialListView();
+    if(!previous || !scope.generation || previous->scope!=scope)return false;
+    auto next=std::make_shared<MaterialListSnapshot>(*previous);next->ignored.clear();
+    std::shared_ptr<MaterialListSnapshot const> retired;
+    {
+        std::lock_guard lock(mMaterialMutex);
+        if(mMaterialList!=previous)return false;
+        next->revision=++mMaterialListRevision;retired=std::move(mMaterialList);mMaterialList=std::move(next);
+    }
+    return true;
 }
 
 std::uint64_t StructureUiState::materialHudRevision() const {
@@ -488,18 +640,20 @@ void StructureUiState::clearMaterialHud() {
 
 void StructureUiState::clearMaterials() {
     mMaterialListRequested.store(false, std::memory_order_release);
+    mMaterialAvailabilityRequested.store(false, std::memory_order_release);
     mMaterialListReady.store(false, std::memory_order_release);
     std::shared_ptr<MaterialHudSnapshot const> retired;
     {
         std::lock_guard lock(mMaterialMutex);
-        mMaterialRequirements.clear();
+        mMaterialList.reset();++mMaterialListToken;
+        mMaterialListReady.store(false,std::memory_order_release);
         retired = std::move(mMaterialHud);
         ++mMaterialHudRevision;
     }
 }
 
 void StructureUiState::resetWorldSession() {
-    mGuiVisible.store(false, std::memory_order_release);
+    setGuiVisible(false);
     mOpeningInputBlockFrames.store(0, std::memory_order_release);
     mBlockGameInputUntil.store(0, std::memory_order_release);
     mPendingOffsetX.store(0, std::memory_order_release);
