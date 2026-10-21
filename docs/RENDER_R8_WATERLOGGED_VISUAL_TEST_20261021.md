@@ -76,3 +76,29 @@ to restore R7 DLL/PDB from the exact backup. Do not remove settings.
 
 Do NOT claim all translucent/waterlogged shapes are solved: this is
 deliberately limited to opaque stairs and the test fixture.
+
+## Runtime visual acceptance — 2026-10-21 22:40 JST
+
+User confirmation in conversation: "okです。点滅消えました".
+Result: PASS for the reported waterlogged quartz-stair projection flicker
+in the R8 test scenario. This is visual acceptance of that symptom,
+not general waterlogged/liquid or cross-resource-pack certification.
+
+Verified from Minecraft latest.log:
+- 2026-10-21 22:37:00.804 LHoloGlassR5 loaded.
+- 2026-10-21 22:39:04.249 LHoloGlassR5 privateMaterial=1,
+  baseDepthWrite=1, privateDepthWrite=0, depthTest=1, blend=1.
+- 2026-10-21 22:39:04.252 LHoloWaterloggedR8 before=80 after=64,
+  clippedQuads=20, removedQuads=4, resultingFragments=16,
+  nativeMaterialUnchanged=1.
+- 2026-10-21 22:39:04.311 LHoloExactR7 private=1,
+  sourceDepthWrite=1, effectiveDepthWrite=0.
+
+Installed LHolo.dll SHA256:
+C4BD38261E2C036A84CFFC887CDB39BABB1D5E214A8A3FF1EC12C90C9676C7B9
+
+Remaining coverage: adjacent section boundary, other waterlogged families,
+large builds, bubbles, moving cameras in other environments, shaders,
+resource-pack reload interactions and unrelated screenshot anomalies are
+not confirmed by this one acceptance result. Do not silently treat these
+as PASS. No further runtime files need to be changed for acceptance logging.
