@@ -7,6 +7,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include "WaterOrderCommandFixture.h"
 
 using namespace lholo::projection::detail;
 namespace {
@@ -233,6 +234,9 @@ void randomizedAndBudgetMeasurement() {
 }
 }
 int main() {
+    // Both test families: exact R9 water replay and validated Glass R5
+    // immutable quad-source, stationary-view, and proxy culling invariants.
+    water_commands::runWaterCommands();
     keys(); orderAndAttributes(); sectionBoundariesAndViewChanges(); immutableOriginalSourceAndIdentityRestoration(); indices(); malformed(); liquidProxyGuards(); randomizedAndBudgetMeasurement();
     std::cout << "LHoloTranslucencyTests: PASS checks=" << checks << '\n';
 }

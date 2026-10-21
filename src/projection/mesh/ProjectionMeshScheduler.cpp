@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionMeshScheduler.h"
+#include "resourcepacks/WorldPackReloadState.h"
 
 #include "plugin/LHolo.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
@@ -242,6 +243,10 @@ void scheduleProjectionMeshBuild(
         snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
     }
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
+    // Always capture just the target section for component gates. Keep the
+    // existing correction/actor neighbor snapshot and its large-model policy.
+    snapshot->sectionMissingLayerSnapshot.emplace();
+    snapshot->sectionMissingLayerSnapshot->capture(state.sectionBlockIndices[section], state.missingLayers);
     snapshot->sectionExtraBlockPositions = {state.sectionExtraBlockPositions[section]};
     // Correction face culling only needs extras in this section and its six
     // direct neighbors. Avoid copying the complete sparse set for every async
@@ -438,7 +443,7 @@ void scheduleProjectionMeshBuild(
     if (submitted) {
         state.sections[section].buildInFlight = true;
         state.sections[section].dirty = false;
-    } else if (++state.consecutiveMeshWorkerFailures >= 3) {
+    } else if (!resourcepacks::state().snapshot()->closed && ++state.consecutiveMeshWorkerFailures >= 3) {
         state.asyncMeshBuildingEnabled = false;
         disableMeshWorkerForSession();
         stopMeshWorker();

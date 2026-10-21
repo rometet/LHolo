@@ -1,5 +1,16 @@
 # Changelog
 
+## v26.51.2-ja.9-rc.1 — 2026-10-21
+
+- Native LHolo resource reload ABI v4, real owner/epoch/GPU lifecycle checks.
+- Keeps Glass R5 translucent projection blend/depth and liquid safeguards.
+- Compatible with Praxis R33 v0.1.3-rc.1 in a specific offline test clone.
+- User confirmed RP OFF and third-person avatar recovery; not general world tested.
+- 700 resource checks, 606 translucency checks, 5,891 water replay checks PASS.
+- LHolo config save and shutdown teardown warnings remain unresolved.
+
+# Changelog
+
 ## [26.51.2] - 2026-09-23
 
 ### Fixed

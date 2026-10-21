@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionRenderer.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
 
@@ -655,11 +656,55 @@ struct PraxisExactReplaySubmitResult {
     std::uint64_t submitMicros{};
 };
 
+template<class QuadInfo>
+bool applyNativeReplayQuadOrder(
+    mce::MeshData& replayData, std::vector<QuadInfo>& quadInfo,
+    std::span<std::size_t const> order
+) {
+    if (order.empty() || !transparentQuadOrderChanged(order)) return true;
+    // Transactional staging: a failed layout/allocation keeps both original
+    // replay streams and face metadata. Canonical data and cull caches never
+    // observe this permutation.
+    mce::MeshData candidate{replayData};
+    auto metadata = quadInfo;
+    if (!reorderQuadVertexField(candidate.mPositions.get(), order)
+        || !reorderQuadVertexField(candidate.mNormals.get(), order)
+        || !reorderQuadVertexField(candidate.mTangents.get(), order)
+        || !reorderQuadVertexField(candidate.mColors.get(), order)
+        || !reorderQuadVertexField(candidate.mBoneId0s.get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[0].get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[1].get(), order)
+        || !reorderQuadVertexField(candidate.mTextureUVs[2].get(), order)
+        || !reorderQuadVertexField(candidate.mPBRTextureIndices.get(), order)
+        || !reorderQuadVertexField(candidate.mMERS.get(), order)
+        || !reorderQuadVertexField(candidate.mGeoType.get(), order)
+        || !reorderReplayQuadMetadata(metadata, order)) return false;
+    // Standard-vector swaps commit without calling an engine MeshData move
+    // assignment. No allocation or native submission occurs during commit.
+    replayData.mPositions.get().swap(candidate.mPositions.get());
+    replayData.mNormals.get().swap(candidate.mNormals.get());
+    replayData.mTangents.get().swap(candidate.mTangents.get());
+    replayData.mColors.get().swap(candidate.mColors.get());
+    replayData.mBoneId0s.get().swap(candidate.mBoneId0s.get());
+    replayData.mTextureUVs[0].get().swap(candidate.mTextureUVs[0].get());
+    replayData.mTextureUVs[1].get().swap(candidate.mTextureUVs[1].get());
+    replayData.mTextureUVs[2].get().swap(candidate.mTextureUVs[2].get());
+    replayData.mPBRTextureIndices.get().swap(candidate.mPBRTextureIndices.get());
+    replayData.mMERS.get().swap(candidate.mMERS.get());
+    replayData.mGeoType.get().swap(candidate.mGeoType.get());
+    quadInfo.swap(metadata);
+    return true;
+}
+
+
+
 PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     ScreenContext&                       screenContext,
     PraxisCompatLiquidSectionData const& data,
     mce::MaterialPtr const&              material,
-    mce::TexturePtr const&               terrainTexture
+    mce::TexturePtr const&               terrainTexture,
+    glm::vec3                            localCamera,
+    NativeReplaySortBudget&              sortBudget
 ) {
     PraxisExactReplaySubmitResult result{};
     if (!data.ready()) return result;
@@ -681,6 +726,19 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     );
     mce::MeshData replayData{*data.nativeStream};
     replayData.mColors.get() = data.derivedColors;
+    auto replayQuadInfo = data.tessellatorState.quadInfo;
+    try {
+        auto const order = nativeReplayQuadOrder(data.cameraSort,
+            std::span<glm::vec3 const>{data.nativeStream->mPositions.get()}, localCamera, sortBudget);
+        if (!applyNativeReplayQuadOrder(replayData, replayQuadInfo, order)) {
+            data.cameraSort.unsupported = true;
+            logger().warn("NATIVE_REPLAY_PRIMITIVE_SORT incompatible metadata; native order retained");
+        }
+    } catch (...) {
+        // Staging has not committed. Keep the accepted replay path on failure.
+        data.cameraSort.keyValid = false;
+        data.cameraSort.order.clear();
+    }
     tessellator.mMeshData.get() = std::move(replayData);
     tessellator.mIsFormatFixed = data.tessellatorState.isFormatFixed;
     tessellator.mHasNormals = data.tessellatorState.hasNormals;
@@ -697,7 +755,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     );
     tessellator.mFaceCenterAccumulator =
         data.tessellatorState.faceCenterAccumulator;
-    tessellator.mQuadInfoList.get() = data.tessellatorState.quadInfo;
+    tessellator.mQuadInfoList.get() = std::move(replayQuadInfo);
     result.vertices = vertexCount;
     result.replayMicros = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -709,6 +767,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     // equivalent of the texture-ref MeshHelpers entry used by old Praxis. It
     // is a different exported overload from TextureVariant + generation mode.
     auto const submitStarted = std::chrono::steady_clock::now();
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     MeshHelpers::renderMeshImmediately(
         screenContext,
         tessellator,
@@ -734,6 +793,7 @@ void submitProjectedBlockActorPass(
     float                   structureOpacity,
     bool                    renderAlphaLayer
 ) {
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (state.projectedBlockActors.empty()
         || !state.expectedWorldBlocks
         || !state.expectedWorldLiquids
@@ -744,6 +804,7 @@ void submitProjectedBlockActorPass(
     mce::MaterialPtr noForcedMaterial{renderContext.mItemInHandRenderer.mMatBlendBlock.get()};
     noForcedMaterial.mRenderMaterialInfoPtr.reset();
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
+    ScopedRegionWriteSuppression projectedWrites;
     ScopedTessellationBlocks blockActorWorldScope(
         *state.expectedWorldBlocks,
         *state.expectedWorldLiquids,
@@ -751,16 +812,13 @@ void submitProjectedBlockActorPass(
     );
     for (auto const& projected : state.projectedBlockActors) {
         if (!projected.actor || !projected.block
-            || projected.structureIndex >= state.correctionStates.size()) {
+            || projected.structureIndex >= state.correctionStates.size()
+            || projected.structureIndex >= state.missingLayers.size()) {
             continue;
         }
-        auto const correctionState = state.correctionStates[projected.structureIndex];
         try {
             auto* renderComponent = projected.actor->_getRenderComponent();
-            if (correctionState == CorrectionState::Correct
-                || correctionState == CorrectionState::WrongType
-                || correctionState == CorrectionState::WrongState
-                || !renderComponent) {
+            if (!state.buildBodyShouldRender(projected.structureIndex) || !renderComponent) {
                 continue;
             }
             auto const rendererId = renderComponent->getRendererId();
@@ -825,6 +883,7 @@ void submitProjectionMeshPass(
     bool                    correctionSeeThrough,
     bool                    missingSeeThrough
 ) {
+    resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (!state.terrainTextureVariant || state.sections.empty()) return;
 
     auto& itemRenderer = renderContext.mItemInHandRenderer;
@@ -850,6 +909,12 @@ void submitProjectionMeshPass(
     // the explicit retained diagnostic build.
     std::vector<std::size_t> nativeLiquidSections;
     if (renderAlphaLayer) {
+        NativeReplaySortBudget replaySortBudget;
+        glm::vec3 const replayLocalCamera{
+            camera.x - static_cast<float>(renderOrigin.x),
+            camera.y - static_cast<float>(renderOrigin.y),
+            camera.z - static_cast<float>(renderOrigin.z)
+        };
         auto& telemetry = state.nativeLiquidTelemetry;
         telemetry.praxisCompatImmediateSubmitsPerFrame = 0;
         telemetry.praxisCompatVerticesReplayedPerFrame = 0;
@@ -877,6 +942,19 @@ void submitProjectionMeshPass(
             }
         );
         if (!nativeLiquidSections.empty()) {
+            // Liquid submissions precede the normal-mesh guard below.
+            // Prime the same actor constants before this native liquid family.
+            if (auto* player = client.getLocalPlayer()) {
+                ActorShaderManager::setupShaderParameters(
+                    renderContext.mScreenContext,
+                    renderContext,
+                    *player,
+                    mce::Color{1.0f, 1.0f, 1.0f, 0.0f},
+                    1.0f,
+                    Brightness::MAX(),
+                    std::nullopt
+                );
+            }
             auto const signText = render::resolveSignTextMaterial(blendMaterial);
             {
                 auto const signTextReady = signText && tryRenderMaterial(*signText) != nullptr;
@@ -949,7 +1027,9 @@ void submitProjectionMeshPass(
                             renderContext.mScreenContext,
                             data,
                             *exactReplayMaterial,
-                            *state.terrainTexture
+                            *state.terrainTexture,
+                            replayLocalCamera,
+                            replaySortBudget
                         );
                         ++telemetry.praxisCompatImmediateSubmits;
                         ++telemetry.praxisCompatImmediateSubmitsPerFrame;
@@ -966,7 +1046,7 @@ void submitProjectionMeshPass(
                                 std::memory_order_acq_rel
                             )) {
                             logger().info(
-                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterVertexAlpha={} lavaVertexAlpha=255 depthStateChanged=0 submitPerFrame={}",
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha=255 projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
                                         == PraxisLiquidMaterialCandidate::BlendBlock
                                     ? "mMatBlendBlock"
@@ -974,6 +1054,7 @@ void submitProjectionMeshPass(
                                 signTextReady ? 1 : 0,
                                 blendMaterialReady ? 1 : 0,
                                 PraxisWaterDerivedAlpha,
+                                unpackAbgr(data.derivedColors.front()).alpha,
                                 telemetry.praxisCompatImmediateSubmitsPerFrame
                             );
                         }

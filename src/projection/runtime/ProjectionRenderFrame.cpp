@@ -8,6 +8,7 @@
 // ProjectionSession contract.
 
 #include "projection/runtime/ProjectionRenderFrame.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "projection/runtime/ProjectionSession.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
@@ -205,7 +206,7 @@ bool enableStructureProjection(
     }
     attachProjectionWorldEvents(player->getLevel(), player->getDimensionBlockSource());
     initializePublishedBuildProgress(state.structure->renderBlocks.size());
-    structure::recordProjectionAnchor(state.anchor.x, state.anchor.y, state.anchor.z);
+    if(!structure::recordProjectionAnchor(state.structure,state.structureGeneration,state.anchor.x,state.anchor.y,state.anchor.z))return false;
     logger().info(
         "Structure projection enabled: {} renderable blocks at ({}, {}, {})",
         state.structure->renderBlocks.size(),
@@ -617,6 +618,66 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
 }
 
 void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlphaLayer) {
+    auto& reload=resourcepacks::state();
+    // Observe physical owner identities even when admission is closed. Query
+    // itself never invokes these normal-engine-owner getters.
+    {
+        std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+        bool const destroyed=consumeWorldExitRequest() || projectionDimensionSourceDestroyed();
+        if(destroyed) {
+            if(reload.snapshot()->closed){reload.invalidate();return;}
+            // The open path below performs existing world/dimension cleanup.
+            // Do not dereference the old player/Level before that cleanup.
+        } else {
+            auto& observedClient=renderContext.mClientInstance;
+            auto* observedPlayer=observedClient.getLocalPlayer();
+            auto* observedRenderer=observedClient.getLevelRenderer();
+            if(observedPlayer && observedRenderer) {
+                resourcepacks::Owner const physicalOwner{
+                    reinterpret_cast<std::uintptr_t>(&observedPlayer->getLevel()),reinterpret_cast<std::uintptr_t>(&observedClient),
+                    reinterpret_cast<std::uintptr_t>(observedRenderer),reinterpret_cast<std::uintptr_t>(&observedPlayer->getDimension())};
+                reload.observe(physicalOwner);
+                // Register normal engine-service lifetime before bounds/mesh
+                // submission. This is not a private GPU completion receipt.
+                reload.nativeResourcesObserved(physicalOwner);
+            }
+            else if(reload.snapshot()->closed){reload.invalidate();return;}
+        }
+    }
+    auto checkpoint=reload.snapshot();
+    if(checkpoint->closed) {
+        if(checkpoint->reply.phase!=resourcepacks::WorldPackReloadPhase::Reacquiring || checkpoint->ready[0])return;
+        auto lease=reload.enter(resourcepacks::Role::Projection,true);if(!lease)return;
+        ProjectionSession::getInstance().withLockedState([&](ProjectionState& state,overlay::BoundsWireframe& captureBounds) {
+            std::lock_guard lifecycleLock(projectionWorldLifecycleMutex());
+            auto current=reload.ownerCallbackSnapshot(lease,*checkpoint,resourcepacks::WorldPackReloadPhase::Reacquiring,
+                consumeWorldExitRequest(),projectionDimensionSourceDestroyed());
+            if(!current || current->ready[0])return;
+            // Intent survives an unsuccessful reacquisition and a later rollback.
+            static bool wanted{};
+            static std::shared_ptr<structure::LoadedStructure const> source;
+            static BlockPos anchor;
+            if(!current->retired[0]) {
+                if(state.enabled){wanted=true;source=state.structure;anchor=state.anchor;}
+                resetProjectionState(state);captureBounds.clear();
+                reload.retiredOwner(resourcepacks::Domain::Projection,current->serial);
+                reload.gpuReceipt(resourcepacks::Domain::Projection,current->serial,resourcepacks::OwnedGpuFence::NoOwnedSubmission);
+            }
+            bool rebuilt=!wanted;
+            if(wanted) {
+                // Reacquire atlas/tessellator/UVs through this normal render
+                // owner after the game's reload has settled. CPU recreation
+                // submits no frame and does not manufacture a GPU receipt.
+                ProjectionSession::getInstance().requestAnchor(anchor.x,anchor.y,anchor.z);
+                rebuilt=enableStructureProjection(state,renderContext,source);
+                if(rebuilt){wanted=false;source.reset();}
+            }
+            reload.rebuilt(resourcepacks::Domain::Projection,current->serial,rebuilt);
+        });
+        return;
+    }
+    auto lease=reload.enter(resourcepacks::Role::Projection);if(!lease)return;
+    if(reload.snapshot()->closed)return;
     bool clearStructure = false;
     bool worldExitPending = consumeWorldExitRequest();
     if (worldExitPending) {
@@ -688,6 +749,25 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                     logger().error("Could not enable loaded structure projection");
                 } else {
                     session.cancelDimensionSuspension();
+                    // Publish an owned identity only after native activation and
+                    // anchor recording succeeded. Adoption/I/O happens in the
+                    // existing Present control plane, never under these locks.
+                    auto const committed=structure::detail::StructureSession::getInstance().snapshot();
+                    auto const view=structure::capture::getClientViewSnapshot();
+                    if(view && committed.loaded==state.structure
+                        && committed.loaded->generation==state.structureGeneration){
+                        auto const& t=committed.transform;
+                        structure::SavedPlacement placement;placement.dimension=state.dimensionId;
+                        placement.origin={static_cast<std::int64_t>(state.anchor.x)+t.offsetX,
+                            static_cast<std::int64_t>(state.anchor.y)+t.offsetY,
+                            static_cast<std::int64_t>(state.anchor.z)+t.offsetZ};
+                        placement.rotation=t.rotation;placement.mirror=t.mirror;placement.layerAxis=t.layerAxis;
+                        placement.layerMode=t.layerDisplayMode;placement.layer=t.displayLayer;
+                        placement.visible=t.visible;placement.countExtras=t.countExtras;
+                        structure::schematic::publishProjectionActivation({committed.request,view->worldEpoch,
+                            state.structureGeneration,state.activationGeneration,state.dimensionId,
+                            committed.loaded->sourcePath,std::move(placement)});
+                    }
                     if (activationStatus == DimensionActivationStatus::Resuming) {
                         structure::showActionHint(
                             i18n::Message{i18n::TextKey::ActionHintProjectionRestored},

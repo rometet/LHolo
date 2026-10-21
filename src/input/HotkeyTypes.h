@@ -26,6 +26,10 @@ enum class HotkeyId : std::uint8_t {
     LoadProjection,
     CloseProjection,
     ToggleManualPlacement,
+    OpenPlaced,
+    OpenFiles,
+    OpenVerification,
+    OpenMaterials,
     Count
 };
 
@@ -37,5 +41,10 @@ inline constexpr std::size_t kHotkeyCount = hotkeyIndex(HotkeyId::Count);
 inline constexpr std::size_t kMoveHotkeyFirst = hotkeyIndex(HotkeyId::MoveLeft);
 inline constexpr std::size_t kMoveHotkeyCount
     = hotkeyIndex(HotkeyId::MoveDown) - kMoveHotkeyFirst + 1;
+inline constexpr std::size_t kDirectMenuHotkeyFirst = hotkeyIndex(HotkeyId::OpenPlaced);
+inline constexpr std::size_t kDirectMenuHotkeyCount = 4;
+[[nodiscard]] constexpr bool isDirectMenuHotkey(std::size_t index) noexcept {
+    return index >= kDirectMenuHotkeyFirst && index < kHotkeyCount;
+}
 
 } // namespace lholo::input

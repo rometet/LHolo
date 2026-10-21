@@ -3,8 +3,13 @@
 
 #include "i18n/Translator.h"
 #include "ui/FluentTheme.h"
+#include "ui/BlockIcon.h"
 #include "input/HotkeyTypes.h"
+#include "input/MenuRoute.h"
 #include "structure/SchematicRuntime.h"
+#include "ui/VerifierViewState.h"
+#include "ui/MaterialsViewState.h"
+#include "io/MaterialExport.h"
 
 #include <array>
 #include <cstddef>
@@ -29,6 +34,8 @@ enum class MenuPage : std::uint8_t {
     Interface,
     Experimental,
     Schematics,
+    Verification,
+    Materials,
     Count
 };
 
@@ -58,6 +65,8 @@ struct HotkeyRow {
     std::string label;
     std::string display;
     bool        capturing{};
+    std::string conflict;
+    bool reserved{};
 };
 
 struct MaterialRow {
@@ -70,7 +79,10 @@ struct MaterialRow {
 };
 
 struct MenuModel {
+    BlockIconLookup blockIcons;
     MenuPage page{MenuPage::Projection};
+    input::MenuRoute directMenuRoute{input::MenuRoute::None};
+    bool directMenuRoutesReady{true};
     char* pathBuffer{};
     std::size_t pathBufferSize{};
     bool blockOpeningInput{};
@@ -134,12 +146,16 @@ struct MenuModel {
     bool hudShowExtraBlocks{true};
     bool hudShowProjectedBlockName{true};
 
-    std::vector<MaterialRow> materials;
+    std::vector<MaterialRow> materials; // Legacy popup/test adapter; production acquires an immutable view.
+    std::shared_ptr<structure::detail::MaterialListSnapshot const> materialList;
+    std::shared_ptr<MaterialsViewState> materialsView;
+    io::MaterialExportResult materialExport;
     bool materialPopupRequested{};
     bool materialHudEnabled{};
     int  materialHudPosition{3};
     bool closeRequested{};
     structure::schematic::Snapshot schematic;
+    std::shared_ptr<VerifierViewState> verifierView;
 };
 
 struct MenuActions {
@@ -148,6 +164,9 @@ struct MenuActions {
     std::function<void()> restoreProjection;
     std::function<void()> closeProjection;
     std::function<void()> requestMaterials;
+    std::function<void(structure::detail::MaterialListScope,std::string const&,bool)> ignoreMaterial;
+    std::function<void(structure::detail::MaterialListScope)> clearIgnoredMaterials;
+    std::function<void(io::MaterialExportRequest)> exportMaterials;
     std::function<void(HotkeyId)> beginHotkeyCapture;
     std::function<void(HotkeyId)> clearHotkey;
     std::function<void(HotkeyId)> resetHotkey;
@@ -157,13 +176,14 @@ struct MenuActions {
     std::function<void(CapturePointId)> usePlayerCapturePosition;
     std::function<void()> clearCapture;
     std::function<void(CaptureDraftModel const&)> exportCapture;
-    std::function<void()> refreshSchematics, importSavedSchematic, verifySchematic;
+    std::function<void()> refreshSchematics, importSavedSchematic, verifySchematic, cancelVerification, resetVerification;
     std::function<void(std::string const&)> placeSchematic;
     std::function<void(std::uint64_t)> selectPlacement, deletePlacement, movePlacementToFeet;
     std::function<void(structure::SavedPlacement const&,std::uint64_t)> editPlacement;
     std::function<void(structure::MistakeFilter)> cycleMistake;
     std::function<void(structure::MistakeFilter)> setMistakeFilter;
     std::function<void(structure::schematic::ReportStamp const&, std::size_t)> selectMistake;
+    std::function<void()> clearMistakeTarget;
 };
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);

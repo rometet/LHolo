@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionMeshWorker.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 
@@ -23,6 +24,7 @@ namespace {
 std::mutex                                      gMeshWorkerMutex;
 std::mutex                                      gMeshWorkerLifecycleMutex;
 std::deque<AsyncSectionBuildResult>             gCompletedSectionBuilds;
+std::vector<CancelledSectionBuild>              gCancelledSectionBuilds;
 std::unique_ptr<SingleTaskWorker>               gMeshWorkerExecutor;
 std::atomic_bool                                gMeshWorkerBusy{};
 std::atomic_uint64_t                            gMeshWorkerGeneration{1};
@@ -56,12 +58,22 @@ void stopMeshWorker() {
     gMeshWorkerFatalFailure.store(false, std::memory_order_release);
     std::lock_guard lock(gMeshWorkerMutex);
     gCompletedSectionBuilds.clear();
+    gCancelledSectionBuilds.clear();
 }
 
 bool submitMeshWorkerTask(
     std::uint64_t workerGeneration,
     std::function<AsyncSectionBuildResult()> task
 ) {
+    auto admitted=resourcepacks::state().enter(resourcepacks::Role::MeshJob);
+    if(!admitted)return false;
+    auto reloadLease=std::make_shared<resourcepacks::State::Lease>(std::move(admitted));
+    struct OwnedTask {
+        std::shared_ptr<resourcepacks::State::Lease> lease;
+        std::function<AsyncSectionBuildResult()> task;
+        // Explicit member order destroys native task captures before the lease.
+    };
+    auto workload=std::make_shared<OwnedTask>(OwnedTask{reloadLease,std::move(task)});
     // Keep the executor alive through the execute() call. The world listener
     // may stop the worker from another engine thread while the render thread
     // is submitting its next section.
@@ -76,16 +88,24 @@ bool submitMeshWorkerTask(
     }
     try {
         auto const admitted = gMeshWorkerExecutor->submit([
-            workerGeneration,
-            task = std::move(task)
+            workload,
+            workerGeneration
         ]() mutable noexcept {
             runLeasedWorkerTaskBoundary(
                 gMeshWorkerBusy,
-                task,
+                workload->task,
                 [&](AsyncSectionBuildResult result) {
-                    if (workerGeneration == gMeshWorkerGeneration.load(std::memory_order_acquire)) {
+                    bool const published=resourcepacks::state().publishIfCurrent(*workload->lease,[&] {
+                        if(workerGeneration!=gMeshWorkerGeneration.load(std::memory_order_acquire))return false;
                         std::lock_guard lock(gMeshWorkerMutex);
-                        gCompletedSectionBuilds.emplace_back(std::move(result));
+                        gCompletedSectionBuilds.emplace_back(std::move(result));return true;
+                    });
+                    if(!published && workerGeneration==gMeshWorkerGeneration.load(std::memory_order_acquire)) {
+                        // No native payload crosses Pause. Retain only the
+                        // cancelled ticket so before-native cancel/resume can
+                        // release buildInFlight on the normal render owner.
+                        std::lock_guard lock(gMeshWorkerMutex);
+                        gCancelledSectionBuilds.push_back({result.workerGeneration,result.structureGeneration,result.revision,result.section});
                     }
                 },
                 [workerGeneration]() noexcept {
@@ -116,6 +136,9 @@ std::vector<AsyncSectionBuildResult> takeCompletedSectionBuilds(std::size_t limi
         gCompletedSectionBuilds.pop_front();
     }
     return results;
+}
+std::vector<CancelledSectionBuild> takeCancelledSectionBuilds() {
+    std::lock_guard lock(gMeshWorkerMutex);auto result=std::move(gCancelledSectionBuilds);gCancelledSectionBuilds.clear();return result;
 }
 
 bool meshWorkerIsBusy() {

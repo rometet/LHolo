@@ -33,3 +33,16 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+
+## Prerelease build dependency sources
+
+The matching source archive and preferred dependency source archive accompany
+`v26.51.2-ja.8-rc.1`. LLVM/clang-cl 22.1.8 and the SDK build use LeviLamina Client
+26.51.5, SymbolProvider 1.3.0, Dear ImGui 1.91.9, MinHook 1.3.4 (BSD-2-Clause),
+zlib 1.3.2 (zlib license), and the header dependencies enumerated in licenses/.
+All supplied upstream notices are retained there. LeviBuildScript 0.6.1 is
+pinned to 16f0f565951dbbf1161e61c798209d2a35889684; its snapshot has no root
+license file, so this notice does not assert an additional license for it.
+The LGPL/GPL SDK license texts and SymbolProvider's source-header notice are
+included. This mod's GPL license and the Chunker MIT notice above are preserved.

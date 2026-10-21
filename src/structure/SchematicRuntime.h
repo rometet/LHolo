@@ -2,6 +2,8 @@
 #include "structure/PlacementSession.h"
 #include "structure/Verification.h"
 #include "structure/VerificationSelection.h"
+#include "structure/ManualVerificationControl.h"
+#include "structure/ActiveProjection.h"
 #include <map>
 #include <memory>
 #include <optional>
@@ -19,6 +21,7 @@ struct Report {
     std::vector<MaterialRow> materials;
     bool running{}, truncated{};
     std::uint64_t checked{};
+    float progress{};
     ReportStamp stamp;
 };
 struct Snapshot {
@@ -31,6 +34,8 @@ struct Snapshot {
     Cell feet;
     std::string library, status;
     MistakeFilter filter{MistakeFilter::Mistakes};
+    VerificationPhase phase{VerificationPhase::NotVerified};
+    bool activeProjectionAvailable{};
 };
 Snapshot snapshot();
 void refreshFiles();
@@ -41,6 +46,9 @@ bool erase(std::uint64_t id);
 bool edit(SavedPlacement const& placement, std::uint64_t revision);
 bool moveToFeet(std::uint64_t id);
 void verify();
+void cancelVerification();
+// Discard only the scan result/selection. Does not alter placement or projection.
+void resetVerification();
 void cycleMistake(MistakeFilter filter);
 bool selectMistake(ReportStamp const& stamp,std::size_t index);
 void setMistakeFilter(MistakeFilter filter);
@@ -56,4 +64,8 @@ void reset();
 // Called by the existing material shutdown after callback drain.
 void shutdown();
 void rememberSelectedTransform();
+ProjectionRequestStamp beginProjectionRequest(std::uint64_t placementId=0);
+void failProjectionRequest(ProjectionRequestStamp const& request) noexcept;
+void publishProjectionActivation(ActiveProjectionEvent event) noexcept;
+void retireActiveProjection(bool preserveQueuedVerification=false) noexcept;
 } // namespace lholo::structure::schematic
