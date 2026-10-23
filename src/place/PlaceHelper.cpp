@@ -24,6 +24,7 @@
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
 #include "place/PlacementRotationDelivery.h"
+#include "place/EasyPlaceTelemetry.h"
 
 #include "plugin/LHolo.h"
 #include "structure/MaterialTracker.h"
@@ -98,7 +99,9 @@ LL_TYPE_INSTANCE_HOOK(
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("capture game tick", reason); });
     app::invokeNativeCallback([&] {
         structure::schematic::tick(*this);
-        structure::detail::tickMaterialTracker(*this);
+        // The material HUD is not a placement prerequisite. Run Easy Place
+        // before material-list refresh/availability work so heavy inventory
+        // summaries do not postpone the native per-tick placement decision.
         // Physical mouse state belongs to the game-input Hook boundary. The
         // executor consumes only the resulting logical press state.
         if (placementState().manualMode()
@@ -106,6 +109,33 @@ LL_TYPE_INSTANCE_HOOK(
             placementState().releaseManualPress();
         }
         detail::tickEasyPlace(*this);
+        structure::detail::tickMaterialTracker(*this);
+        bool const active=placementState().enabled()
+            || placementState().manualMode() || placementState().rangeEnabled();
+        if(auto stats=telemetry::counters().snapshotIfDue(GetTickCount64(),active)) {
+            using E=telemetry::Event;
+            using S=telemetry::Stage;
+            logger().info(
+                "EASYPLACE_R16_PERF ticks={} auto={} manual={} range={} noTarget={} "
+                "noMaterial={} invalidPlan={} cachedPlan={} cellLock={} throttle={} "
+                "manualGate={} swaps={} sent={} queued={} rejected={} suppressed={} "
+                "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
+                "over4ms[tick,ray,plan]={}/{}/{}",
+                stats->count(E::Tick),stats->count(E::Auto),
+                stats->count(E::Manual),stats->count(E::Range),
+                stats->count(E::NoTarget),stats->count(E::NoMaterial),
+                stats->count(E::PlanRejected),stats->count(E::FailedPlanCached),
+                stats->count(E::RecentCellLock),stats->count(E::GlobalInterval),
+                stats->count(E::ManualRepeatGate),stats->count(E::SwapRequested),
+                stats->count(E::PacketSent),stats->count(E::NativeQueued),
+                stats->count(E::DispatchRejected),stats->count(E::Suppressed),
+                stats->averageUs(S::Tick),stats->maximumUs(S::Tick),
+                stats->averageUs(S::Ray),stats->maximumUs(S::Ray),
+                stats->averageUs(S::Plan),stats->maximumUs(S::Plan),
+                stats->above4ms(S::Tick),stats->above4ms(S::Ray),
+                stats->above4ms(S::Plan)
+            );
+        }
     }, [](char const* reason) noexcept {
         placementState().cancelManualPress();
         app::reportNativeCallbackFailure("game tick", reason);

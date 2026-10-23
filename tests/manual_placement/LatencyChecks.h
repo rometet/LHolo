@@ -55,6 +55,34 @@ inline void runLatencyChecks(Player& player) {
     check(projection::rangeQueries==1 && sent.size()==1 && sent[0].pos.x==1,
         "R15 failed focused plan still falls back to range candidates");
 
+    // R16: repeatedly failing an expensive oriented ghost should not force
+    // the native predictor/rotation matrix to run every game tick. New aimed
+    // cells remain immediately eligible even during the 100ms failed cache.
+    reset(player);state.setEnabled(true);
+    player.selected=0;
+    player.inventory.items[0]={2,0,64};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&piston,{.5f,.25f,.5f}};
+    planOutcomes[0]=false;
+    tickEasyPlaceImpl(player);
+    check(planned==1 && sent.empty(),
+        "R16 first impossible aimed orientation is inspected");
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(planned==1 && sent.empty(),
+        "R16 unchanged impossible orientation skips heavy repeated prediction");
+    aimed=ProjectionTarget{{1,0,0},{1,0,0},1,&piston,{1.5f,.25f,.5f}};
+    planOutcomes[1]=true;
+    tickEasyPlaceImpl(player);
+    check(planned==2 && sent.size()==1 && sent.back().pos.x==1,
+        "R16 changed aimed ghost bypasses previous failed-plan cache");
+    reset(player);state.setEnabled(true);
+    player.selected=0;player.inventory.items[0]={2,0,64};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&piston,{.5f,.25f,.5f}};
+    planOutcomes[0]=false;
+    tickEasyPlaceImpl(player);
+    fixtureTime=1100;tickEasyPlaceImpl(player);
+    check(planned==2,
+        "R16 retry becomes eligible again after bounded 100ms");
+
     // A queued native rotation is NOT a failed plan and must stop this
     // tick. Otherwise a later legacy placement changes the held slot
     // and the queued AuthInput fails its strict stack/net-id validation.

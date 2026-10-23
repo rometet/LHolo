@@ -2,6 +2,7 @@
 // Actual PlacementExecutor bodies with explicit offline boundary doubles.
 // These doubles supply query/planner/packet results, never native/server success.
 #include "place/PlacementState.h"
+#include "place/EasyPlaceTelemetry.h"
 #include "place/PlacementDirectionRules.h"
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementRotation.h"
@@ -377,6 +378,7 @@ void reset(Player& p) {
 #include "CoverageChecks.h"
 #include "OrientationChecks.h"
 #include "LatencyChecks.h"
+#include "TelemetryChecks.h"
 int main() {
     Player player;Block stone;reset(player);
     // Native predictor boundary inputs, all support faces and +/-section edges.
@@ -571,6 +573,7 @@ int main() {
     runCoverageChecks(player);
     runOrientationChecks(player);
     runLatencyChecks(player);
+    runTelemetryChecks();
     std::printf("ExecutorFixture: %d checks, %d failures; native/BDS/apply/consumption NOT_RUN\n",checks,failures);
     return failures?1:0;
 }

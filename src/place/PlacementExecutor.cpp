@@ -23,6 +23,7 @@
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementDispatchResult.h"
+#include "place/EasyPlaceTelemetry.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
 #include "place/PlacementQuantization.h"
@@ -114,6 +115,9 @@ constexpr int           kRangeFastPlanBudgetPerTick = 64;
 // stall other work in the same range-placement tick.
 constexpr int           kRangeRotationPlanBudgetPerTick = 4;
 constexpr std::uint64_t kFailedPlanCacheMs          = 150;
+// Only difficult, impossible orientation targets in the *aimed* mode are
+// negatively cached. A different target/eye/view/item still checks at once.
+constexpr std::uint64_t kAimedOrientedFailureCacheMs = 100;
 // Manual-mode typematic repeat: after the first block on press, holding pauses
 // for kManualInitialDelayMs and then auto-repeats every kManualRepeatIntervalMs
 // (like keyboard key-repeat), so a tap places one and a hold streams at a steady
@@ -495,7 +499,10 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     // Never serialize an out-of-range face. Facing's lookup tables are fixed
     // six-entry arrays and an invalid face would be both an OOB read locally
     // and malformed placement data on the wire.
-    if (!validFace(target.face)) return detail::PlacementDispatchResult::Rejected;
+    if (!validFace(target.face)) {
+        telemetry::count(telemetry::Event::DispatchRejected);
+        return detail::PlacementDispatchResult::Rejected;
+    }
     auto& region = player.getDimensionBlockSource();
     if (!region.getBlock(target.cell).isAir()) return detail::PlacementDispatchResult::Rejected;
 
@@ -550,6 +557,7 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
                 player,target.cell,packBlockPos(target.cell),
                 target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
                 std::move(transactionBase))) {
+            telemetry::count(telemetry::Event::NativeQueued);
             return detail::PlacementDispatchResult::Queued;
         }
         return detail::PlacementDispatchResult::Rejected;
@@ -561,6 +569,7 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     auto client = ll::service::getClientInstance();
     if (!client) return detail::PlacementDispatchResult::Rejected;
     client->getPacketSender().sendToServer(packet);
+    telemetry::count(telemetry::Event::PacketSent);
     placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
     return detail::PlacementDispatchResult::Sent;
 }
@@ -818,6 +827,7 @@ bool resolveOrientedPlacement(
     int                     itemAux,
     ProjectionTarget&       out
 ) {
+    telemetry::ScopedTimer planTimer(telemetry::Stage::Plan);
     // Reject stale projection targets before any orientation search.
     if (!region.getBlock(cell).isAir()) return false;
 
@@ -1173,6 +1183,7 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
                 continue;
             }
             placementState().setNextSwapAt(now + kSwapRetryMs);
+            telemetry::count(telemetry::Event::SwapRequested);
             return;
         }
         if (player.getSelectedItemSlot() != found.slot)
@@ -1221,6 +1232,13 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
+    telemetry::ScopedTimer tickTimer(telemetry::Stage::Tick);
+    if (placementActive) {
+        telemetry::count(telemetry::Event::Tick);
+        if (placementState().rangeEnabled()) telemetry::count(telemetry::Event::Range);
+        else if (placementState().manualMode()) telemetry::count(telemetry::Event::Manual);
+        else telemetry::count(telemetry::Event::Auto);
+    }
 
     // Ray from the camera eye along the view direction against the projection.
     Vec3 const origin = player->getEyePos();
@@ -1238,7 +1256,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
-    auto target = findProjectionTarget(*player, origin, dir, pickRange);
+    std::optional<ProjectionTarget> target;
+    {
+        telemetry::ScopedTimer rayTimer(telemetry::Stage::Ray);
+        target = findProjectionTarget(*player, origin, dir, pickRange);
+    }
     updateAimedProjectedBlockName(
         showProjectedBlockName && target ? target->block : nullptr
     );
@@ -1250,7 +1272,10 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
     PlacementContext const placementContext = makePlacementContext(origin, dir, pickRange);
-    if (tickNow < placementState().nextPlaceAt()) return;
+    if (tickNow < placementState().nextPlaceAt()) {
+        telemetry::count(telemetry::Event::GlobalInterval);
+        return;
+    }
 
     // Range placement scans everything within the configured radius.
     if (placementState().rangeEnabled()) {
@@ -1283,9 +1308,15 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
             && nowManual - placementState().lastManualPlaceAt() >= kManualRepeatIntervalMs) {
             allowed = true;
         }
-        if (!allowed) return;
+        if (!allowed) {
+            telemetry::count(telemetry::Event::ManualRepeatGate);
+            return;
+        }
     }
-    if (!target) return;
+    if (!target) {
+        telemetry::count(telemetry::Event::NoTarget);
+        return;
+    }
 
     // Skip cells placed a moment ago until the server applies them; new cells
     // place immediately.
@@ -1293,12 +1324,31 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     if (!manualPlacement
         && placementState().autoPlacementSuppressionsActive(now)
         && placementState().autoPlacementSuppressed(packBlockPos(target->cell), now)) {
+        telemetry::count(telemetry::Event::Suppressed);
         return;
     }
-    if (recentlyPlaced(target->cell, now)) return;
+    if (recentlyPlaced(target->cell, now)) {
+        telemetry::count(telemetry::Event::RecentCellLock);
+        return;
+    }
 
     auto const found = findItemSlot(*player, *target->block);
-    if (found.slot < 0) return;
+    if (found.slot < 0) {
+        telemetry::count(telemetry::Event::NoMaterial);
+        return;
+    }
+    // R16: retry a failed heavy orientation prediction only once per 100ms
+    // while aim/eye/item are unchanged. Plain full blocks never enter this
+    // cache. Changing the view or aiming at another block retries immediately.
+    bool const expensivePlan = isViewSensitivePlan(*target->block);
+    FailedPlanKey const failedKey = makeFailedPlanKey(
+        placementContext,target->cell,*target->block,
+        found.item->getAuxValue(),expensivePlan
+    );
+    if (expensivePlan && isFailedPlanCached(failedKey,now)) {
+        telemetry::count(telemetry::Event::FailedPlanCached);
+        return;
+    }
 
     // Only send a placement whose full predicted state and official placement
     // checks match the projection, using the real stack's aux value.
@@ -1313,6 +1363,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
             found.item->getAuxValue(),
             placement
         )) {
+        if (expensivePlan) {
+            placementState().cacheFailedPlan(
+                failedKey, now, now + kAimedOrientedFailureCacheMs);
+        }
+        telemetry::count(telemetry::Event::PlanRejected);
         return;
     }
 
@@ -1332,6 +1387,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         auto const& toItem = inventory.getItem(hotbarSlot);
         if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
         placementState().setNextSwapAt(now + kSwapRetryMs);
+        telemetry::count(telemetry::Event::SwapRequested);
         return;
     }
     if (player->getSelectedItemSlot() != found.slot)
