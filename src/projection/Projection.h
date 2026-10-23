@@ -73,6 +73,10 @@ bool isLayerVisible(
 std::vector<BrokenProjectionCell> takeBrokenProjectionCells(LocalPlayer& player);
 
 ProjectionQuery queryProjection(LocalPlayer& player, BlockPos const& worldPos);
+// Easy Place only: when the comparison cache is behind the visible world,
+// allow an expected schematic block whose actual world cell is already air.
+// Never make a filled world cell a placement target.
+ProjectionQuery queryPlacementProjection(LocalPlayer& player, BlockPos const& worldPos);
 
 std::vector<RangeCandidate> queryMissingCellsInRange(LocalPlayer& player, Vec3 const& center, float radius);
 

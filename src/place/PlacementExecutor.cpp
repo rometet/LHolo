@@ -475,13 +475,13 @@ std::optional<ProjectionTarget> findProjectionTarget(
             // (the vanilla placement position) fills an adjacent ghost. Never
             // target the cell the camera itself is standing in.
             BlockPos const neighbor = neighborOf(cell, entryFace);
-            auto const query = projection::queryProjection(player, neighbor);
+            auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
                 return ProjectionTarget{neighbor, cell, entryFace, query.block};
             }
             break;
         }
-        auto const query = projection::queryProjection(player, cell);
+        auto const query = projection::queryPlacementProjection(player, cell);
         if (!query.block || !query.missing) continue;
 
         // The ghost itself is the target; reuse the shared support selection
@@ -835,7 +835,7 @@ bool resolveOrientedPlacement(
         // exactly. When a layer cut hides it, the cell is not in the query-able
         // virtual world (hasBlock=false) — we still place the door and let the
         // hinge be best-effort, since one DoorItem use creates both halves anyway.
-        auto const upper = projection::queryProjection(player, upperCell);
+        auto const upper = projection::queryPlacementProjection(player, upperCell);
         if (upper.block && upper.missing && upper.block->getTypeName() == ghost.getTypeName()
             && serializedState(*upper.block, "upper_block_bit") == "1") {
             expectedDoorUpper = upper.block;
@@ -1017,9 +1017,6 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     float const radius = static_cast<float>(placementState().radius());
     auto& region = player.getDimensionBlockSource();
 
-    auto candidates = projection::queryMissingCellsInRange(player, center, radius);
-    if (candidates.empty()) return;
-    auto const start = placementState().rangePlanCursor() % candidates.size();
     bool const suppressionsActive = placementState().autoPlacementSuppressionsActive(now);
     auto const inventorySnapshot = snapshotInventory(player);
     auto const selectedSlot = player.getSelectedItemSlot();
@@ -1075,6 +1072,12 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             }
         }
     }
+    // Fast focused placement must run BEFORE enumerating/sorting the entire
+    // radius and competing for the projection lock. In the common case of
+    // holding the aimed material, no range scan is needed at all.
+    auto candidates = projection::queryMissingCellsInRange(player, center, radius);
+    if (candidates.empty()) return;
+    auto const start = placementState().rangePlanCursor() % candidates.size();
     int complexPlannedCandidates = 0;
     int fastPlannedCandidates = 0;
     int rotationPlannedCandidates = 0;

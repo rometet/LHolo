@@ -29,6 +29,8 @@
 #include "mc/client/player/LocalPlayer.h"
 #include "mc/world/level/BlockPos.h"
 #include "mc/world/level/Level.h"
+#include "mc/world/level/BlockSource.h"
+#include "mc/world/level/block/Block.h"
 
 namespace lholo::projection {
 namespace {
@@ -223,6 +225,21 @@ ProjectionQuery queryProjection(LocalPlayer& player, BlockPos const& worldPos) {
             result = detail::queryProjectionCell(state, worldPos);
         }
     );
+    return result;
+}
+
+ProjectionQuery queryPlacementProjection(LocalPlayer& player, BlockPos const& worldPos) {
+    // The correction comparison is updated asynchronously/incrementally.
+    // Placement can use the same current client world state that its native
+    // planner and transaction validation already use, without waiting for
+    // a stale 'Correct' / 'Unknown' cache entry to become 'Missing'.
+    // queryProjection still gates on the active visible schematic, dimension
+    // and world lifecycle; this never exposes a hidden or unloaded schematic.
+    auto result = queryProjection(player, worldPos);
+    if (result.block && !result.missing
+        && player.getDimensionBlockSource().getBlock(worldPos).isAir()) {
+        result.missing = true;
+    }
     return result;
 }
 

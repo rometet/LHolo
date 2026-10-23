@@ -229,10 +229,16 @@ struct PlacementContext { Vec3 eye; float reachSquared; std::int64_t eyeX{},eyeY
 namespace projection {
 struct Candidate { int x{},y{},z{};Block const* block{};bool missing=true; };
 std::vector<Candidate> candidates;
-std::vector<Candidate> queryMissingCellsInRange(Player&,Vec3 const&,float) { return candidates; }
+int rangeQueries{};
+std::vector<Candidate> queryMissingCellsInRange(Player&,Vec3 const&,float) {
+    ++rangeQueries;return candidates;
+}
 Candidate queryProjection(Player&,BlockPos const& p) {
     for(auto const& c:candidates) if(c.x==p.x&&c.y==p.y&&c.z==p.z) return c;
     return {};
+}
+Candidate queryPlacementProjection(Player& player,BlockPos const& p) {
+    return queryProjection(player,p);
 }
 namespace detail {
 bool checkedVoxelRayOrigin(std::array<float,3>,std::array<float,3>,float) { return true; }
@@ -361,7 +367,7 @@ using namespace lholo::place;
 void reset(Player& p) {
     placementState().resetWorldSession();p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();aimed.reset();
+    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;detail::rotatedQueueYaw=0;

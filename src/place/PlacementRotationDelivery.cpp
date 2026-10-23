@@ -64,7 +64,7 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
         || !item.matchesNetIdVariant(p.item)) return false;
     auto const& region=p.player->getDimensionBlockSource();
     if (!region.getBlock(p.cell).isAir()) return false;
-    auto const ghost=projection::queryProjection(*p.player,p.cell);
+    auto const ghost=projection::queryPlacementProjection(*p.player,p.cell);
     auto const* tx=std::get_if<ItemUseInventoryTransaction>(&p.payload->mVariantTransaction.get());
     return ghost.block && ghost.missing && ghost.block->mNetworkId==p.ghostId && tx
         && region.getBlock(tx->mPos).mNetworkId==tx->mTargetBlockId;

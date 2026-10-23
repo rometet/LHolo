@@ -41,6 +41,19 @@ inline void runLatencyChecks(Player& player) {
         "R14 aimed and already-held stone sends in the first game tick");
     check(plannedCells.size()==1 && plannedCells.front()==3,
         "R14 crosshair-first avoids five costly direction candidates");
+    check(projection::rangeQueries==0,
+        "R15 focused block dispatch skips full radius query/sort");
+
+    reset(player);state.setRangeEnabled(true);
+    player.selected=7;
+    player.inventory.items[7]={1,0,64};
+    projection::candidates={{1,0,0,&stone}};
+    aimed=ProjectionTarget{{3,0,0},{3,0,0},1,&stone,{3.5f,.25f,.5f}};
+    planOutcomes[3]=false;
+    planOutcomes[1]=true;
+    tickEasyPlaceImpl(player);
+    check(projection::rangeQueries==1 && sent.size()==1 && sent[0].pos.x==1,
+        "R15 failed focused plan still falls back to range candidates");
 
     // A queued native rotation is NOT a failed plan and must stop this
     // tick. Otherwise a later legacy placement changes the held slot

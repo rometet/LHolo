@@ -56,7 +56,8 @@ ClientInstance client;bool gui{},throwForward{};std::uint64_t clockMs=1000;
 std::uint64_t GetTickCount64(){return clockMs;}
 namespace ll::service {ClientInstance* getClientInstance(){return &client;}}
 namespace lholo::structure {bool isGuiVisible(){return gui;}}
-namespace lholo::place::projection {Block ghost{20,false};bool missing=true;struct Query {Block const* block;bool missing;};Query queryProjection(LocalPlayer&,BlockPos const&){return {&ghost,missing};}}
+namespace lholo::place::projection {Block ghost{20,false};bool missing=true;struct Query {Block const* block;bool missing;};Query queryProjection(LocalPlayer&,BlockPos const&){return {&ghost,missing};}
+Query queryPlacementProjection(LocalPlayer& p,BlockPos const& pos){return queryProjection(p,pos);}}
 namespace lholo::app {
 namespace hook_lifecycle {struct DetourGuard {explicit operator bool()const{return true;}};}
 template<class F,class E>bool invokeNativeCallback(F&& f,E&& e){try{f();return true;}catch(...){e("supplied fault");return false;}}
