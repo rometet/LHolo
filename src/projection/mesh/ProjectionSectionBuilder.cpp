@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/mesh/ProjectionSectionBuilder.h"
+#include "projection/mesh/WaterloggedNativeStreamClip.h"
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 #include "projection/mesh/NativeGeometryProbe.h"
 #endif
@@ -17,6 +18,7 @@
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
+#include "projection/core/WaterloggedFaceClip.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
@@ -31,9 +33,11 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -46,6 +50,7 @@
 #include "mc/client/renderer/texture/TextureUVCoordinateSet.h"
 #include "mc/client/world/level/biome/biome_color_sampling/TessellationPolicy.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#include "mc/deps/nbt/ByteTag.h"
 #include "mc/deps/nbt/IntTag.h"
 #include "mc/deps/nbt/Tag.h"
 #include "mc/deps/core/math/Vec3.h"
@@ -53,6 +58,8 @@
 #include "mc/world/Facing.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/registry/BlockTypeRegistry.h"
+#include "mc/deps/core/string/HashedString.h"
 #include "mc/world/level/block/VanillaBlockTypeIds.h"
 #include "mc/world/level/biome/biome_color_sampling/BiomeColorSampling.h"
 #include "mc/world/level/material/Material.h"
@@ -74,6 +81,8 @@ std::atomic_bool gNativeLiquidCullSkipLogged{};
 std::atomic_bool gPraxisCompatLiquidColorLogged{};
 std::atomic_bool gPraxisLiquidColorSeedLogged{};
 std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
+std::atomic<std::uint32_t> gWaterloggedR9TrapdoorDeferredLogCount{};
+std::atomic<std::uint32_t> gLiquidR9CellOwnerDiagnostics{};
 std::atomic_bool gSubmergedPlantLogged{};
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 std::atomic<std::uint32_t> gGeometryProbeBuilds{};
@@ -262,7 +271,8 @@ struct NativeLiquidCullOutcome {
 
 NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     Tessellator&                              tessellator,
-    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr
+    std::vector<PraxisCompatLiquidKind>*      liquidKinds = nullptr,
+    std::vector<std::size_t>*              owners = nullptr
 ) {
     NativeLiquidCullOutcome outcome{};
     auto& data = tessellator.mMeshData.get();
@@ -300,6 +310,10 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     }
     if (liquidKinds && liquidKinds->size() != positions.size()) {
         outcome.skipReason = "liquid_kind_count_mismatch";
+        return outcome;
+    }
+    if (owners && owners->size() != positions.size()) {
+        outcome.skipReason = "liquid_owner_count_mismatch";
         return outcome;
     }
 
@@ -344,6 +358,9 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
         compactPerVertexField(data.mGeoType.get(), mask.removeQuads);
         if (liquidKinds) {
             compactPerVertexField(*liquidKinds, mask.removeQuads);
+        }
+        if (owners) {
+            compactPerVertexField(*owners, mask.removeQuads);
         }
         compactPerQuadField(quadInfo, mask.removeQuads);
 
@@ -409,7 +426,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     Tessellator&,
     BlockTessellator&,
     std::size_t,
-    ProjectionSectionBuildSettings const&
+    ProjectionSectionBuildSettings const&,
+    std::span<WaterloggedBodyCellCoverage const>
 );
 
 void buildBlockEntityPlaceholderSectionMesh(
@@ -514,6 +532,7 @@ void buildProjectionSection(
     std::vector<std::size_t> failedTessellationIndices;
     std::vector<LayeredBlock> layeredBlocks;
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
+    std::vector<WaterloggedBodyCellCoverage> bodyFaceCoverage;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
     for (auto const index : state.sectionBlockIndices[section]) {
         // Never draw a projected block model on top of an existing
@@ -539,6 +558,7 @@ void buildProjectionSection(
                 entry.liquid,
                 0U
             });
+            bodyFaceCoverage.push_back({index, {}});
         }
         auto const appendBlock = [&](Block const* source) {
             auto const* transformedBlock = transformExpectedBlock(source, sectionTransformSettings, identityTransform);
@@ -624,6 +644,7 @@ void buildProjectionSection(
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
          ++bucketIndex) {
+        auto const bucket = static_cast<RenderBucket>(bucketIndex);
         tessellator.begin(
             Tessellator::DebugContextCallback{},
             mce::PrimitiveMode::QuadList,
@@ -631,7 +652,6 @@ void buildProjectionSection(
             false
         );
         bool bucketTessellated{};
-        auto const bucket = static_cast<RenderBucket>(bucketIndex);
         if (bucket == RenderBucket::Blend) {
             state.sections[section].blendSortKeyValid = false;
             state.sections[section].blendSortUnsupported = false;
@@ -701,6 +721,61 @@ void buildProjectionSection(
                 auto& composite =
                     compositeBodyOutcomes[layered.compositeOutcomeIndex];
                 composite.vertices += verticesAdded;
+                // R10: opaque slabs/stairs keep R8 native clipping. Alpha
+                // trapdoors have texture holes; keep their liquid quad and
+                // use only the native body face to offset near-conflicting
+                // water geometry slightly behind the cutout pixel depth.
+                auto const family = waterloggedClipCandidate(
+                    layered.block->getTypeName()
+                );
+                auto const clipFamily = waterloggedSafeClipFamily(
+                    layered.block->getTypeName(),
+                    layered.bucket == RenderBucket::Opaque
+                );
+                auto const cutoutTrapdoor = family == WaterloggedClipFamily::Trapdoor
+                    && (layered.bucket == RenderBucket::AlphaOneSided
+                        || layered.bucket == RenderBucket::Alpha);
+                if (geometryAdded && (clipFamily != WaterloggedClipFamily::None
+                                      || cutoutTrapdoor)
+                    && verticesAdded % 4U == 0U && verticesAdded <= 512U
+                    && tessellator.mMeshData->mMode == mce::PrimitiveMode::QuadList) {
+                    auto& coverage = bodyFaceCoverage[layered.compositeOutcomeIndex];
+                    if (!cutoutTrapdoor) coverage.family = clipFamily;
+                    if (cutoutTrapdoor) {
+                        coverage.cellCenter = {
+                            static_cast<float>(layered.position.x) + 0.5F,
+                            static_cast<float>(layered.position.y) + 0.5F,
+                            static_cast<float>(layered.position.z) + 0.5F
+                        };
+                    }
+                    auto& faces = cutoutTrapdoor
+                        ? coverage.cutoutFaces : coverage.solidFaces;
+                    auto const& vertices = tessellator.mMeshData->mPositions.get();
+                    for (std::size_t begin = firstPosition;
+                         begin + 4U <= vertices.size()
+                         && faces.size() < WaterloggedMaxBodyRects;
+                         begin += 4U) {
+                        WaterloggedQuadPositions points{};
+                        for (std::size_t corner = 0; corner < 4U; ++corner) {
+                            auto const& v = vertices[begin + corner];
+                            points[corner] = {v.x, v.y, v.z};
+                        }
+                        if (auto const rect = waterloggedAxisRect(points)) {
+                            faces.push_back(*rect);
+                        }
+                    }
+                    if (cutoutTrapdoor
+                        && gWaterloggedR9TrapdoorDeferredLogCount.fetch_add(
+                            1U, std::memory_order_acq_rel
+                        ) < 4U) {
+                        logger().info(
+                            "LHoloWaterloggedR10 nativeCutoutFaces={} "
+                            "body={} layer={} noTextureAlphaCull=1",
+                            faces.size(), layered.block->getTypeName(),
+                            static_cast<unsigned int>(layered.layer)
+                        );
+                    }
+                }
                 auto const logIndex = gSubmergedBodyLogCount.fetch_add(
                     1U,
                     std::memory_order_acq_rel
@@ -717,6 +792,9 @@ void buildProjectionSection(
                 }
             }
             if (!rendered && !geometryAdded) {
+                // R11 animates bubble-column visuals in the projection render pass.
+                // Never substitute a misleading block-actor placeholder cube.
+                if (layered.block->getTypeName() == "minecraft:bubble_column") continue;
                 // No terrain-atlas model: needs a placeholder hull.
                 failedTessellationIndices.push_back(layered.structureIndex);
                 continue;
@@ -836,7 +914,8 @@ void buildProjectionSection(
             tessellator,
             blockTessellator,
             section,
-            sectionBuildSettings
+            sectionBuildSettings,
+            bodyFaceCoverage
         );
         if (state.praxisCompatLiquidSections[section]) {
             // The exact replay stream owns this section. Do not spend a second
@@ -1286,7 +1365,8 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     Tessellator&                          tessellator,
     BlockTessellator&                     blockTessellator,
     std::size_t                           section,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& settings,
+    std::span<WaterloggedBodyCellCoverage const> bodyCoverage
 ) {
     static_assert(
         static_cast<unsigned int>(BlockRenderLayer::RenderlayerBlend) == 3U,
@@ -1302,6 +1382,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     };
     std::vector<std::size_t> candidates;
     std::vector<PraxisCompatLiquidKind> liquidKinds;
+    std::vector<std::size_t> liquidOwners;
     candidates.reserve(state.sectionBlockIndices[section].size());
     for (auto const index : state.sectionBlockIndices[section]) {
         auto const& entry = state.structure->renderBlocks[index];
@@ -1465,6 +1546,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             ? PraxisCompatLiquidKind::Lava
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
+        liquidOwners.insert(liquidOwners.end(), addedVertices, index);
         succeeded.push_back(index);
     }
 
@@ -1481,7 +1563,29 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         return succeeded;
     }
 
-    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds);
+    // Diagnostic only: observe secondary-water ownership for bubble columns
+    // and native water/lava source-vs-flow families before modifying geometry.
+    // Do not modify the already-accepted liquid classification here.
+    auto const diagIndex = gLiquidR9CellOwnerDiagnostics.fetch_add(
+        1U, std::memory_order_acq_rel
+    );
+    if (diagIndex < 8U) {
+        std::size_t waterCells{}, lavaCells{}, bubbleCells{};
+        for (auto const index : succeeded) {
+            auto const& entry = state.structure->renderBlocks[index];
+            if (entry.liquid && entry.liquid->getBlockType().mMaterial.mSuperHot)
+                ++lavaCells;
+            else ++waterCells;
+            if (entry.block && entry.block->getTypeName() == "minecraft:bubble_column")
+                ++bubbleCells;
+        }
+        logger().info(
+            "LHoloLiquidR9 exactOwnedCells={} waterCells={} lavaCells={} "
+            "bubbleColumnWithWater={} nativeStreamValidBeforeCull=1",
+            succeeded.size(), waterCells, lavaCells, bubbleCells
+        );
+    }
+    auto const cull = cullNativeLiquidInternalFaces(tessellator, &liquidKinds, &liquidOwners);
     state.nativeLiquidTelemetry.praxisCompatVerticesBeforeCull += cull.before;
     state.nativeLiquidTelemetry.praxisCompatVerticesAfterCull += cull.after;
     if (!cull.processed) {
@@ -1496,6 +1600,33 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
     }
     state.nativeLiquidTelemetry.praxisCompatVerticesCulled += cull.culled;
     state.nativeLiquidTelemetry.praxisCompatFacePairsCulled += cull.pairs;
+    // R8: remove only source-solid coincident water rectangles. Normal
+    // water and other waterlogged families use the old exact replay stream.
+    auto const r8 = clipWaterloggedNativeStream(
+        tessellator, liquidKinds, liquidOwners, bodyCoverage
+    );
+    if (r8.committed) {
+        logger().info(
+            "LHoloWaterloggedR8 before={} after={} clippedQuads={} "
+            "removedQuads={} resultingFragments={} nativeMaterialUnchanged=1",
+            r8.beforeVertices, r8.afterVertices, r8.clippedSourceQuads,
+            r8.removedSourceQuads, r8.addedFragmentQuads
+        );
+        logger().info(
+            "LHoloWaterloggedR9 clippedStairQuads={} clippedSlabQuads={} "
+            "clippedOpaqueTrapdoorQuads={} before={} after={} "
+            "opaqueGeometryOnly=1 ordinaryLiquidUnchanged=1",
+            r8.stairClippedQuads, r8.slabClippedQuads,
+            r8.trapdoorClippedQuads, r8.beforeVertices, r8.afterVertices
+        );
+        if (r8.cutoutInsetWaterQuads != 0U) {
+            logger().info(
+                "LHoloWaterloggedR10 insetCutoutWaterQuads={} insetDistance={} "
+                "waterQuadsRemovedByCutout=0 preserveAlphaTestHoles=1",
+                r8.cutoutInsetWaterQuads, WaterloggedCutoutInsetDistance
+            );
+        }
+    }
 
     auto& meshData = tessellator.mMeshData.get();
     auto& positions = meshData.mPositions.get();

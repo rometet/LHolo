@@ -11,6 +11,7 @@
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/mesh/ProjectionAnimatedBubblePass.h"
 #include "projection/core/ProjectedPistonAppearance.h"
 #include "projection/mesh/ProjectedPistonRenderScope.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -74,6 +75,9 @@ std::atomic_bool gSignTextResolvedLogged{};
 std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
+std::atomic_bool gLiquidProxyR6Logged{};
+std::atomic_bool gAnimatedBubbleR11FailureLogged{};
+std::atomic_bool gExactReplayR7Logged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
 std::atomic_bool gTransparentQuadSortSourceFailureLogged{};
@@ -888,6 +892,13 @@ void submitProjectionMeshPass(
 
     auto& itemRenderer = renderContext.mItemInHandRenderer;
     auto const& blendMaterial = itemRenderer.mMatBlendBlock.get();
+    // R7: Exact Replay submits *before* the regular translucent ghost meshes.
+    // Resolve the R5 projection-owned material before native liquid submission,
+    // not after it.  Both can then share depthTest=on, blend=on, depthWrite=off
+    // without mutating the vanilla material used by Minecraft.
+    auto const& projectedBlendMaterial = renderAlphaLayer
+        ? projectionPrivateBlendMaterial(state, blendMaterial)
+        : blendMaterial;
 
     auto worldCenter = [&](std::size_t section) {
         return Vec3{
@@ -963,7 +974,7 @@ void submitProjectionMeshPass(
                 auto const* exactReplayMaterial =
                     ActivePraxisLiquidMaterial
                             == PraxisLiquidMaterialCandidate::BlendBlock
-                        ? &blendMaterial
+                        ? &projectedBlendMaterial
                         : (signText ? &*signText : nullptr);
                 auto const exactReplayMaterialReady =
                     liquidReplayMaterialReady(ActivePraxisLiquidMaterial, signTextReady, blendMaterialReady);
@@ -1002,6 +1013,26 @@ void submitProjectionMeshPass(
                 }
 
                 if (!exactSections.empty()) {
+                    if (!gExactReplayR7Logged.exchange(true, std::memory_order_acq_rel)) {
+                        auto const* vanilla = tryRenderMaterial(blendMaterial);
+                        auto const* effective = exactReplayMaterial
+                            ? tryRenderMaterial(*exactReplayMaterial) : nullptr;
+                        logger().info(
+                            "LHoloExactR7 path=PraxisExactReplay sections={} private={} "
+                            "sourceDepthWrite={} effectiveDepthWrite={} "
+                            "effectiveDepthTest={} blend={}",
+                            exactSections.size(),
+                            vanilla && effective && vanilla != effective ? 1 : 0,
+                            vanilla ? static_cast<unsigned int>(
+                                vanilla->depthStencilStateDescription->depthWriteMask
+                            ) : 0U,
+                            effective ? static_cast<unsigned int>(
+                                effective->depthStencilStateDescription->depthWriteMask
+                            ) : 0U,
+                            effective && effective->depthStencilStateDescription->depthTestEnabled ? 1 : 0,
+                            effective && effective->blendStateDescription->enableBlend ? 1 : 0
+                        );
+                    }
                     if (state.praxisCompatLiquidAggregateDirty
                         || state.praxisCompatLiquidAggregateOrder != exactSections) {
                         auto const aggregateStarted = std::chrono::steady_clock::now();
@@ -1075,7 +1106,8 @@ void submitProjectionMeshPass(
 
                 auto const retainedCandidate = retainedLiquidMaterial(signTextReady, blendMaterialReady);
                 auto const* retainedMaterial = !retainedCandidate ? nullptr
-                    : (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText ? &*signText : &blendMaterial);
+                    : (*retainedCandidate == PraxisLiquidMaterialCandidate::SignText
+                        ? &*signText : &projectedBlendMaterial);
                 for (auto const section : retainedSections) {
                     auto const& mesh = state.nativeLiquidSectionMeshes[section];
                     if (!retainedMaterial || !mesh || !mesh->isValid()) continue;
@@ -1398,6 +1430,7 @@ void submitProjectionMeshPass(
         }
     };
 
+    // R6 fallback hulls and R7 Exact Replay use the same R5 material owner.
     if (structureOpacity >= 0.999f) {
         auto opaqueMeshes = collectBucket(opaqueBucket);
         auto alphaMeshes = collectBucket(alphaBucket);
@@ -1436,7 +1469,7 @@ void submitProjectionMeshPass(
             );
         } else {
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
+            renderMeshes(transparentMeshes, projectedBlendMaterial);
         }
     } else if (renderAlphaLayer) {
         // True projection transparency needs a blending material even for
@@ -1452,7 +1485,7 @@ void submitProjectionMeshPass(
         }
         sortBackToFront(transparentMeshes);
         prepareSortedBlendMeshes();
-        renderMeshes(transparentMeshes, projectionPrivateBlendMaterial(state, blendMaterial));
+        renderMeshes(transparentMeshes, projectedBlendMaterial);
     }
 
     // Textured liquid hulls travel the proven glass path: blend-block material
@@ -1477,11 +1510,30 @@ void submitProjectionMeshPass(
                 return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
             }
         );
+        if (!liquidSections.empty()
+            && !gLiquidProxyR6Logged.exchange(true, std::memory_order_acq_rel)) {
+            auto const* source = tryRenderMaterial(blendMaterial);
+            auto const* effective = tryRenderMaterial(projectedBlendMaterial);
+            logger().info(
+                "LHoloLiquidR6 fallbackProxySections={} projectionPrivate={} "
+                "sourceDepthWrite={} effectiveDepthWrite={} effectiveDepthTest={} blend={}",
+                liquidSections.size(),
+                source && effective && source != effective ? 1 : 0,
+                source ? static_cast<unsigned int>(
+                    source->depthStencilStateDescription->depthWriteMask
+                ) : 0U,
+                effective ? static_cast<unsigned int>(
+                    effective->depthStencilStateDescription->depthWriteMask
+                ) : 0U,
+                effective && effective->depthStencilStateDescription->depthTestEnabled ? 1 : 0,
+                effective && effective->blendStateDescription->enableBlend ? 1 : 0
+            );
+        }
         for (auto const liquidSection : liquidSections) {
             auto& mesh = *state.liquidProxySectionMeshes[liquidSection];
             mesh.renderMesh(
                 renderContext.mScreenContext,
-                blendMaterial,
+                projectedBlendMaterial,
                 *state.terrainTextureVariant,
                 0,
                 mesh.mVertexCount.get().value_or(0u),
@@ -1497,7 +1549,7 @@ void submitProjectionMeshPass(
             if (!placeholder || !placeholder->isValid()) continue;
             placeholder->renderMesh(
                 renderContext.mScreenContext,
-                blendMaterial,
+                projectedBlendMaterial,
                 *state.terrainTextureVariant,
                 0,
                 placeholder->mVertexCount.get().value_or(0u),
@@ -1507,6 +1559,25 @@ void submitProjectionMeshPass(
         }
     }
 
+    // R11's optional animated bubble effect is only submitted when the
+    // projection alpha pass is visible. Never let an effect error reset a
+    // working schematic or its accepted waterlogged geometry.
+    if (renderAlphaLayer) {
+        try {
+            submitAnimatedBubbleOverlay(
+                state, renderContext, renderOrigin, camera,
+                structureOpacity, projectedBlendMaterial
+            );
+        } catch (std::exception const& exception) {
+            if (!gAnimatedBubbleR11FailureLogged.exchange(
+                    true, std::memory_order_acq_rel))
+                logger().warn("LHoloBubbleR11 failed: {}", exception.what());
+        } catch (...) {
+            if (!gAnimatedBubbleR11FailureLogged.exchange(
+                    true, std::memory_order_acq_rel))
+                logger().warn("LHoloBubbleR11 failed with unknown exception");
+        }
+    }
     if (!renderAlphaLayer) return;
 
     auto* levelRenderer = client.getLevelRenderer();

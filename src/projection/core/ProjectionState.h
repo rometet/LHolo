@@ -66,7 +66,22 @@ struct SectionState {
     std::unique_ptr<mce::MeshData> blendSource;
 };
 
+struct ProjectionAnimatedBubbleCell {
+    std::size_t index{};
+    BlockPos local{};
+    bool dragDown{};
+};
+
 struct ProjectionState {
+    // R11 animated schematic particles. Only the render callback reads/writes
+    // this bounded cache, never the async section-build worker. All positions
+    // stay projection-local; no real-world particle engine is touched.
+    std::vector<ProjectionAnimatedBubbleCell> animatedBubbleCells;
+    structure::LoadedStructure const* animatedBubbleSource{};
+    std::uint64_t animatedBubbleGeneration{};
+    std::size_t animatedBubbleScanCursor{};
+    int animatedBubbleMirror{-1};
+    int animatedBubbleRotation{-1};
     std::size_t                     blendSortCursor{};
     bool                            enabled{};
     bool                            placementCoordinatesInvalid{};
