@@ -47,12 +47,6 @@ std::atomic_bool available{};
 // Strict stair uses MUST be attached to a genuine native AuthInput that
 // already carries the same viewing direction. Never rewrite player/movement
 // rotation or accept the local planner's yaw without this same-tick proof.
-bool nativeRotationMatches(Vec2 const& actual,float pitch,float yaw) noexcept {
-    return std::isfinite(actual.x) && std::isfinite(actual.y)
-        && std::fabs(actual.x-pitch)<=5.F
-        && std::fabs(std::remainder(actual.y-yaw,360.F))<=2.F;
-}
-
 bool stillValid(PendingRotation const& p,ClientInstance& client) {
     auto& state=PlacementState::getInstance();
     if (GetTickCount64()>=p.expires || p.epoch!=state.manualInputEpoch()
@@ -106,19 +100,16 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         }
     }
     if (!request) { origin(packet);return; }
-    if (request->requireNativeRotationSync
-        && (!nativeRotationMatches(input.mRot.get(),request->pitch,request->yaw)
-            || !nativeRotationMatches(input.mInteractRotation.get(),
-                request->pitch,request->yaw))) {
-        telemetry::count(telemetry::Event::StairRotationDrift);
-        origin(packet);
-        return; // never attach a stair that the server may rotate differently
-    }
+    // R19: strict stair input must not conflict with an ongoing native
+    // action (screen, movement flag, item use); that gate is above. We now
+    // synchronize the two authoritative rotation fields for this one packet,
+    // not the local camera, actor, head, or subsequent network ticks.
     bool valid=false;
     app::invokeNativeCallback([&] { valid=stillValid(*request,*client); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement validation",reason); });
     if (!valid) { origin(packet);return; }
     auto const savedRotation=input.mInteractRotation.get();
+    auto const savedPlayerRotation=input.mRot.get();
     auto const savedFlags=input.mInputData.get();
     bool attached=false;
     app::invokeNativeCallback([&] {
@@ -130,10 +121,11 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
             PackedItemUseLegacyInventoryTransaction{payload.mLegacyRequestId.get(),
                 payload.mLegacySetItemSlots.get(),*tx});
         attached=true;
-        // Stairs use the genuine packet's orientation only. Synthetic angles
-        // are retained exclusively for the existing non-stair interaction route.
-        if (!request->requireNativeRotationSync)
-            input.mInteractRotation.get()={request->pitch,request->yaw};
+        // The two network rotations must agree when the server evaluates
+        // stairs. All other gameplay/local facing stays unchanged.
+        if (request->requireNativeRotationSync)
+            input.mRot.get()={request->pitch,request->yaw};
+        input.mInteractRotation.get()={request->pitch,request->yaw};
         input.mInputData.get().insert(Input::PerformItemInteraction);
     },[](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement attach",reason); });
     // Forward one fresh native input: its tick, movement, camera and main/head
@@ -142,6 +134,7 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement forward",reason); });
     if (attached) input.mItemUseTransaction.reset();
     input.mInteractRotation.get()=savedRotation;
+    input.mRot.get()=savedPlayerRotation;
     input.mInputData.get()=savedFlags;
     if (attached) {
         // A native forwarding exception may occur after serialization. Bound

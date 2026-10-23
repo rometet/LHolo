@@ -25,13 +25,9 @@ inline void runStairStrictChecks(Player& player) {
                 {},stairs,0,plan);
             check(player.rotation==original,
                 "R18 stairs never temporarily spoof player rotation");
-            if(actualDir!=wantDir) {
-                ++refused;
-                check(!ok,"R18 off-axis stair is refused, not force-placed");
-            } else {
-                ++accepted;
-                check(ok,"R18 aligned stair with real support predicted");
-                if(ok) {
+            if(actualDir!=wantDir) ++refused; else ++accepted;
+            check(ok,"R19 stair prediction accepts every yaw with matching native probe");
+            if(ok) {
                     check(plan.requireNativeRotationSync
                         && plan.interactionRotation.has_value()
                         && plan.at==BlockPos{-1,0,0},
@@ -40,9 +36,8 @@ inline void runStairStrictChecks(Player& player) {
                     check(queued==detail::PlacementDispatchResult::Queued
                         && detail::rotatedQueueStrict && sent.empty(),
                         "R18 correct stair is queued, not legacy-sent");
-                    check(detail::rotatedQueueYaw==original.y,
-                        "R18 genuine yaw retained rather than overriding view");
-                }
+                    check(detail::rotatedQueueYaw==(wantDir==3?-90.F:wantDir*90.F),
+                        "R19 yaw override matches exact native predictor direction");
             }
         }
     reset(player);placementState().setEnabled(true);

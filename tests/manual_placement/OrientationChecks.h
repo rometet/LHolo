@@ -16,7 +16,7 @@ inline void runOrientationChecks(Player& player) {
         check(!plannedOk || (target.clickPos.y>=0.5f)==(half==1),"trapdoor hit half agrees with supplied native prediction");
         if(plannedOk) {
             auto const sentOk=placeBlock(player,target,0,{1,0,64,101});
-            if(playerDirection==ghostDirection) check(detail::isPlacementSent(sentOk)&&sent.size()==1,"aligned trapdoor retains existing sender path");
+            if(playerDirection==ghostDirection) check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueStrict,"R19 aligned trapdoor queues native synced input");
             else check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1&&detail::rotatedQueueYaw==(ghostDirection==3?-90.0f:ghostDirection*90.0f),
                 "off-axis trapdoor queues interaction yaw without declaring sender/ack success");
         }
@@ -55,8 +55,9 @@ inline void runOrientationChecks(Player& player) {
             auto const queuedBefore=detail::rotatedQueueCalls;
             auto const wasSent=placeBlock(player,proposed,0,{1,0,64,101});
             if(direction==4) {
-                check(detail::isPlacementSent(wasSent)&&sent.size()==1&&queuedBefore==detail::rotatedQueueCalls,
-                    "already-aligned six-way placement retains unchanged native sender path");
+                check(wasSent==detail::PlacementDispatchResult::Queued&&sent.empty()
+                    &&detail::rotatedQueueCalls==queuedBefore+1&&detail::rotatedQueueStrict,
+                    "R19 aligned six-way block attaches to native synchronized input");
             } else {
                 check(wasSent==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1,
                     "off-axis six-way placement queues one native interaction, no fake ack");
@@ -89,7 +90,9 @@ inline void runOrientationChecks(Player& player) {
         ++crafterAdmitted;
         auto const sentOk=placeBlock(player,target,0,{1,0,64,101});
         if(std::string_view(axis)=="horizontal"&&heading==1) {
-            check(detail::isPlacementSent(sentOk)&&sent.size()==1,"aligned crafter uses original sender");
+            check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()
+                &&detail::rotatedQueueStrict,
+                "R19 aligned crafter uses synchronized native input");
         } else {
             check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1,
                 "3D crafter queues matched pitch/yaw only");

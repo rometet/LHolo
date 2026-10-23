@@ -114,12 +114,14 @@ inline void runCoverageChecks(Player& player) {
                 // R18 deliberately refuses the independent legacy packet for
                 // stairs. The native interaction is queued only, and must
                 // subsequently pass same-tick rotation verification.
-                if (std::string_view(family)=="stairs") {
+                if (std::string_view(family)=="stairs"
+                    || detail::placementDirectionRule(c.ghost.name)
+                        != detail::PlacementDirectionRule::None) {
                     check(sent.empty() && detail::rotatedQueueCalls==1
                         && detail::rotatedQueueStrict,
-                        "R18 stair family routes through strict native AuthInput, never legacy");
+                        "R19 controlled facing uses synchronized native AuthInput");
                 } else {
-                    check(sent.size()==1,"family actual mode tick/planner/sender executes with supplied prediction and interactive classification");
+                    check(sent.size()==1,"family independent legacy sender for nondirectional blocks");
                 }
                 if(sent.size()==1) {
                     check(sent.back().pos==neighborOf(cell,sf)&&sent.back().face==oppositeFace(sf),"family mode transaction clicks supplied support with expected face");

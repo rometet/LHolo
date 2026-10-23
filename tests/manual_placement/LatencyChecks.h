@@ -140,6 +140,25 @@ inline void runLatencyChecks(Player& player) {
     check(!placementPredictionMatches(wrongPiston,pistonDirection),
         "R17 piston facing remains strictly validated");
 
+    // R19: a valid aimed ghost with its material only in the backpack
+    // begins the official synchronized swap immediately. Avoid spending a
+    // native orientation search before the inventory exchange has applied.
+    reset(player);state.setEnabled(true);
+    player.selected=0;
+    player.inventory.items[12]={1,0,64};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=false;
+    tickEasyPlaceImpl(player);
+    check(swaps==1 && sent.empty() && planned==0,
+        "R19 backpack-first starts official inventory swap before prediction");
+    player.inventory.items[0]=player.inventory.items[12];
+    player.inventory.items[12]={};
+    planOutcomes[0]=true;
+    fixtureTime=1050;
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1 && sent[0].slot==0,
+        "R19 after observed inventory swap places on next eligible tick");
+
     // A queued native rotation is NOT a failed plan and must stop this
     // tick. Otherwise a later legacy placement changes the held slot
     // and the queued AuthInput fails its strict stack/net-id validation.

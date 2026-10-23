@@ -126,7 +126,7 @@ int main(){
     check(forwarded.size()==1 && forwarded.back().attached
         && forwarded.back().rotation==Vec2{17.F,90.F}
         && forwarded.back().main==Vec2{17.F,90.F},
-        "R18 aligned stair attaches to genuine native rotation without spoof");
+        "R19 aligned stair attaches matched input rotations");
     check(!strictMatch.mItemUseTransaction.get()
         && strictMatch.mInteractRotation.get()==Vec2{17.F,90.F},
         "R18 aligned stair restores genuine packet fields");
@@ -138,9 +138,10 @@ int main(){
     wrongActor.mRot.get()={17.F,0.F};
     wrongActor.mInteractRotation.get()={17.F,90.F};
     hook.run(wrongActor);
-    check(forwarded.size()==1 && !forwarded.back().attached
-        && !state.recentPlacementActive(0,clockMs),
-        "R18 rotated actor input drops stair rather than placing wrong facing");
+    check(forwarded.size()==1 && forwarded.back().attached
+        && forwarded.back().main==Vec2{17.F,90.F}
+        && wrongActor.mRot.get()==Vec2{17.F,0.F},
+        "R19 off-axis actor rotation synchronized only within forwarded packet");
     reset();
     check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
         17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),
@@ -148,9 +149,10 @@ int main(){
     PlayerAuthInputPacket wrongInteract;
     wrongInteract.mInteractRotation.get()={17.F,0.F};
     hook.run(wrongInteract);
-    check(forwarded.size()==1 && !forwarded.back().attached
-        && !state.recentPlacementActive(0,clockMs),
-        "R18 wrong interaction direction drops stair");
+    check(forwarded.size()==1 && forwarded.back().attached
+        && forwarded.back().rotation==Vec2{17.F,90.F}
+        && wrongInteract.mInteractRotation.get()==Vec2{17.F,0.F},
+        "R19 interaction rotation synchronized and original packet restored");
     reset();
     check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
         17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),

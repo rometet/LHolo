@@ -997,7 +997,11 @@ bool resolveOrientedPlacement(
     };
 
     if (searchCurrentRotation(out)) {
-        if (strictStairs) {
+        bool const syncOriented = strictStairs
+            || ghost.getTypeName().ends_with("_trapdoor")
+            || detail::placementDirectionRule(ghost.getTypeName())
+                != detail::PlacementDirectionRule::None;
+        if (syncOriented) {
             // A correct local predictor is not proof that the remote player
             // rotation has reached the server. Force the SAME native AuthInput
             // tick to carry the use and validate its genuine rotation first.
@@ -1007,10 +1011,12 @@ bool resolveOrientedPlacement(
         }
         return true;
     }
-    // Never spoof yaw for stairs: the server may choose their weirdo_direction
-    // from authoritative player rotation rather than interactRotation.
-    // Refusing an off-axis stair is safer than creating a wrong-facing block.
-    if (strictStairs) return false;
+    // R19: stairs may be planned at any actual view direction provided the
+    // native predictor reproduces the exact requested weirdo_direction and
+    // upside_down_bit. Delivery synchronizes BOTH native input rotations to
+    // the chosen proven candidate, and restores them after forwarding.
+    // Fail closed when no native candidate matches.
+
     // R13: search only a bounded, proven native interaction rotation matrix.
     // Never map a serialized state to angles by guesswork: every candidate
     // must be accepted by Block::getPlacementBlock and the existing exact
@@ -1040,6 +1046,7 @@ bool resolveOrientedPlacement(
         if (!ok) return false;
         if (matched) {
             out.interactionRotation=candidate;
+            out.requireNativeRotationSync=true;
             return true;
         }
     }
@@ -1361,8 +1368,38 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     }
 
     auto const found = findItemSlot(*player, *target->block);
+    if(found.slot>=0 && found.slot<kHotbarSlots)
+        telemetry::count(telemetry::Event::InventorySwapResolved);
     if (found.slot < 0) {
         telemetry::count(telemetry::Event::NoMaterial);
+        return;
+    }
+    // R19: start the server-synchronized inventory exchange at the FIRST
+    // eligible aimed game tick. The old path spent time on full native-facing
+    // planning first, then swapped, discarded the plan and waited another
+    // tick to try again. With a backpack source we cannot place until the
+    // net-ID exchange is visible locally, so initiate it before orientation
+    // probes. Never double-use/shortcut server inventory authority.
+    if (found.slot >= kHotbarSlots) {
+        // Back off a rejected swap so it never retries more often than
+        // kSwapRetryMs.
+        if (now < placementState().nextSwapAt()) {
+            telemetry::count(telemetry::Event::InventorySwapBlocked);
+            return;
+        }
+        // The server only accepts placements from the selected hotbar slot.
+        // Swap the backpack item into the currently selected slot through a
+        // server-synced NormalTransaction. Do not place in the same tick: the
+        // server's item-stack-net bookkeeping lags the legacy swap, so an
+        // immediate placement can be rejected and then re-throttled by the cell
+        // lock. The next tick finds the item in the hotbar and places via the
+        // single-packet fast path.
+        auto& inventory = player->getInventory();
+        int const hotbarSlot = chooseHotbarSwapTarget(*player);
+        auto const& toItem = inventory.getItem(hotbarSlot);
+        if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
+        placementState().setNextSwapAt(now + kSwapRetryMs);
+        telemetry::count(telemetry::Event::SwapRequested);
         return;
     }
     // R16: retry a failed heavy orientation prediction only once per 100ms
@@ -1405,25 +1442,6 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
         telemetry::count(telemetry::Event::ConnectivityAccepted);
 
-    if (found.slot >= kHotbarSlots) {
-        // Back off a rejected swap so it never retries more often than
-        // kSwapRetryMs.
-        if (now < placementState().nextSwapAt()) return;
-        // The server only accepts placements from the selected hotbar slot.
-        // Swap the backpack item into the currently selected slot through a
-        // server-synced NormalTransaction. Do not place in the same tick: the
-        // server's item-stack-net bookkeeping lags the legacy swap, so an
-        // immediate placement can be rejected and then re-throttled by the cell
-        // lock. The next tick finds the item in the hotbar and places via the
-        // single-packet fast path.
-        auto& inventory = player->getInventory();
-        int const hotbarSlot = chooseHotbarSwapTarget(*player);
-        auto const& toItem = inventory.getItem(hotbarSlot);
-        if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
-        placementState().setNextSwapAt(now + kSwapRetryMs);
-        telemetry::count(telemetry::Event::SwapRequested);
-        return;
-    }
     if (player->getSelectedItemSlot() != found.slot) {
         player->setSelectedSlot(found.slot);
         // Let the native selected-slot update propagate before queuing the

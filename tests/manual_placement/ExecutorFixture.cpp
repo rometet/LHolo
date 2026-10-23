@@ -406,8 +406,12 @@ int main() {
         check(!predictionInputs.empty()&&predictionInputs.front().cell==cell&&predictionInputs.front().aux==7,"native prediction receives target cell and actual stack aux");
         auto const& input=predictionInputs.front();
         check(input.relative.x>=0&&input.relative.x<=1&&input.relative.y>=0&&input.relative.y<=1&&input.relative.z>=0&&input.relative.z<=1,"predictor receives support-relative hit across world heights");
-        check(detail::isPlacementSent(placeBlock(player,target,0,{1,7,64})),"actual transaction sends planned target");
-        check(sent.back().pos==support&&sent.back().click.x==input.relative.x&&sent.back().click.y==input.relative.y&&sent.back().click.z==input.relative.z,"transaction click agrees with predictor relative hit");
+        auto const action=placeBlock(player,target,0,{1,7,64});
+        check(action==detail::PlacementDispatchResult::Queued
+            && sent.empty() && detail::rotatedQueueStrict,
+            "R19 trapdoor use carries native matched input rather than independent legacy");
+        check(target.at==support && target.face==oppositeFace(sf),
+            "R19 transaction keeps the validated support face");
         std::printf("planner cell=(%d,%d,%d) support=(%d,%d,%d) face=%u aux=%d hit=(%.2f,%.2f,%.2f) predicted=supplied-match send=called apply=NOT_RUN\n",
             cell.x,cell.y,cell.z,support.x,support.y,support.z,static_cast<unsigned>(input.face),input.aux,
             input.relative.x,input.relative.y,input.relative.z);

@@ -120,6 +120,7 @@ LL_TYPE_INSTANCE_HOOK(
                 "noMaterial={} invalidPlan={} cachedPlan={} connectOK={} connectFail={} cellLock={} throttle={} "
                 "manualGate={} swaps={} sent={} queued={} rejected={} suppressed={} "
                 "stairQueued={} stairPlanFail={} stairSyncDrop={} "
+                "swapWait={} hotbarFound={} "
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
                 "over4ms[tick,ray,plan]={}/{}/{}",
                 stats->count(E::Tick),stats->count(E::Auto),
@@ -133,6 +134,8 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::DispatchRejected),stats->count(E::Suppressed),
                 stats->count(E::StairQueued),stats->count(E::StairPlanRejected),
                 stats->count(E::StairRotationDrift),
+                stats->count(E::InventorySwapBlocked),
+                stats->count(E::InventorySwapResolved),
                 stats->averageUs(S::Tick),stats->maximumUs(S::Tick),
                 stats->averageUs(S::Ray),stats->maximumUs(S::Ray),
                 stats->averageUs(S::Plan),stats->maximumUs(S::Plan),

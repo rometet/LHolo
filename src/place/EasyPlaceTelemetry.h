@@ -16,6 +16,7 @@ enum class Event : std::size_t {
     SwapRequested, PacketSent, NativeQueued, DispatchRejected, Suppressed,
     ConnectivityAccepted, ConnectivityRejected,
     StairQueued, StairPlanRejected, StairRotationDrift,
+    InventorySwapBlocked, InventorySwapResolved,
     Count
 };
 
