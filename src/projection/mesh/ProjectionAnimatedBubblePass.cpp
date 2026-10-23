@@ -5,6 +5,7 @@
 #include "projection/mesh/ProjectionAnimatedBubblePass.h"
 
 #include "projection/core/AnimatedBubbleGeometry.h"
+#include "projection/core/VanillaBubbleSprite.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
 #include "resourcepacks/WorldPackReloadState.h"
@@ -20,11 +21,21 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <glm/vec2.hpp>
 
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
+#include "mc/client/game/IClientInstance.h"
+#include "mc/client/renderer/game/LevelRenderer.h"
+#include "mc/client/renderer/TextureGroup.h"
+#include "mc/deps/core/file/PathView.h"
+#include "mc/deps/core/resource/ResourceLocation.h"
+#include "mc/deps/core_graphics/TextureSetLayerType.h"
+#include "mc/deps/minecraft_renderer/renderer/BedrockTextureData.h"
+#include "mc/deps/minecraft_renderer/renderer/IsMissingTexture.h"
 #include "mc/client/gui/screens/ScreenContext.h"
 #include "mc/client/renderer/BaseActorRenderContext.h"
 #include "mc/client/renderer/Tessellator.h"
@@ -116,6 +127,27 @@ void submitAnimatedBubbleOverlay(
     advanceAnimatedBubbleCache(state);
     if (state.animatedBubbleCells.empty()) return;
 
+    // The vanilla particle texture is resolved per render submission. Never
+    // cache a texture pointer across world/resource-pack reloads. When the
+    // actual particle atlas is unavailable, R11's proven procedural rings
+    // remain as an explicit nonvanilla fallback rather than hiding the effect.
+    std::optional<mce::TexturePtr> vanillaParticleAtlas;
+    if (state.client) {
+        if (auto* levelRenderer = state.client->getLevelRenderer()) {
+            auto const& textureGroup = levelRenderer->mTextureGroup.get();
+            if (textureGroup) {
+                auto particleTexture = textureGroup->getTexture(
+                    ResourceLocation{Core::PathView{"textures/particle/particles"}},
+                    false, std::nullopt, cg::TextureSetLayerType::Color
+                );
+                if (particleTexture.mClientTexture
+                    && particleTexture.mClientTexture->mIsMissingTexture
+                        != IsMissingTexture::Yes) {
+                    vanillaParticleAtlas.emplace(std::move(particleTexture));
+                }
+            }
+        }
+    }
     auto const bubbleWhite = Block::tryGetFromRegistry(
         HashedString("minecraft:white_concrete")
     );
@@ -197,21 +229,50 @@ void submitAnimatedBubbleOverlay(
     auto const alpha = std::clamp(structureOpacity,0.F,1.F);
     for (auto const& candidate : visible) {
         auto const& cell = *candidate.cell;
-        emitAnimatedBubbleCell(
-            {static_cast<float>(cell.local.x),
-             static_cast<float>(cell.local.y),
-             static_cast<float>(cell.local.z)},
-            localCamera,cell.dragDown,seconds,
-            static_cast<std::uint32_t>(cell.index),
-            [&](AnimatedBubbleBillboardQuad const& quad) {
-                t.color(.82F,.94F,1.F,quad.opacity*alpha);
-                for (auto const& point : quad.corners) {
-                    t.tex2({u,v});
-                    t.vertex(point.x,point.y,point.z);
+        if (vanillaParticleAtlas) {
+            emitVanillaBubbleSprites(
+                {static_cast<float>(cell.local.x),
+                 static_cast<float>(cell.local.y),
+                 static_cast<float>(cell.local.z)},
+                localCamera,cell.dragDown,seconds,
+                static_cast<std::uint32_t>(cell.index),
+                [&](VanillaBubbleSprite const& sprite) {
+                    // Vanilla Bedrock 1.26.51.01 particle atlas: 128x128.
+                    // Both bubble_column_up/down MCB definitions sample the
+                    // same 8x8 sprite with UV start=(0,16).
+                    constexpr std::array<glm::vec2,4> uv{{
+                        {VanillaBubbleU0,VanillaBubbleV0},
+                        {VanillaBubbleU1,VanillaBubbleV0},
+                        {VanillaBubbleU1,VanillaBubbleV1},
+                        {VanillaBubbleU0,VanillaBubbleV1}
+                    }};
+                    t.color(1.F,1.F,1.F,sprite.opacity*alpha);
+                    for (std::size_t i=0;i<4U;++i) {
+                        t.tex2({uv[i].x,uv[i].y});
+                        auto const& point=sprite.vertices[i];
+                        t.vertex(point.x,point.y,point.z);
+                    }
+                    ++submittedQuads;
                 }
-                ++submittedQuads;
-            }
-        );
+            );
+        } else {
+            // R11 accepted safe fallback for a missing/reloading atlas.
+            emitAnimatedBubbleCell(
+                {static_cast<float>(cell.local.x),
+                 static_cast<float>(cell.local.y),
+                 static_cast<float>(cell.local.z)},
+                localCamera,cell.dragDown,seconds,
+                static_cast<std::uint32_t>(cell.index),
+                [&](AnimatedBubbleBillboardQuad const& quad) {
+                    t.color(.82F,.94F,1.F,quad.opacity*alpha);
+                    for (auto const& point : quad.corners) {
+                        t.tex2({u,v});
+                        t.vertex(point.x,point.y,point.z);
+                    }
+                    ++submittedQuads;
+                }
+            );
+        }
     }
     if (!submittedQuads) {
         t.end(Tessellator::UploadMode::Never,
@@ -219,12 +280,30 @@ void submitAnimatedBubbleOverlay(
         return;
     }
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
-    MeshHelpers::renderMeshImmediately(
-        renderContext.mScreenContext,t,projectedBlendMaterial,
-        {std::cref(*state.terrainTexture)},emptyBubbleOffscreenCapture()
-    );
+    if (vanillaParticleAtlas) {
+        MeshHelpers::renderMeshImmediately(
+            renderContext.mScreenContext,t,projectedBlendMaterial,
+            {std::cref(*vanillaParticleAtlas)},emptyBubbleOffscreenCapture()
+        );
+    } else {
+        MeshHelpers::renderMeshImmediately(
+            renderContext.mScreenContext,t,projectedBlendMaterial,
+            {std::cref(*state.terrainTexture)},emptyBubbleOffscreenCapture()
+        );
+    }
 
     auto& logger=LHolo::getInstance().getSelf().getLogger();
+    static std::atomic_bool r12TextureLogged{};
+    if (!r12TextureLogged.exchange(true,std::memory_order_acq_rel)) {
+        logger.info(
+            "LHoloBubbleR12 nativeParticleAtlas={} mode={} "
+            "spriteUv=(0,16,8,8)/128 spritesPerCell={} "
+            "fullNativeEmitter=0 virtualWorldAirSafe=1",
+            vanillaParticleAtlas ? 1 : 0,
+            vanillaParticleAtlas ? "vanilla_bedrock_texture" : "R11_fallback",
+            AnimatedBubblePerCell
+        );
+    }
     if (!gAnimatedBubbleR11Logged.exchange(true,std::memory_order_acq_rel))
         logger.info(
             "LHoloBubbleR11 animatedBillboards=1 upDown=1 cameraFacing=1 "
