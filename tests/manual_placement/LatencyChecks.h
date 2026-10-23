@@ -83,6 +83,63 @@ inline void runLatencyChecks(Player& player) {
     check(planned==2,
         "R16 retry becomes eligible again after bounded 100ms");
 
+    // R17: connectivity flags on iron bars/panes/fences are environment-owned
+    // and can differ between an initial native prediction and the structure.
+    // Auto/Range used to reject this forever because the fallback was Manual-
+    // only. These use the actual placementPredictionMatches body, not a mock.
+    for(auto name:{"minecraft:iron_bars","minecraft:glass_pane",
+        "minecraft:red_stained_glass_pane","minecraft:oak_fence",
+        "minecraft:copper_bars","minecraft:stone_brick_wall"}) {
+        reset(player);state.setEnabled(true);
+        Block ghost{.name=name,
+            .states={{"minecraft:connection_north","1"},
+                     {"minecraft:connection_east","0"}},
+            .mNetworkId=700,.material=7};
+        Block predicted=ghost;
+        predicted.mNetworkId=701;
+        predicted.states["minecraft:connection_north"]="0";
+        predicted.states["minecraft:connection_east"]="1";
+        check(placementPredictionMatches(predicted,ghost),
+            "R17 native predicted connection permutations accepted in Auto");
+        predicted.states["unexpected_state"]="1";
+        check(!placementPredictionMatches(predicted,ghost),
+            "R17 unknown serialized state remains strict");
+        predicted.states.erase("unexpected_state");
+        player.inventory.items[0]={7,0,64};
+        useActualPlanner=true;
+        suppliedPrediction=&predicted;
+        player.region.cells[{0,-1,0}] = Block{};
+        ProjectionTarget output;
+        PlacementContext ctx{{0.5f,0.5f,0.5f},64.0f};
+        check(resolveOrientedPlacementActual(
+            player,player.region,ctx,{0,0,0},ghost,0,output),
+            "R17 native extractor planner accepts safe connectivity state");
+        check(output.block==&ghost,
+            "R17 native predictor keeps correct ghost block identity");
+    }
+    reset(player);state.setEnabled(true);
+    Block differentColor{.name="minecraft:red_stained_glass_pane",
+        .states={{"minecraft:connection_east","1"}},.mNetworkId=800};
+    Block otherColor=differentColor;
+    otherColor.name="minecraft:blue_stained_glass_pane";
+    otherColor.mNetworkId=801;
+    check(!placementPredictionMatches(otherColor,differentColor),
+        "R17 stained pane color identity remains strict");
+    Block customBar{.name="addon:iron_bars",
+        .states={{"minecraft:connection_north","1"}},.mNetworkId=802};
+    Block customBarPred=customBar;
+    customBarPred.states["minecraft:connection_north"]="0";
+    customBarPred.mNetworkId=803;
+    check(!placementPredictionMatches(customBarPred,customBar),
+        "R17 arbitrary addon blocks cannot bypass strict permutations");
+    Block pistonDirection{.name="minecraft:piston",
+        .states={{"facing_direction","3"}},.mNetworkId=804};
+    Block wrongPiston=pistonDirection;
+    wrongPiston.states["facing_direction"]="2";
+    wrongPiston.mNetworkId=805;
+    check(!placementPredictionMatches(wrongPiston,pistonDirection),
+        "R17 piston facing remains strictly validated");
+
     // A queued native rotation is NOT a failed plan and must stop this
     // tick. Otherwise a later legacy placement changes the held slot
     // and the queued AuthInput fails its strict stack/net-id validation.

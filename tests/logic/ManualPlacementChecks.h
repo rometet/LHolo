@@ -233,6 +233,44 @@ void runManualPlacementChecks(Check check) {
         check(!manualPlacementStateMapsMatch(name, same, wrong));
         check(!manualPlacementStateMapsMatch(name, wrong, same));
     }
+    // R17: only known vanilla connectivity families are allowed to ignore
+    // neighbor-derived flags; future unrelated block states remain strict.
+    for (auto name : {"minecraft:iron_bars", "minecraft:glass_pane",
+        "minecraft:blue_stained_glass_pane", "minecraft:oak_fence",
+        "minecraft:nether_brick_fence", "minecraft:stone_brick_wall",
+        "minecraft:copper_bars", "minecraft:exposed_copper_bars", "minecraft:waxed_copper_bars"}) {
+        check(isVanillaConnectivityPlacementBlock(name));
+        for (auto key : {"minecraft:connection_north", "minecraft:connection_east",
+            "minecraft:connection_south", "minecraft:connection_west",
+            "connection_north", "connection_east", "connection_south",
+            "connection_west"}) {
+            check(isManualPlacementDerivedState(name,key));
+        }
+        check(!isManualPlacementDerivedState(name,"facing_direction"));
+        check(!isManualPlacementDerivedState(name,"unknown_state"));
+        check(!isManualPlacementDerivedState(name,"minecraft:connection_up"));
+    }
+    for(auto name:{"addon:iron_bars","minecraft:oak_fence_gate",
+        "minecraft:chest","minecraft:piston","minecraft:barrel"}) {
+        check(!isVanillaConnectivityPlacementBlock(name));
+        check(!isManualPlacementDerivedState(name,"minecraft:connection_north"));
+    }
+    {
+        States const expected{{"minecraft:connection_north",0},
+            {"minecraft:connection_east",1},{"minecraft:connection_south",0},
+            {"minecraft:connection_west",1}};
+        auto connected=expected;
+        connected["minecraft:connection_east"]=0;
+        connected["minecraft:connection_north"]=1;
+        for(auto name:{"minecraft:iron_bars","minecraft:glass_pane",
+            "minecraft:blue_stained_glass_pane","minecraft:oak_fence"}) {
+            check(manualPlacementStateMapsMatch(name,expected,connected));
+            connected["unexpected"]=42;
+            check(!manualPlacementStateMapsMatch(name,expected,connected));
+            connected.erase("unexpected");
+        }
+        check(!manualPlacementStateMapsMatch("addon:iron_bars",expected,connected));
+    }
     std::vector<std::pair<std::string, std::string>> const derived{
         {"minecraft:cobblestone_wall", "wall_post_bit"},
         {"minecraft:stone_brick_wall", "wall_connection_type_north"},

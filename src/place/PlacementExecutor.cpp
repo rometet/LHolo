@@ -811,10 +811,15 @@ bool placementPredictionMatches(
     // API instead of maintaining block-name suffix lists.
     if (ghost.getBlockType().allowStateMismatchOnPlacement(predicted, ghost)) return true;
     if (predicted == ghost) return true;
-    // The official mismatch hook is not sufficient for every flattened or
-    // neighbor-driven permutation. Manual placement compares serialized
-    // identity, ignoring only explicitly known environment-driven states.
-    // No world mutation/connectionUpdate, correction-policy change, or new ABI.
+    // Official mismatch tolerance in 26.51 may return false for thin panes,
+    // iron/copper bars, fences and walls whose neighbors establish connection
+    // flags only after native placement. Auto and Range must get the same narrow
+    // connectivity exception that Manual mode already has: require an exact
+    // vanilla base name and equality of every NON-connection serialized state.
+    // Do not relax unknown/custom families, orientation, dye identity or the
+    // completion verifier. A real server still validates the transaction.
+    if (detail::isVanillaConnectivityPlacementBlock(name)
+        && manualSerializedPlacementMatches(predicted, ghost)) return true;
     return placementState().manualMode() && manualSerializedPlacementMatches(predicted, ghost);
 }
 
@@ -1368,8 +1373,12 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
                 failedKey, now, now + kAimedOrientedFailureCacheMs);
         }
         telemetry::count(telemetry::Event::PlanRejected);
+        if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
+            telemetry::count(telemetry::Event::ConnectivityRejected);
         return;
     }
+    if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
+        telemetry::count(telemetry::Event::ConnectivityAccepted);
 
     if (found.slot >= kHotbarSlots) {
         // Back off a rejected swap so it never retries more often than

@@ -14,6 +14,7 @@ enum class Event : std::size_t {
     Tick, Auto, Range, Manual, NoTarget, NoMaterial, PlanRejected,
     FailedPlanCached, RecentCellLock, GlobalInterval, ManualRepeatGate,
     SwapRequested, PacketSent, NativeQueued, DispatchRejected, Suppressed,
+    ConnectivityAccepted, ConnectivityRejected,
     Count
 };
 

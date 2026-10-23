@@ -117,7 +117,7 @@ LL_TYPE_INSTANCE_HOOK(
             using S=telemetry::Stage;
             logger().info(
                 "EASYPLACE_R16_PERF ticks={} auto={} manual={} range={} noTarget={} "
-                "noMaterial={} invalidPlan={} cachedPlan={} cellLock={} throttle={} "
+                "noMaterial={} invalidPlan={} cachedPlan={} connectOK={} connectFail={} cellLock={} throttle={} "
                 "manualGate={} swaps={} sent={} queued={} rejected={} suppressed={} "
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
                 "over4ms[tick,ray,plan]={}/{}/{}",
@@ -125,6 +125,7 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::Manual),stats->count(E::Range),
                 stats->count(E::NoTarget),stats->count(E::NoMaterial),
                 stats->count(E::PlanRejected),stats->count(E::FailedPlanCached),
+                stats->count(E::ConnectivityAccepted),stats->count(E::ConnectivityRejected),
                 stats->count(E::RecentCellLock),stats->count(E::GlobalInterval),
                 stats->count(E::ManualRepeatGate),stats->count(E::SwapRequested),
                 stats->count(E::PacketSent),stats->count(E::NativeQueued),

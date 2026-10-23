@@ -63,12 +63,43 @@ inline std::optional<std::vector<std::string>> normalizeManualPlacementAllowedIt
     return normalized;
 }
 
+// Known vanilla blocks which compute their connections from their neighbors.
+// Glass panes use separate block names for colors, so this never discards dye
+// identity. Directional fence gates and user-controlled orientations are not
+// included. Only this small allow-list may use the relaxed Auto/Range matcher.
+inline constexpr bool isVanillaConnectivityPlacementBlock(std::string_view name) {
+    if (!name.starts_with("minecraft:")) return false;
+    name.remove_prefix(10);
+    return name == "iron_bars" || name == "copper_bars"
+        || name.ends_with("_copper_bars")
+        || name == "glass_pane" || name.ends_with("_stained_glass_pane")
+        || name == "fence" || name.ends_with("_fence")
+        || name == "wall" || name.ends_with("_wall");
+}
+
+// The 1.26 Bedrock pane/bar connection flags are derived by the native engine
+// after placement. Older structure conversions sometimes serialize the
+// unnamespaced aliases; support only these exact cardinal names, not a broad
+// 'connection_*' wildcard that might hide a custom/player-controlled state.
+inline constexpr bool isConnectivityDerivedStateKey(std::string_view state) {
+    return state == "minecraft:connection_north"
+        || state == "minecraft:connection_south"
+        || state == "minecraft:connection_east"
+        || state == "minecraft:connection_west"
+        || state == "connection_north"
+        || state == "connection_south"
+        || state == "connection_east"
+        || state == "connection_west";
+}
+
 // Only known vanilla, environment-driven states are ignored. Never ignore a
 // direction/axis, slab half, material variant, unknown state or custom block's
-// state. This policy is for predicting MANUAL placement, not for declaring a
-// finished build correct. The correction renderer retains its stricter rules.
+// state. Used by MANUAL placement and by the narrow vanilla connection-family
+// Auto/Range fallback. The correction renderer stays strict.
 inline bool isManualPlacementDerivedState(std::string_view name, std::string_view state) {
     if (!name.starts_with("minecraft:")) return false;
+    if (isVanillaConnectivityPlacementBlock(name) &&
+        isConnectivityDerivedStateKey(state)) return true;
     name.remove_prefix(10);
     bool const wall = name.ends_with("_wall");
     if (wall && (state == "wall_post_bit" || state == "wall_connection_type_north"
