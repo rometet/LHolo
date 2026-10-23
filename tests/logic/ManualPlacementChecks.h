@@ -2,6 +2,7 @@
 #pragma once
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementDirectionRules.h"
+#include "place/PlacementRotationCandidates.h"
 #include "place/PlacementState.h"
 
 #include <map>
@@ -17,6 +18,55 @@ void runManualPlacementChecks(Check check) {
     using namespace place::detail;
 
     using Rule = PlacementDirectionRule;
+    using Search = PlacementRotationSearch;
+    check(placementRotationSearch("minecraft:observer") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:piston") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:sticky_piston") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:dispenser") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:dropper") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:barrel") == Search::FacingSixWay);
+    check(placementRotationSearch("minecraft:crafter") == Search::Crafter3D);
+    check(placementRotationSearch("minecraft:oak_stairs") == Search::Horizontal);
+    check(placementRotationSearch("minecraft:oak_trapdoor") == Search::Horizontal);
+    check(placementRotationSearch("minecraft:oak_door",true) == Search::Horizontal);
+    check(placementRotationSearch("minecraft:repeater") == Search::None);
+    check(placementRotationSearch("minecraft:powered_repeater") == Search::Horizontal);
+    check(placementRotationSearch("minecraft:hopper") == Search::None);
+    check(placementRotationSearch("minecraft:stone_button") == Search::None);
+    check(placementRotationSearch("minecraft:lightning_rod") == Search::None);
+    check(placementRotationSearch("minecraft:rail") == Search::None);
+    check(placementRotationSearch("minecraft:stone") == Search::None);
+    check(placementRotationSearch("custom:observer") == Search::None);
+    for (auto kind : {Search::Horizontal,Search::FacingSixWay,Search::Crafter3D}) {
+        for (float pitch : {-80.F,0.F,17.F,80.F}) {
+            for (float yaw : {-90.F,0.F,90.F,180.F,359.F}) {
+                auto const plan=makePlacementRotationProbes(kind,pitch,yaw);
+                check(plan.size <= MaxPlacementRotationProbes && plan.size>=2);
+                for (std::size_t i=0;i<plan.size;++i) {
+                    auto const a=plan.candidates[i];
+                    check(std::isfinite(a.pitch) && std::isfinite(a.yaw)
+                        && std::fabs(a.pitch)<=90.F);
+                    check(!(std::fabs(a.pitch-pitch)<.05F
+                        && std::fabs(std::remainder(a.yaw-yaw,360.F))<.05F));
+                    for(std::size_t j=i+1;j<plan.size;++j) {
+                        auto const b=plan.candidates[j];
+                        check(std::fabs(a.pitch-b.pitch)>=.05F
+                            || std::fabs(std::remainder(a.yaw-b.yaw,360.F))>=.05F);
+                    }
+                }
+            }
+        }
+    }
+    check(makePlacementRotationProbes(Search::None,0.F,0.F).size==0);
+    check(makePlacementRotationProbes(Search::FacingSixWay,
+        std::numeric_limits<float>::quiet_NaN(),0.F).size==0);
+    struct LogicRot {float x{},y{};};
+    LogicRot logicRotation{17.F,90.F};
+    {
+        ScopedPlacementRotation scoped(logicRotation,-80.F,180.F);
+        check(logicRotation.x==-80.F && logicRotation.y==180.F);
+    }
+    check(logicRotation.x==17.F && logicRotation.y==90.F);
     check(placementDirectionRule("minecraft:hopper") == Rule::Facing);
     check(placementDirectionRule("minecraft:observer") == Rule::Facing);
     check(placementDirectionRule("minecraft:dispenser") == Rule::Facing);

@@ -5,6 +5,7 @@
 #include "place/PlacementDirectionRules.h"
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementRotation.h"
+#include "place/PlacementRotationCandidates.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -103,6 +104,32 @@ Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,
         predicted.states["direction"]=std::to_string(direction);
         predicted.states["upside_down_bit"]=relative.y>=0.5f?"1":"0";
         predicted.states["open_bit"]="0";
+        return predicted;
+    }
+    if (orientationProbe && (name == "minecraft:observer"
+        || name == "minecraft:piston" || name == "minecraft:sticky_piston"
+        || name == "minecraft:dispenser" || name == "minecraft:dropper"
+        || name == "minecraft:barrel" || name == "minecraft:crafter")) {
+        // Synthetic version-independent FACE result. This fixture proves the
+        // actual planner consumes a supplied native result; it does NOT claim
+        // to reproduce Bedrock's exact orientation or multiplayer acceptance.
+        if (throwOnOverride && p.rotation.x <= -60.F)
+            throw std::runtime_error("supplied vertical predictor fault");
+        static Block predicted;
+        predicted = *this;
+        ++predicted.mNetworkId;
+        int const quadrant=static_cast<int>(std::floor(
+            std::fmod(p.rotation.y+360.F,360.F)/90.F));
+        int const facing=p.rotation.x<=-60.F ? 1
+            : p.rotation.x>=60.F ? 0
+            : std::array<int,4>{3,4,2,5}[quadrant];
+        if (name == "minecraft:crafter") {
+            auto const axis = p.rotation.x<=-60.F ? "up"
+                : p.rotation.x>=60.F ? "down" : "horizontal";
+            predicted.states["orientation"]=std::string(axis)+"_"+std::to_string(quadrant);
+        } else {
+            predicted.states["facing_direction"]=std::to_string(facing);
+        }
         return predicted;
     }
     return suppliedPrediction?*suppliedPrediction:*this;
@@ -229,10 +256,10 @@ std::vector<i18n::TextKey> hints;
 void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
-int rotatedQueueCalls{};float rotatedQueueYaw{};
+int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};
 void queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
-    ItemStack const&,float yaw,std::unique_ptr<ComplexInventoryTransaction>) {
-    ++rotatedQueueCalls;rotatedQueueYaw=yaw;
+    ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>) {
+    ++rotatedQueueCalls;rotatedQueuePitch=pitch;rotatedQueueYaw=yaw;
 }
 enum class ManualTargetStatus { None,Ready,MissingMaterial };
 ManualTargetStatus fixtureTargetStatus=ManualTargetStatus::None;
@@ -242,7 +269,7 @@ namespace {
 using detail::FailedPlanKey;using detail::FailedPlanKeyHash;using detail::PlacementContext;
 auto& placementState() { return detail::PlacementState::getInstance(); }
 #include "ConstantsBody.inc"
-struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<float> interactionYaw{}; };
+struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<detail::PlacementInteractionAngles> interactionRotation{}; };
 std::optional<ProjectionTarget> aimed;
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
@@ -332,7 +359,7 @@ void reset(Player& p) {
     sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();aimed.reset();
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;
-    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;
+    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;detail::rotatedQueueYaw=0;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
 #include "DeliveryChecks.h"
@@ -390,6 +417,23 @@ int main() {
     std::printf("range impossible-prefix highest planned=%d, send calls=%zu, plans=%d, last tick=%llu\n",highest,sent.size(),planned,static_cast<unsigned long long>(fixtureTime));
     check(sent.size()==1,"range eventually reaches valid tail beyond failed-plan cache cycle");
 
+    // R13: costly direction+pitch probing must not starve ordinary blocks.
+    reset(player);placementState().setRangeEnabled(true);
+    player.inventory.items[0]={1,0,64};
+    for(int i=0;i<40;++i) projection::candidates.push_back({i,0,0,&oriented});
+    for(int i=40;i<46;++i) projection::candidates.push_back({i,0,0,&stone});
+    planOutcomes[43]=true;
+    tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
+    auto directionPlans=std::count_if(plannedCells.begin(),plannedCells.end(),
+        [](int x) {return x<40;});
+    auto cheapPlans=std::count_if(plannedCells.begin(),plannedCells.end(),
+        [](int x) {return x>=40;});
+    check(directionPlans<=4,
+        "R13 limits high-cost rotation candidates to four per range tick");
+    check(cheapPlans>=4 && sent.size()==1,
+        "R13 ordinary full blocks continue despite impossible oriented prefix");
+    check(sent.empty() || sent[0].pos.x==43,
+        "R13 fast path reaches the requested full-block target");
     // A separate fast budget must not drag the complex resume point backwards.
     reset(player);player.inventory.items[0]={1,0,64};
     for(int i=0;i<100;++i) projection::candidates.push_back({i,0,0,&oriented});

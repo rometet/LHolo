@@ -20,6 +20,7 @@
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementDirectionRules.h"
 #include "place/PlacementRotation.h"
+#include "place/PlacementRotationCandidates.h"
 #include "place/PlacementRotationDelivery.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
@@ -107,6 +108,10 @@ constexpr std::uint64_t kSwapRetryMs = 200;
 // cheap budget so a cluster of impossible oriented blocks cannot starve them.
 constexpr int           kRangePlanBudgetPerTick     = 16;
 constexpr int           kRangeFastPlanBudgetPerTick = 64;
+// R13: one oriented cell may ask native prediction for up to 12 candidate
+// rotations. Keep a separate cap so impossible directional cells cannot
+// stall other work in the same range-placement tick.
+constexpr int           kRangeRotationPlanBudgetPerTick = 4;
 constexpr std::uint64_t kFailedPlanCacheMs          = 250;
 // Manual-mode typematic repeat: after the first block on press, holding pauses
 // for kManualInitialDelayMs and then auto-repeats every kManualRepeatIntervalMs
@@ -348,7 +353,7 @@ struct ProjectionTarget {
     uchar        face;
     Block const* block;
     Vec3         clickPos{};  // Exact click point; chosen to reproduce the ghost.
-    std::optional<float> interactionYaw{};
+    std::optional<detail::PlacementInteractionAngles> interactionRotation{};
 };
 
 // Which face of a cell points most along the given (unit) direction.
@@ -514,11 +519,13 @@ bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, I
     // packet before the transaction is ever validated.
     transaction.mItem.get().mIncludeNetIds = true;
 
-    if (target.interactionYaw) {
+    if (target.interactionRotation) {
+        auto const& angles=*target.interactionRotation;
         detail::queueRotationPlacement(player,target.cell,packBlockPos(target.cell),
-            target.block->mNetworkId,slot,item,*target.interactionYaw,std::move(transactionBase));
-        // A fresh native AuthInput must carry both the use and interaction yaw.
-        // Queue admission does not consume a Manual tap or start the cell lock.
+            target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
+            std::move(transactionBase));
+        // A fresh native AuthInput must carry both the use and verified
+        // interaction pitch/yaw. Queue admission is not a server acknowledgement.
         return false;
     }
 
@@ -942,20 +949,37 @@ bool resolveOrientedPlacement(
     };
 
     if (searchCurrentRotation(out)) return true;
-    // Keep the verified current-rotation path for every other family. Search
-    // native trapdoor permutations with scoped logic yaw, not a guessed mapping
-    // between serialized direction and yaw. Wrong half/direction still rejects.
-    auto const name=ghost.getTypeName();
-    if (!name.starts_with("minecraft:")) return false;
-    if (name!="minecraft:trapdoor" && !name.ends_with("_trapdoor")) return false;
+    // R13: search only a bounded, proven native interaction rotation matrix.
+    // Never map a serialized state to angles by guesswork: every candidate
+    // must be accepted by Block::getPlacementBlock and the existing exact
+    // direction/half matching rules before it can reach a network packet.
+    auto const kind = detail::placementRotationSearch(
+        ghost.getTypeName(), isDoor
+    );
+    if (kind == detail::PlacementRotationSearch::None) return false;
     auto& logicRotation=const_cast<Vec2&>(player.getRotation());
-    for (float yaw : {0.0f,90.0f,180.0f,-90.0f}) {
-        detail::ScopedPlacementYaw rotation(logicRotation,yaw);
+    auto const candidates=detail::makePlacementRotationProbes(
+        kind,logicRotation.x,logicRotation.y
+    );
+    for (std::size_t i=0;i<candidates.size;++i) {
+        auto const& candidate=candidates.candidates[i];
+        detail::ScopedPlacementRotation rotation(
+            logicRotation,candidate.pitch,candidate.yaw
+        );
         bool matched=false;
-        auto const ok=app::invokeNativeCallback([&] { matched=searchCurrentRotation(out); },
-            [](char const* reason) noexcept { app::reportNativeCallbackFailure("trapdoor rotation prediction",reason); });
+        auto const ok=app::invokeNativeCallback(
+            [&] { matched=searchCurrentRotation(out); },
+            [](char const* reason) noexcept {
+                app::reportNativeCallbackFailure(
+                    "Easy Place orientation prediction",reason
+                );
+            }
+        );
         if (!ok) return false;
-        if (matched) { out.interactionYaw=yaw;return true; }
+        if (matched) {
+            out.interactionRotation=candidate;
+            return true;
+        }
     }
     return false;
 }
@@ -973,6 +997,7 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     auto const inventorySnapshot = snapshotInventory(player);
     int complexPlannedCandidates = 0;
     int fastPlannedCandidates = 0;
+    int rotationPlannedCandidates = 0;
     bool resumeFixed = false;
     for (std::size_t offset = 0; offset < candidates.size(); ++offset) {
         auto const candidateIndex = (start + offset) % candidates.size();
@@ -998,6 +1023,9 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         if (found.slot < 0) continue;
 
         bool const fastPlan = isFastOpaquePlacementCandidate(*cand.block);
+        bool const rotationPlan = detail::placementRotationSearch(
+            cand.block->getTypeName(),isTwoBlockDoor(*cand.block)
+        ) != detail::PlacementRotationSearch::None;
         FailedPlanKey const failedKey = makeFailedPlanKey(
             placementContext,
             cell,
@@ -1013,7 +1041,11 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             // Do not return when the complex budget is exhausted: later cheap
             // full-block candidates can still be filled this tick.
             if (complexPlannedCandidates >= kRangePlanBudgetPerTick) continue;
+            if (rotationPlan
+                && rotationPlannedCandidates >= kRangeRotationPlanBudgetPerTick)
+                continue;
             ++complexPlannedCandidates;
+            if (rotationPlan) ++rotationPlannedCandidates;
         }
 
         // Restart after the last admitted plan, not at the sorted prefix on
@@ -1024,7 +1056,8 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         if (!resumeFixed) {
             placementState().setRangePlanCursor((candidateIndex + 1) % candidates.size());
             resumeFixed = complexPlannedCandidates >= kRangePlanBudgetPerTick
-                || fastPlannedCandidates >= kRangeFastPlanBudgetPerTick;
+                || fastPlannedCandidates >= kRangeFastPlanBudgetPerTick
+                || rotationPlannedCandidates >= kRangeRotationPlanBudgetPerTick;
         }
 
         // Use the actual inventory stack's aux value for the same prediction
