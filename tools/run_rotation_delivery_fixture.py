@@ -5,9 +5,9 @@ root=Path(__file__).resolve().parents[1];out=a.out.resolve();out.mkdir(parents=T
 source=(root/'src/place/PlacementRotationDelivery.cpp').read_text(encoding='utf-8')
 decls=source[source.index('struct PendingRotation'):source.index('LL_TYPE_INSTANCE_HOOK')]
 start=source.index(',Packet& packet) {')+len(',Packet& packet) {')
-end=source.index('\n}\n}\n\nvoid queueRotationPlacement',start)
+end=source.index('\n}\n}\n\nbool queueRotationPlacement',start)
 hook=source[start:end]
-queue=source[source.index('void queueRotationPlacement'):source.rindex('\n}')]
+queue=source[source.index('bool queueRotationPlacement'):source.rindex('\n}')]
 for name,text in [('Decls',decls),('Hook',hook),('Queue',queue)]: (out/('RotationDelivery'+name+'.inc')).write_text(text,encoding='utf-8')
 cl=Path(r'E:/rufu client/.tools/llvm-22.1.8/bin/clang-cl.exe');vc=Path(r'C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207');sdk=Path(r'C:/Program Files (x86)/Windows Kits/10');v='10.0.26100.0'
 env=dict(os.environ);env['INCLUDE']=';'.join(map(str,[vc/'include']+[sdk/'Include'/v/n for n in ['ucrt','shared','um','winrt']]))

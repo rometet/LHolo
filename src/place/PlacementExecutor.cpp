@@ -22,6 +22,7 @@
 #include "place/PlacementRotation.h"
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementRotationDelivery.h"
+#include "place/PlacementDispatchResult.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
 #include "place/PlacementQuantization.h"
@@ -112,13 +113,13 @@ constexpr int           kRangeFastPlanBudgetPerTick = 64;
 // rotations. Keep a separate cap so impossible directional cells cannot
 // stall other work in the same range-placement tick.
 constexpr int           kRangeRotationPlanBudgetPerTick = 4;
-constexpr std::uint64_t kFailedPlanCacheMs          = 250;
+constexpr std::uint64_t kFailedPlanCacheMs          = 150;
 // Manual-mode typematic repeat: after the first block on press, holding pauses
 // for kManualInitialDelayMs and then auto-repeats every kManualRepeatIntervalMs
 // (like keyboard key-repeat), so a tap places one and a hold streams at a steady
 // rate.
-constexpr std::uint64_t kManualInitialDelayMs   = 150;
-constexpr std::uint64_t kManualRepeatIntervalMs = 120;
+constexpr std::uint64_t kManualInitialDelayMs   = 100;
+constexpr std::uint64_t kManualRepeatIntervalMs = 50;
 // A pending first-block request expires if it cannot be fulfilled this long
 // after the press, so a stale click never places a block later.
 constexpr std::uint64_t kManualRequestTimeoutMs = 400;
@@ -172,6 +173,15 @@ struct ItemFind {
     ItemStack const* item;
 };
 
+// Reuse a material already held in the active hotbar before searching other
+// stacks. Both item and aux must match the existing official conversion;
+// orientation state is still verified separately by getPlacementBlock.
+bool matchesPlacementItem(ItemStack const& held,
+    ItemStack const& exactWant, ItemStack const& neutralWant) {
+    return !held.isNull() &&
+        ((!exactWant.isNull() && held.getIdAux() == exactWant.getIdAux()) ||
+         (!neutralWant.isNull() && held.getIdAux() == neutralWant.getIdAux()));
+}
 constexpr uchar kInvalidFace = std::numeric_limits<uchar>::max();
 
 bool validFace(uchar face) {
@@ -241,6 +251,12 @@ ItemFind findItemSlot(Player& player, Block const& block) {
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
     ItemStack const neutralWant = block::makePlacementItem(block);
     auto& inventory = player.getInventory();
+    auto const selected = player.getSelectedItemSlot();
+    if (selected >= 0 && selected < kHotbarSlots) {
+        auto const& held = inventory.getItem(selected);
+        if (matchesPlacementItem(held, exactWant, neutralWant))
+            return {selected, &held};
+    }
 
     // First preserve the exact native Block -> Item conversion used by manual
     // placement, including any true material aux value.
@@ -281,10 +297,16 @@ InventorySnapshot snapshotInventory(Player& player) {
     return snapshot;
 }
 
-ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block) {
+ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block,
+                      ItemFind selectedItem = {-1, nullptr}) {
     ItemStack const exactWant = placementState().manualMode()
         ? block::makeManualPlacementItem(block) : block::makePlacementItem(block);
     ItemStack const neutralWant = block::makePlacementItem(block);
+    if (selectedItem.slot >= 0 && selectedItem.slot < kHotbarSlots
+        && selectedItem.item
+        && matchesPlacementItem(*selectedItem.item, exactWant, neutralWant)) {
+        return selectedItem;
+    }
 
     auto findByIdAux = [&](ItemStack const& want) -> ItemFind {
         if (want.isNull()) return {-1, nullptr};
@@ -469,13 +491,13 @@ std::optional<ProjectionTarget> findProjectionTarget(
     return std::nullopt;
 }
 
-bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, ItemStack const& item) {
+detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, ItemStack const& item) {
     // Never serialize an out-of-range face. Facing's lookup tables are fixed
     // six-entry arrays and an invalid face would be both an OOB read locally
     // and malformed placement data on the wire.
-    if (!validFace(target.face)) return false;
+    if (!validFace(target.face)) return detail::PlacementDispatchResult::Rejected;
     auto& region = player.getDimensionBlockSource();
-    if (!region.getBlock(target.cell).isAir()) return false;
+    if (!region.getBlock(target.cell).isAir()) return detail::PlacementDispatchResult::Rejected;
 
     // Server-authoritative placement: build an ItemUseInventoryTransaction and
     // deliver it through the client's packet sender (LoopbackPacketSender in
@@ -485,7 +507,7 @@ bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, I
     auto transactionBase = ComplexInventoryTransaction::fromType(
         ComplexInventoryTransaction::Type::ItemUseTransaction, InventoryTransaction{}
     );
-    if (!transactionBase) return false;
+    if (!transactionBase) return detail::PlacementDispatchResult::Rejected;
     auto& transaction = static_cast<ItemUseInventoryTransaction&>(*transactionBase);
     transaction.mType = ComplexInventoryTransaction::Type::ItemUseTransaction;
     transaction.mActionType = ItemUseInventoryTransaction::ActionType::Place;
@@ -521,22 +543,26 @@ bool placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, I
 
     if (target.interactionRotation) {
         auto const& angles=*target.interactionRotation;
-        detail::queueRotationPlacement(player,target.cell,packBlockPos(target.cell),
-            target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
-            std::move(transactionBase));
-        // A fresh native AuthInput must carry both the use and verified
-        // interaction pitch/yaw. Queue admission is not a server acknowledgement.
-        return false;
+        // Queue admission is NOT a server acknowledgement. Preserve that
+        // distinction so range mode cannot send a different legacy item
+        // transaction and invalidate the pending native AuthInput.
+        if (detail::queueRotationPlacement(
+                player,target.cell,packBlockPos(target.cell),
+                target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
+                std::move(transactionBase))) {
+            return detail::PlacementDispatchResult::Queued;
+        }
+        return detail::PlacementDispatchResult::Rejected;
     }
 
     InventoryTransactionPacket packet(
         InventoryTransactionPacketPayload(std::move(transactionBase), true)
     );
     auto client = ll::service::getClientInstance();
-    if (!client) return false;
+    if (!client) return detail::PlacementDispatchResult::Rejected;
     client->getPacketSender().sendToServer(packet);
     placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
-    return true;
+    return detail::PlacementDispatchResult::Sent;
 }
 
 // Candidate click points on the face of `cell` shared with the support in
@@ -984,7 +1010,8 @@ bool resolveOrientedPlacement(
     return false;
 }
 
-void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementContext) {
+void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementContext,
+                        ProjectionTarget const* crosshairTarget = nullptr) {
     auto const now = GetTickCount64();
     Vec3 const center = player.getPosition();
     float const radius = static_cast<float>(placementState().radius());
@@ -995,6 +1022,59 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
     auto const start = placementState().rangePlanCursor() % candidates.size();
     bool const suppressionsActive = placementState().autoPlacementSuppressionsActive(now);
     auto const inventorySnapshot = snapshotInventory(player);
+    auto const selectedSlot = player.getSelectedItemSlot();
+    ItemFind selectedItem{-1, nullptr};
+    if (selectedSlot >= 0 && selectedSlot < kHotbarSlots) {
+        auto const& item = player.getInventory().getItem(selectedSlot);
+        if (!item.isNull()) selectedItem = {selectedSlot, &item};
+    }
+
+    // Crosshair-first when the player is ALREADY holding the right item.
+    // Range mode used to ignore the current ray and scan its distance-ordered
+    // candidate list, which can spend multiple ticks on impossible oriented
+    // plans before it considers the block the player actually wants.
+    // The native predictor, reach, suppression and cell-lock gates are the
+    // same as the ordinary range loop; this is a scheduling priority only.
+    if (crosshairTarget && crosshairTarget->block && selectedItem.item) {
+        auto const& focused = *crosshairTarget;
+        auto const dx = static_cast<double>(focused.cell.x) + .5
+            - static_cast<double>(center.x);
+        auto const dy = static_cast<double>(focused.cell.y) + .5
+            - static_cast<double>(center.y);
+        auto const dz = static_cast<double>(focused.cell.z) + .5
+            - static_cast<double>(center.z);
+        if (dx*dx + dy*dy + dz*dz
+                <= static_cast<double>(radius)*static_cast<double>(radius)
+            && region.getBlock(focused.cell).isAir()
+            && !recentlyPlaced(focused.cell,now)
+            && (!suppressionsActive ||
+                !placementState().autoPlacementSuppressed(packBlockPos(focused.cell),now))) {
+            auto const found = findItemSlot(
+                inventorySnapshot,*focused.block,selectedItem
+            );
+            if (found.slot == selectedSlot) {
+                auto const key = makeFailedPlanKey(
+                    placementContext,focused.cell,*focused.block,
+                    found.item->getAuxValue(),isViewSensitivePlan(*focused.block)
+                );
+                if (!isFailedPlanCached(key,now)) {
+                    ProjectionTarget target;
+                    if (resolveOrientedPlacement(player,region,placementContext,
+                        focused.cell,*focused.block,found.item->getAuxValue(),target)) {
+                        auto const dispatched = placeBlock(
+                            player,target,found.slot,*found.item
+                        );
+                        if (detail::isPlacementSent(dispatched)) {
+                            markPlaced(focused.cell,now);
+                            return;
+                        }
+                        if (detail::consumesPlacementTick(dispatched)) return;
+                    }
+                    cacheFailedPlan(key,now);
+                }
+            }
+        }
+    }
     int complexPlannedCandidates = 0;
     int fastPlannedCandidates = 0;
     int rotationPlannedCandidates = 0;
@@ -1019,7 +1099,7 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         // cell is never placed twice mid-round-trip (the slab double-place).
         if (recentlyPlaced(cell, now)) continue;
 
-        auto const found = findItemSlot(inventorySnapshot, *cand.block);
+        auto const found = findItemSlot(inventorySnapshot, *cand.block, selectedItem);
         if (found.slot < 0) continue;
 
         bool const fastPlan = isFastOpaquePlacementCandidate(*cand.block);
@@ -1092,11 +1172,16 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             placementState().setNextSwapAt(now + kSwapRetryMs);
             return;
         }
-        player.setSelectedSlot(found.slot);
-        if (placeBlock(player, target, found.slot, *found.item)) {
+        if (player.getSelectedItemSlot() != found.slot)
+            player.setSelectedSlot(found.slot);
+        auto const result = placeBlock(player, target, found.slot, *found.item);
+        if (detail::isPlacementSent(result)) {
             markPlaced(cell, now);
             return;
         }
+        // A queued rotation owns the next AuthInput. It is not a failure:
+        // do not plan another cell or change slots before native delivery.
+        if (detail::consumesPlacementTick(result)) return;
         // One stale/invalid cell must not consume the whole range-placement tick.
         cacheFailedPlan(failedKey, now);
     }
@@ -1166,7 +1251,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
 
     // Range placement scans everything within the configured radius.
     if (placementState().rangeEnabled()) {
-        tickRangePlaceImpl(*player, placementContext);
+        tickRangePlaceImpl(*player, placementContext, target ? &*target : nullptr);
         return;
     }
 
@@ -1246,8 +1331,12 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         placementState().setNextSwapAt(now + kSwapRetryMs);
         return;
     }
-    player->setSelectedSlot(found.slot);
-    if (!placeBlock(*player, placement, found.slot, *found.item)) return;
+    if (player->getSelectedItemSlot() != found.slot)
+        player->setSelectedSlot(found.slot);
+    auto const submit = placeBlock(*player, placement, found.slot, *found.item);
+    // Queued rotations will mark the cell only in the actual native
+    // forwarding hook; the pending manual press remains open meanwhile.
+    if (!detail::isPlacementSent(submit)) return;
     markPlaced(placement.cell, now);
     // Manual repeat bookkeeping: record this placement and mark the current
     // press as having placed its first block (so holding then auto-repeats).

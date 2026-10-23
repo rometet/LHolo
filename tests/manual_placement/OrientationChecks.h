@@ -15,9 +15,9 @@ inline void runOrientationChecks(Player& player) {
         check(!plannedOk || target.at==BlockPos{-1,0,0},"trapdoor chooses real support for native click");
         check(!plannedOk || (target.clickPos.y>=0.5f)==(half==1),"trapdoor hit half agrees with supplied native prediction");
         if(plannedOk) {
-            bool const sentOk=placeBlock(player,target,0,{1,0,64,101});
-            if(playerDirection==ghostDirection) check(sentOk&&sent.size()==1,"aligned trapdoor retains existing sender path");
-            else check(!sentOk&&sent.empty()&&detail::rotatedQueueCalls==1&&detail::rotatedQueueYaw==(ghostDirection==3?-90.0f:ghostDirection*90.0f),
+            auto const sentOk=placeBlock(player,target,0,{1,0,64,101});
+            if(playerDirection==ghostDirection) check(detail::isPlacementSent(sentOk)&&sent.size()==1,"aligned trapdoor retains existing sender path");
+            else check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1&&detail::rotatedQueueYaw==(ghostDirection==3?-90.0f:ghostDirection*90.0f),
                 "off-axis trapdoor queues interaction yaw without declaring sender/ack success");
         }
     }
@@ -55,10 +55,10 @@ inline void runOrientationChecks(Player& player) {
             auto const queuedBefore=detail::rotatedQueueCalls;
             auto const wasSent=placeBlock(player,proposed,0,{1,0,64,101});
             if(direction==4) {
-                check(wasSent&&sent.size()==1&&queuedBefore==detail::rotatedQueueCalls,
+                check(detail::isPlacementSent(wasSent)&&sent.size()==1&&queuedBefore==detail::rotatedQueueCalls,
                     "already-aligned six-way placement retains unchanged native sender path");
             } else {
-                check(!wasSent&&sent.empty()&&detail::rotatedQueueCalls==1,
+                check(wasSent==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1,
                     "off-axis six-way placement queues one native interaction, no fake ack");
                 float const expectedPitch=direction==1?-80.F:direction==0?80.F:0.F;
                 check(detail::rotatedQueuePitch==expectedPitch,
@@ -87,11 +87,11 @@ inline void runOrientationChecks(Player& player) {
         check(player.rotation==saved,"crafter restores native actor mRot even after pitch/yaw probing");
         if(!ok)continue;
         ++crafterAdmitted;
-        bool const sentOk=placeBlock(player,target,0,{1,0,64,101});
+        auto const sentOk=placeBlock(player,target,0,{1,0,64,101});
         if(std::string_view(axis)=="horizontal"&&heading==1) {
-            check(sentOk&&sent.size()==1,"aligned crafter uses original sender");
+            check(detail::isPlacementSent(sentOk)&&sent.size()==1,"aligned crafter uses original sender");
         } else {
-            check(!sentOk&&sent.empty()&&detail::rotatedQueueCalls==1,
+            check(sentOk==detail::PlacementDispatchResult::Queued&&sent.empty()&&detail::rotatedQueueCalls==1,
                 "3D crafter queues matched pitch/yaw only");
             float const pitch=std::string_view(axis)=="up"?-80.F:
                 std::string_view(axis)=="down"?80.F:0.F;

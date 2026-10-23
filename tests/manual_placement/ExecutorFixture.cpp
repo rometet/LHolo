@@ -6,6 +6,7 @@
 #include "place/ManualPlacementRules.h"
 #include "place/PlacementRotation.h"
 #include "place/PlacementRotationCandidates.h"
+#include "place/PlacementDispatchResult.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -80,10 +81,10 @@ struct BlockSource {
 struct Inventory { std::array<ItemStack,36> items{}; ItemStack const& getItem(int i) const { return items.at(i); } };
 struct Player {
     Vec2 rotation{17,0};
-    Inventory inventory; int selected{}; BlockSource region;
+    Inventory inventory; int selected{}, setSlotCalls{}; BlockSource region;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
-    void setSelectedSlot(int i) { selected=i; }
+    void setSelectedSlot(int i) { ++setSlotCalls; selected=i; }
     Vec3 getPosition() const { return {}; }
     Vec3 getEyePos() const { return {}; }
     Vec3 getViewVector(float) const { return {1,0,0}; }
@@ -191,6 +192,7 @@ int swaps{}, planned{};
 std::vector<int> plannedCells;
 std::map<int,bool> planOutcomes;
 bool useActualPlanner{};
+bool queueRotationOnPlan{};
 struct PacketSender {
     void sendToServer(InventoryTransactionPacket const& packet) {
         if(packet.payload.tx->fixtureType==ComplexInventoryTransaction::Type::NormalTransaction) {
@@ -257,9 +259,10 @@ void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
 int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};
-void queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
+bool queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
     ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>) {
     ++rotatedQueueCalls;rotatedQueuePitch=pitch;rotatedQueueYaw=yaw;
+    return true;
 }
 enum class ManualTargetStatus { None,Ready,MissingMaterial };
 ManualTargetStatus fixtureTargetStatus=ManualTargetStatus::None;
@@ -322,6 +325,8 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
     if(useActualPlanner) return resolveOrientedPlacementActual(player,region,context,cell,b,aux,target);
     if(!planOutcomes[cell.x]) return false;
     target={cell,cell,1,&b,{static_cast<float>(cell.x)+0.5f,0.25f,0.5f}};
+    if (queueRotationOnPlan && b.name=="minecraft:piston")
+        target.interactionRotation=detail::PlacementInteractionAngles{17.F,90.F};
     return true;
 }
 PlacementContext makePlacementContext(Vec3 const& eye,Vec3 const&,float range) { return {eye,range*range}; }
@@ -358,13 +363,14 @@ void reset(Player& p) {
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
     sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();aimed.reset();
     predictionInputs.clear();suppliedPrediction=nullptr;
-    useActualPlanner=false;
+    useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;detail::rotatedQueueYaw=0;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
 #include "DeliveryChecks.h"
 #include "CoverageChecks.h"
 #include "OrientationChecks.h"
+#include "LatencyChecks.h"
 int main() {
     Player player;Block stone;reset(player);
     // Native predictor boundary inputs, all support faces and +/-section edges.
@@ -380,7 +386,7 @@ int main() {
         check(!predictionInputs.empty()&&predictionInputs.front().cell==cell&&predictionInputs.front().aux==7,"native prediction receives target cell and actual stack aux");
         auto const& input=predictionInputs.front();
         check(input.relative.x>=0&&input.relative.x<=1&&input.relative.y>=0&&input.relative.y<=1&&input.relative.z>=0&&input.relative.z<=1,"predictor receives support-relative hit across world heights");
-        check(placeBlock(player,target,0,{1,7,64}),"actual transaction sends planned target");
+        check(detail::isPlacementSent(placeBlock(player,target,0,{1,7,64})),"actual transaction sends planned target");
         check(sent.back().pos==support&&sent.back().click.x==input.relative.x&&sent.back().click.y==input.relative.y&&sent.back().click.z==input.relative.z,"transaction click agrees with predictor relative hit");
         std::printf("planner cell=(%d,%d,%d) support=(%d,%d,%d) face=%u aux=%d hit=(%.2f,%.2f,%.2f) predicted=supplied-match send=called apply=NOT_RUN\n",
             cell.x,cell.y,cell.z,support.x,support.y,support.z,static_cast<unsigned>(input.face),input.aux,
@@ -558,6 +564,7 @@ int main() {
     runDeliveryChecks(player);
     runCoverageChecks(player);
     runOrientationChecks(player);
+    runLatencyChecks(player);
     std::printf("ExecutorFixture: %d checks, %d failures; native/BDS/apply/consumption NOT_RUN\n",checks,failures);
     return failures?1:0;
 }

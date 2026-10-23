@@ -52,8 +52,8 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
     // The shared legacy path can fulfill a tap while this request is deferred.
     // Respect the existing Manual initial/repeat timing before forwarding it.
     if (state.manualMode() && !state.manualPlaceRequested()
-        && (!state.manualHeld() || now-state.manualPressAt()<150
-            || now-state.lastManualPlaceAt()<120)) return false;
+        && (!state.manualHeld() || now-state.manualPressAt()<100
+            || now-state.lastManualPlaceAt()<50)) return false;
     if (state.recentPlacementActive(p.cellKey,now)) return false;
     if (!state.manualMode() && state.autoPlacementSuppressionsActive(now)
         && state.autoPlacementSuppressed(p.cellKey,now)) return false;
@@ -135,7 +135,7 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
 }
 }
 
-void queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_t cellKey,
+bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_t cellKey,
     unsigned ghostId,int slot,ItemStack const& item,float pitch,float yaw,
     std::unique_ptr<ComplexInventoryTransaction> tx) {
     // Both angles must be validated before borrowing any native packet state.
@@ -143,14 +143,17 @@ void queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
     // body/head yaw or invent a second network tick.
     if (!available.load(std::memory_order_acquire) || !tx
         || !std::isfinite(pitch) || !std::isfinite(yaw)
-        || std::fabs(pitch)>90.F || slot<0 || slot>=9) return;
+        || std::fabs(pitch)>90.F || slot<0 || slot>=9) return false;
     std::lock_guard lock(pendingMutex);
     auto& state=PlacementState::getInstance();auto const now=GetTickCount64();
-    if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return;
+    // An existing pending AuthInput placement owns this tick; a second
+    // legacy placement would change the selected stack and invalidate it.
+    if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return true;
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
     pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+250,
         cell,cellKey,ghostId,slot,item,pitch,yaw,std::move(payload)});
+    return true;
 }
 
 bool installRotationDeliveryHook() {

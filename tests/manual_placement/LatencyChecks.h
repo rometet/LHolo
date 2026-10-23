@@ -1,0 +1,113 @@
+#pragma once
+// R14 latency/regression cases run against extracted production Easy Place
+// bodies and explicit native boundary doubles. Not a server acceptance test.
+inline void runLatencyChecks(Player& player) {
+    auto& state=placementState();
+    Block stone;
+    Block piston;
+    piston.name="minecraft:piston";
+    piston.states={{"facing_direction","3"}};
+    piston.mNetworkId=24;
+    piston.material=2;
+    int const before=checks;
+
+    reset(player);
+    player.selected=7;
+    player.inventory.items[2]={1,0,64};
+    player.inventory.items[7]={1,0,64};
+    auto const direct=findItemSlot(player,stone);
+    auto const preferred=findItemSlot(
+        snapshotInventory(player),stone,ItemFind{7,&player.inventory.items[7]}
+    );
+    check(direct.slot==7 && preferred.slot==7,
+        "R14 held material wins over earlier duplicate hotbar slot");
+    check(findItemSlot(player,piston).slot<0,
+        "R14 held priority never invents a different item id");
+
+    // Range mode's priority must send the directly aimed ghost before
+    // exploring nearby impossible direction candidates; no extra slot change.
+    reset(player);state.setRangeEnabled(true);
+    player.selected=7;
+    player.inventory.items[2]={2,0,64};
+    player.inventory.items[7]={1,0,64};
+    projection::candidates={{0,0,0,&piston},{1,0,0,&piston},
+        {2,0,0,&piston},{-1,0,0,&piston},{-2,0,0,&piston},
+        {3,0,0,&stone}};
+    aimed=ProjectionTarget{{3,0,0},{3,0,0},1,&stone,{3.5f,.25f,.5f}};
+    planOutcomes[3]=true;
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1 && sent[0].pos.x==3
+        && sent[0].slot==7 && player.selected==7 && player.setSlotCalls==0,
+        "R14 aimed and already-held stone sends in the first game tick");
+    check(plannedCells.size()==1 && plannedCells.front()==3,
+        "R14 crosshair-first avoids five costly direction candidates");
+
+    // A queued native rotation is NOT a failed plan and must stop this
+    // tick. Otherwise a later legacy placement changes the held slot
+    // and the queued AuthInput fails its strict stack/net-id validation.
+    reset(player);state.setRangeEnabled(true);
+    player.selected=0;
+    player.inventory.items[0]={2,0,64};
+    player.inventory.items[1]={1,0,64};
+    projection::candidates={{0,0,0,&piston},{1,0,0,&stone}};
+    planOutcomes[0]=true;
+    planOutcomes[1]=true;
+    queueRotationOnPlan=true;
+    tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
+    check(detail::rotatedQueueCalls==1 && sent.empty()
+        && player.selected==0 && plannedCells.size()==1,
+        "R14 queued native input prevents a competing legacy send");
+    check(!state.recentPlacementActive(packBlockPos({0,0,0}),fixtureTime),
+        "R14 queued use is not falsely acknowledged or cell-locked");
+
+    // Manual mode responds on press, then repeats at the 50ms tick floor
+    // after a short 100ms initial typematic delay. The existing same-cell
+    // 500ms server-ack backoff remains in force.
+    reset(player);state.setManualMode(true);
+    player.selected=4;
+    player.inventory.items[4]={1,0,64};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    check(state.beginManualPress(1000,state.manualInputEpoch()),
+        "R14 manual first press admitted");
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1&&sent[0].time==1000&&sent[0].slot==4 && player.setSlotCalls==0,
+        "R14 manual first placement still has no artificial delay");
+    aimed=ProjectionTarget{{1,0,0},{1,0,0},1,&stone,{1.5f,.25f,.5f}};
+    planOutcomes[1]=true;
+    fixtureTime=1099;tickEasyPlaceImpl(player);
+    check(sent.size()==1,
+        "R14 manual initial repeat does not violate 100ms safety gap");
+    fixtureTime=1100;tickEasyPlaceImpl(player);
+    check(sent.size()==2&&sent.back().time==1100,
+        "R14 first manual held repeat occurs at 100ms");
+    aimed=ProjectionTarget{{2,0,0},{2,0,0},1,&stone,{2.5f,.25f,.5f}};
+    planOutcomes[2]=true;
+    fixtureTime=1149;tickEasyPlaceImpl(player);
+    check(sent.size()==2,
+        "R14 manual repeats cannot send before 50ms interval");
+    fixtureTime=1150;tickEasyPlaceImpl(player);
+    check(sent.size()==3&&sent.back().time==1150,
+        "R14 subsequent manual repeat occurs at 50ms");
+
+    // Negative prediction cache must not defer a newly reachable ordinary
+    // block for a quarter-second. It still bounds CPU retry work.
+    reset(player);state.setRangeEnabled(true);
+    player.inventory.items[0]={1,0,64};
+    projection::candidates={{0,0,0,&stone}};
+    planOutcomes[0]=false;
+    tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
+    check(planned==1&&sent.empty(),"R14 first failed prediction cached");
+    fixtureTime=1149;
+    tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
+    check(planned==1,"R14 retry cache suppresses attempts before 150ms");
+    fixtureTime=1150;
+    tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
+    check(planned==2,"R14 refreshed prediction permitted at 150ms");
+
+    std::printf("EASYPLACE_R14_LATENCY_CHECKS checks=%d newFailures=%d "
+                "manualDelay=100ms manualRepeat=50ms failedRetry=150ms "
+                "heldSelectedFirst=1 aimedRangePriority=1 queuedDoesNotConsumeAck=1 "
+                "native_server=NOT_RUN\n",
+        checks-before,failures);
+}

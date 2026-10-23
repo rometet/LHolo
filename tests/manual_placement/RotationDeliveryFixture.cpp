@@ -91,7 +91,7 @@ using namespace lholo::place::detail;
 int main(){
     LocalPlayer player;RotationAuthInputHook hook;auto& state=PlacementState::getInstance();
     auto reset=[&]{uninstallRotationDeliveryHook();state.resetWorldSession();state.setManualPlacementAllowedItems({});state.setEnabled(true);player=LocalPlayer{};player.inventory.items[0]={1,64,101};player.region.cells[{-1,0,0}]={12,false};client={&player,&hook,true};clockMs=1000;gui=false;throwForward=false;forwarded.clear();lholo::place::projection::ghost={20,false};lholo::place::projection::missing=true;installRotationDeliveryHook();};
-    auto queue=[&]{queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],17,180,std::make_unique<ItemUseInventoryTransaction>());};
+    auto queue=[&]{check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],17,180,std::make_unique<ItemUseInventoryTransaction>()),"valid rotation is admitted");};
     reset();state.setManualMode(true);check(state.beginManualPress(1000,state.manualInputEpoch()),"Manual admission");queue();
     check(state.manualPlaceRequested()&&!state.recentPlacementActive(0,1000),"queue is not send/ack and retains Manual tap");
     PlayerAuthInputPacket input;input.mInputData.get().insert(PlayerAuthInputPacketPayload::InputData::Up);auto flags=input.mInputData.get();hook.run(input);
@@ -102,8 +102,8 @@ int main(){
     check(!state.manualPlaceRequested()&&state.recentPlacementActive(0,1499)&&!state.recentPlacementActive(0,1500),"Manual commit and 500ms lock start at forwarding only");
     hook.run(input);check(forwarded.size()==2&&!forwarded.back().attached,"queued use cannot replay on next native input");
     reset();
-    queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
-        -80.F,90.F,std::make_unique<ItemUseInventoryTransaction>());
+    check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        -80.F,90.F,std::make_unique<ItemUseInventoryTransaction>()),"vertical rotation admitted");
     PlayerAuthInputPacket vertical;hook.run(vertical);
     check(forwarded.size()==1&&forwarded.back().attached
         && forwarded.back().rotation==Vec2{-80.F,90.F},
@@ -113,14 +113,14 @@ int main(){
         && vertical.mInteractRotation.get()==Vec2{17.F,23.F},
         "3D interaction leaves player main rotation unchanged and restores packet");
     reset();
-    queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
-        100.F,90.F,std::make_unique<ItemUseInventoryTransaction>());
+    check(!queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        100.F,90.F,std::make_unique<ItemUseInventoryTransaction>()),"invalid pitch queue rejected");
     PlayerAuthInputPacket invalidPitch;hook.run(invalidPitch);
     check(!forwarded.back().attached,"out-of-range pitch cannot queue an interaction");
     reset();
-    queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+    check(!queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
         std::numeric_limits<float>::quiet_NaN(),90.F,
-        std::make_unique<ItemUseInventoryTransaction>());
+        std::make_unique<ItemUseInventoryTransaction>()),"NaN queue rejected");
     PlayerAuthInputPacket nanPitch;hook.run(nanPitch);
     check(!forwarded.back().attached,"NaN pitch cannot queue an interaction");
     for(int reason=0;reason<11;++reason){reset();queue();
