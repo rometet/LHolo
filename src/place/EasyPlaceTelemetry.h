@@ -15,6 +15,7 @@ enum class Event : std::size_t {
     FailedPlanCached, RecentCellLock, GlobalInterval, ManualRepeatGate,
     SwapRequested, PacketSent, NativeQueued, DispatchRejected, Suppressed,
     ConnectivityAccepted, ConnectivityRejected,
+    StairQueued, StairPlanRejected, StairRotationDrift,
     Count
 };
 

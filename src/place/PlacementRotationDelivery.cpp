@@ -1,5 +1,6 @@
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementState.h"
+#include "place/EasyPlaceTelemetry.h"
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
 #include "projection/Projection.h"
@@ -36,11 +37,21 @@ struct PendingRotation {
     int slot;
     ItemStack item;
     float pitch,yaw;
+    bool requireNativeRotationSync{};
     std::unique_ptr<InventoryTransactionPacketPayload> payload;
 };
 std::mutex pendingMutex;
 std::optional<PendingRotation> pending;
 std::atomic_bool available{};
+
+// Strict stair uses MUST be attached to a genuine native AuthInput that
+// already carries the same viewing direction. Never rewrite player/movement
+// rotation or accept the local planner's yaw without this same-tick proof.
+bool nativeRotationMatches(Vec2 const& actual,float pitch,float yaw) noexcept {
+    return std::isfinite(actual.x) && std::isfinite(actual.y)
+        && std::fabs(actual.x-pitch)<=5.F
+        && std::fabs(std::remainder(actual.y-yaw,360.F))<=2.F;
+}
 
 bool stillValid(PendingRotation const& p,ClientInstance& client) {
     auto& state=PlacementState::getInstance();
@@ -95,6 +106,14 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         }
     }
     if (!request) { origin(packet);return; }
+    if (request->requireNativeRotationSync
+        && (!nativeRotationMatches(input.mRot.get(),request->pitch,request->yaw)
+            || !nativeRotationMatches(input.mInteractRotation.get(),
+                request->pitch,request->yaw))) {
+        telemetry::count(telemetry::Event::StairRotationDrift);
+        origin(packet);
+        return; // never attach a stair that the server may rotate differently
+    }
     bool valid=false;
     app::invokeNativeCallback([&] { valid=stillValid(*request,*client); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement validation",reason); });
@@ -111,7 +130,10 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
             PackedItemUseLegacyInventoryTransaction{payload.mLegacyRequestId.get(),
                 payload.mLegacySetItemSlots.get(),*tx});
         attached=true;
-        input.mInteractRotation.get()={request->pitch,request->yaw};
+        // Stairs use the genuine packet's orientation only. Synthetic angles
+        // are retained exclusively for the existing non-stair interaction route.
+        if (!request->requireNativeRotationSync)
+            input.mInteractRotation.get()={request->pitch,request->yaw};
         input.mInputData.get().insert(Input::PerformItemInteraction);
     },[](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement attach",reason); });
     // Forward one fresh native input: its tick, movement, camera and main/head
@@ -137,7 +159,8 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
 
 bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_t cellKey,
     unsigned ghostId,int slot,ItemStack const& item,float pitch,float yaw,
-    std::unique_ptr<ComplexInventoryTransaction> tx) {
+    std::unique_ptr<ComplexInventoryTransaction> tx,
+    bool requireNativeRotationSync) {
     // Both angles must be validated before borrowing any native packet state.
     // Pitch is the Bedrock interaction pitch in [-90,90]; do not set camera,
     // body/head yaw or invent a second network tick.
@@ -152,7 +175,8 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
     pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+250,
-        cell,cellKey,ghostId,slot,item,pitch,yaw,std::move(payload)});
+        cell,cellKey,ghostId,slot,item,pitch,yaw,requireNativeRotationSync,
+        std::move(payload)});
     return true;
 }
 

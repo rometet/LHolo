@@ -119,6 +119,7 @@ LL_TYPE_INSTANCE_HOOK(
                 "EASYPLACE_R16_PERF ticks={} auto={} manual={} range={} noTarget={} "
                 "noMaterial={} invalidPlan={} cachedPlan={} connectOK={} connectFail={} cellLock={} throttle={} "
                 "manualGate={} swaps={} sent={} queued={} rejected={} suppressed={} "
+                "stairQueued={} stairPlanFail={} stairSyncDrop={} "
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
                 "over4ms[tick,ray,plan]={}/{}/{}",
                 stats->count(E::Tick),stats->count(E::Auto),
@@ -130,6 +131,8 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::ManualRepeatGate),stats->count(E::SwapRequested),
                 stats->count(E::PacketSent),stats->count(E::NativeQueued),
                 stats->count(E::DispatchRejected),stats->count(E::Suppressed),
+                stats->count(E::StairQueued),stats->count(E::StairPlanRejected),
+                stats->count(E::StairRotationDrift),
                 stats->averageUs(S::Tick),stats->maximumUs(S::Tick),
                 stats->averageUs(S::Ray),stats->maximumUs(S::Ray),
                 stats->averageUs(S::Plan),stats->maximumUs(S::Plan),

@@ -380,6 +380,7 @@ struct ProjectionTarget {
     Block const* block;
     Vec3         clickPos{};  // Exact click point; chosen to reproduce the ghost.
     std::optional<detail::PlacementInteractionAngles> interactionRotation{};
+    bool requireNativeRotationSync{}; // fail-closed stairs; never spoof movement/head
 };
 
 // Which face of a cell points most along the given (unit) direction.
@@ -556,8 +557,10 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
         if (detail::queueRotationPlacement(
                 player,target.cell,packBlockPos(target.cell),
                 target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
-                std::move(transactionBase))) {
+                std::move(transactionBase),target.requireNativeRotationSync)) {
             telemetry::count(telemetry::Event::NativeQueued);
+            if(target.requireNativeRotationSync)
+                telemetry::count(telemetry::Event::StairQueued);
             return detail::PlacementDispatchResult::Queued;
         }
         return detail::PlacementDispatchResult::Rejected;
@@ -833,6 +836,7 @@ bool resolveOrientedPlacement(
     ProjectionTarget&       out
 ) {
     telemetry::ScopedTimer planTimer(telemetry::Stage::Plan);
+    bool const strictStairs = ghost.getTypeName().ends_with("_stairs");
     // Reject stale projection targets before any orientation search.
     if (!region.getBlock(cell).isAir()) return false;
 
@@ -867,6 +871,9 @@ bool resolveOrientedPlacement(
     // directly, while mayPlace belongs to the full vanilla interaction path;
     // treating its result as a hard gate blocked valid torch/stair placements.
     auto const tryPlacement = [&](BlockPos const& at, uchar face, Vec3 const& clickPos, ProjectionTarget& result) {
+        // Stairs must click a REAL support block, not the synthetic air-mPos
+        // fallback: unsupported air interactions can resolve a different half.
+        if (strictStairs && at == cell) return false;
         if (!isWithinPlacementReach(context, clickPos)) return false;
 
         // Mirror the official use-on chain: `at` is the block being clicked,
@@ -989,7 +996,21 @@ bool resolveOrientedPlacement(
         return false;
     };
 
-    if (searchCurrentRotation(out)) return true;
+    if (searchCurrentRotation(out)) {
+        if (strictStairs) {
+            // A correct local predictor is not proof that the remote player
+            // rotation has reached the server. Force the SAME native AuthInput
+            // tick to carry the use and validate its genuine rotation first.
+            auto const& actual=player.getRotation();
+            out.interactionRotation=detail::PlacementInteractionAngles{actual.x,actual.y};
+            out.requireNativeRotationSync=true;
+        }
+        return true;
+    }
+    // Never spoof yaw for stairs: the server may choose their weirdo_direction
+    // from authoritative player rotation rather than interactRotation.
+    // Refusing an off-axis stair is safer than creating a wrong-facing block.
+    if (strictStairs) return false;
     // R13: search only a bounded, proven native interaction rotation matrix.
     // Never map a serialized state to angles by guesswork: every candidate
     // must be accepted by Block::getPlacementBlock and the existing exact
@@ -1191,8 +1212,10 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             telemetry::count(telemetry::Event::SwapRequested);
             return;
         }
-        if (player.getSelectedItemSlot() != found.slot)
+        if (player.getSelectedItemSlot() != found.slot) {
             player.setSelectedSlot(found.slot);
+            if (target.requireNativeRotationSync) return;
+        }
         auto const result = placeBlock(player, target, found.slot, *found.item);
         if (detail::isPlacementSent(result)) {
             markPlaced(cell, now);
@@ -1373,6 +1396,8 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
                 failedKey, now, now + kAimedOrientedFailureCacheMs);
         }
         telemetry::count(telemetry::Event::PlanRejected);
+        if(target->block->getTypeName().ends_with("_stairs"))
+            telemetry::count(telemetry::Event::StairPlanRejected);
         if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
             telemetry::count(telemetry::Event::ConnectivityRejected);
         return;
@@ -1399,8 +1424,12 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         telemetry::count(telemetry::Event::SwapRequested);
         return;
     }
-    if (player->getSelectedItemSlot() != found.slot)
+    if (player->getSelectedItemSlot() != found.slot) {
         player->setSelectedSlot(found.slot);
+        // Let the native selected-slot update propagate before queuing the
+        // stair use transaction; never assume immediate remote synchronization.
+        if (placement.requireNativeRotationSync) return;
+    }
     auto const submit = placeBlock(*player, placement, found.slot, *found.item);
     // Queued rotations will mark the cell only in the actual native
     // forwarding hook; the pending manual press remains open meanwhile.

@@ -99,6 +99,13 @@ std::vector<PredictionInput> predictionInputs;
 Block const* suppliedPrediction{};
 Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,Vec3 const& relative,int aux) const {
     predictionInputs.push_back({cell,face,relative,aux});
+    if(orientationProbe&&name.ends_with("_stairs")) {
+        static Block predicted;predicted=*this;++predicted.mNetworkId;
+        int dir=static_cast<int>(std::floor(std::fmod(p.rotation.y+360.F,360.F)/90.F));
+        predicted.states["weirdo_direction"]=std::to_string(dir);
+        predicted.states["upside_down_bit"]=relative.y>=0.5f?"1":"0";
+        return predicted;
+    }
     if(orientationProbe&&name.ends_with("_trapdoor")) {
         if(throwOnOverride&&p.rotation.y==0) throw std::runtime_error("supplied predictor fault");
         static Block predicted;predicted=*this;++predicted.mNetworkId;
@@ -265,10 +272,12 @@ std::vector<i18n::TextKey> hints;
 void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
-int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};
+int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};bool rotatedQueueStrict{};
 bool queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
-    ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>) {
+    ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,
+    bool mustMatchNative) {
     ++rotatedQueueCalls;rotatedQueuePitch=pitch;rotatedQueueYaw=yaw;
+    rotatedQueueStrict=mustMatchNative;
     return true;
 }
 enum class ManualTargetStatus { None,Ready,MissingMaterial };
@@ -279,7 +288,8 @@ namespace {
 using detail::FailedPlanKey;using detail::FailedPlanKeyHash;using detail::PlacementContext;
 auto& placementState() { return detail::PlacementState::getInstance(); }
 #include "ConstantsBody.inc"
-struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<detail::PlacementInteractionAngles> interactionRotation{}; };
+struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<detail::PlacementInteractionAngles> interactionRotation{};
+    bool requireNativeRotationSync{}; };
 std::optional<ProjectionTarget> aimed;
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
@@ -371,12 +381,14 @@ void reset(Player& p) {
     sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
-    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;detail::rotatedQueueYaw=0;
+    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
+    detail::rotatedQueueYaw=0;detail::rotatedQueueStrict=false;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
 #include "DeliveryChecks.h"
 #include "CoverageChecks.h"
 #include "OrientationChecks.h"
+#include "StairStrictChecks.h"
 #include "LatencyChecks.h"
 #include "TelemetryChecks.h"
 int main() {
@@ -572,6 +584,7 @@ int main() {
     runDeliveryChecks(player);
     runCoverageChecks(player);
     runOrientationChecks(player);
+    runStairStrictChecks(player);
     runLatencyChecks(player);
     runTelemetryChecks();
     std::printf("ExecutorFixture: %d checks, %d failures; native/BDS/apply/consumption NOT_RUN\n",checks,failures);

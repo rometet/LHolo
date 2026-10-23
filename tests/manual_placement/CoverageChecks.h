@@ -111,7 +111,16 @@ inline void runCoverageChecks(Player& player) {
                     check(gm.origins==0&&state.manualPlaceRequested(),"family manual hook queues ghost before supplied interactive origin");
                 } else state.setRangeEnabled(true);
                 tickEasyPlaceImpl(player);
-                check(sent.size()==1,"family actual mode tick/planner/sender executes with supplied prediction and interactive classification");
+                // R18 deliberately refuses the independent legacy packet for
+                // stairs. The native interaction is queued only, and must
+                // subsequently pass same-tick rotation verification.
+                if (std::string_view(family)=="stairs") {
+                    check(sent.empty() && detail::rotatedQueueCalls==1
+                        && detail::rotatedQueueStrict,
+                        "R18 stair family routes through strict native AuthInput, never legacy");
+                } else {
+                    check(sent.size()==1,"family actual mode tick/planner/sender executes with supplied prediction and interactive classification");
+                }
                 if(sent.size()==1) {
                     check(sent.back().pos==neighborOf(cell,sf)&&sent.back().face==oppositeFace(sf),"family mode transaction clicks supplied support with expected face");
                     check(sent.back().slot==0&&sent.back().item.netId==101,"family mode transaction preserves selected stack identity");

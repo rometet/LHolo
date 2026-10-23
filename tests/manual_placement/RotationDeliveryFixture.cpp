@@ -1,6 +1,7 @@
 // Actual queue/validation/hook body; SDK/native packet boundaries are doubles.
 #include "place/PlacementState.h"
 #include "place/PlacementRotationDelivery.h"
+#include "place/EasyPlaceTelemetry.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -113,6 +114,54 @@ int main(){
         && !vertical.mItemUseTransaction.get()
         && vertical.mInteractRotation.get()==Vec2{17.F,23.F},
         "3D interaction leaves player main rotation unchanged and restores packet");
+    // R18 strict stair sends are admitted ONLY to a native input whose
+    // player rotation and interaction rotation both match the predicted yaw.
+    reset();
+    check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),
+        "R18 strict stair request admitted pending native rotation check");
+    PlayerAuthInputPacket strictMatch;
+    strictMatch.mInteractRotation.get()={17.F,90.F};
+    hook.run(strictMatch);
+    check(forwarded.size()==1 && forwarded.back().attached
+        && forwarded.back().rotation==Vec2{17.F,90.F}
+        && forwarded.back().main==Vec2{17.F,90.F},
+        "R18 aligned stair attaches to genuine native rotation without spoof");
+    check(!strictMatch.mItemUseTransaction.get()
+        && strictMatch.mInteractRotation.get()==Vec2{17.F,90.F},
+        "R18 aligned stair restores genuine packet fields");
+    reset();
+    check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),
+        "R18 strict player-angle mismatch case queued");
+    PlayerAuthInputPacket wrongActor;
+    wrongActor.mRot.get()={17.F,0.F};
+    wrongActor.mInteractRotation.get()={17.F,90.F};
+    hook.run(wrongActor);
+    check(forwarded.size()==1 && !forwarded.back().attached
+        && !state.recentPlacementActive(0,clockMs),
+        "R18 rotated actor input drops stair rather than placing wrong facing");
+    reset();
+    check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),
+        "R18 strict interact-angle mismatch case queued");
+    PlayerAuthInputPacket wrongInteract;
+    wrongInteract.mInteractRotation.get()={17.F,0.F};
+    hook.run(wrongInteract);
+    check(forwarded.size()==1 && !forwarded.back().attached
+        && !state.recentPlacementActive(0,clockMs),
+        "R18 wrong interaction direction drops stair");
+    reset();
+    check(queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
+        17.F,90.F,std::make_unique<ItemUseInventoryTransaction>(),true),
+        "R18 strict near wrap-around case queued");
+    PlayerAuthInputPacket closeWrap;
+    closeWrap.mRot.get()={17.F,-269.5F};
+    closeWrap.mInteractRotation.get()={17.F,90.F};
+    hook.run(closeWrap);
+    check(forwarded.size()==1 && forwarded.back().attached,
+        "R18 modulo-360 equivalent native yaw accepted");
+
     reset();
     check(!queueRotationPlacement(player,{},0,20,0,player.inventory.items[0],
         100.F,90.F,std::make_unique<ItemUseInventoryTransaction>()),"invalid pitch queue rejected");
