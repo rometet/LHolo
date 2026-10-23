@@ -11,6 +11,7 @@
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/mesh/ProjectionAnimatedBubblePass.h"
 #include "projection/core/ProjectedPistonAppearance.h"
 #include "projection/mesh/ProjectedPistonRenderScope.h"
 #include "projection/world/ProjectionVirtualWorld.h"
@@ -75,6 +76,7 @@ std::atomic_bool gSignTextUnavailableLogged{};
 std::atomic_bool gPraxisExactReplayLogged{};
 std::atomic_bool gPraxisLiquidMaterialParityLogged{};
 std::atomic_bool gLiquidProxyR6Logged{};
+std::atomic_bool gAnimatedBubbleR11FailureLogged{};
 std::atomic_bool gExactReplayR7Logged{};
 std::atomic_bool gTransparentQuadSortLogged{};
 std::atomic_bool gTransparentQuadSortFailureLogged{};
@@ -1557,6 +1559,25 @@ void submitProjectionMeshPass(
         }
     }
 
+    // R11's optional animated bubble effect is only submitted when the
+    // projection alpha pass is visible. Never let an effect error reset a
+    // working schematic or its accepted waterlogged geometry.
+    if (renderAlphaLayer) {
+        try {
+            submitAnimatedBubbleOverlay(
+                state, renderContext, renderOrigin, camera,
+                structureOpacity, projectedBlendMaterial
+            );
+        } catch (std::exception const& exception) {
+            if (!gAnimatedBubbleR11FailureLogged.exchange(
+                    true, std::memory_order_acq_rel))
+                logger().warn("LHoloBubbleR11 failed: {}", exception.what());
+        } catch (...) {
+            if (!gAnimatedBubbleR11FailureLogged.exchange(
+                    true, std::memory_order_acq_rel))
+                logger().warn("LHoloBubbleR11 failed with unknown exception");
+        }
+    }
     if (!renderAlphaLayer) return;
 
     auto* levelRenderer = client.getLevelRenderer();
