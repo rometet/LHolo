@@ -16,6 +16,7 @@
 #include "projection/core/ProjectionState.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
+#include "structure/MaterialTypePresence.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -247,6 +248,7 @@ CorrectionProgressChanges updateCorrectionTracker(
     if (state.missingLayers.size() < totalBlocks
         || state.correctionStates.size() < totalBlocks
         || state.progressCorrect.size() < totalBlocks
+        || state.progressMaterialTypePresent.size() < totalBlocks
         || state.progressErrorKind.size() < totalBlocks
         || state.blockToSection.size() < totalBlocks) {
         return changes;
@@ -320,6 +322,19 @@ CorrectionProgressChanges updateCorrectionTracker(
                     ))
             || (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid))) {
             nextState = CorrectionState::WrongState;
+        }
+        // Material inventory counts care about block/item type being present,
+        // not its facing/open/powered states. A wrong-state stair or trapdoor
+        // remains a verifier error, but must not be charged as a missing item.
+        auto const materialPresent = structure::materialTypePresentMask(
+            ready, expected != nullptr, expected && !bodyMissing && !bodyTypeWrong,
+            expectedLiquid != nullptr,
+            expectedLiquid && !liquidMissing && !liquidTypeWrong
+                && !liquidCellOccupiedBySolid
+        );
+        if (state.progressMaterialTypePresent[index] != materialPresent) {
+            state.progressMaterialTypePresent[index] = materialPresent;
+            ++state.progressRevision; // trigger material HUD recount even when correctness unchanged
         }
         auto const nextMissingLayers = ready
             ? projectionMissingLayerMask(bodyMissing, liquidMissing) : MissingLayerBoth;

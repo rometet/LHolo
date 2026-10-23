@@ -210,6 +210,7 @@
     LHOLO_TEXT_KEY("hud.currentLayer", HudCurrentLayer, "")                                              \
     LHOLO_TEXT_KEY("hud.rangeFromZero", HudRangeFromZero, "")                                            \
     LHOLO_TEXT_KEY("hud.rangeBetween", HudRangeBetween, "")                                              \
+    LHOLO_TEXT_KEY("hud.verifierSnapshot", HudVerifierSnapshot, "")                                        \
     LHOLO_TEXT_KEY("hud.overallProgress", HudOverallProgress, "")                                        \
     LHOLO_TEXT_KEY("hud.transform", HudTransform, "") \
     LHOLO_TEXT_KEY("hud.remaining", HudRemaining, "") \

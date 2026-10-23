@@ -45,7 +45,8 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     auto const blockCount = state.structure->renderBlocks.size();
     if (state.blockToSection.size() < blockCount
         || state.correctionStates.size() < blockCount
-        || state.progressCorrect.size() < blockCount) {
+        || state.progressCorrect.size() < blockCount
+        || state.progressMaterialTypePresent.size() < blockCount) {
         return result;
     }
 
@@ -194,6 +195,8 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& mesh : state.blockEntityPlaceholderSectionMeshes) mesh.reset();
         state.structureBoundsMesh.reset();
         std::fill(state.progressCorrect.begin(), state.progressCorrect.end(), 0);
+        std::fill(state.progressMaterialTypePresent.begin(),
+            state.progressMaterialTypePresent.end(), 0);
         ++state.progressRevision;
         std::fill(state.progressErrorKind.begin(), state.progressErrorKind.end(), 0);
         state.progressCorrectCount = 0;

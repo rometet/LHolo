@@ -145,11 +145,16 @@ inline RequiredItemRule requiredItemRule(std::string_view name, bool upperDoor =
     return {};
 }
 struct MaterialCount {
-    std::uint64_t total{}, correct{};
-    std::uint64_t remaining() const { return total - (std::min)(total, correct); }
+    std::uint64_t total{}, correct{}, present{};
+    // "Correct" means every state is right. "Present" is deliberately
+    // material-only: a stair facing the wrong direction is already owned and
+    // should not inflate the number of NEW material items needed.
+    std::uint64_t remaining() const { return total - (std::min)(total, present); }
     void add(unsigned quantity, VerificationState state) {
         total += quantity;
         if (state == VerificationState::Correct) correct += quantity;
+        if (state == VerificationState::Correct || state == VerificationState::WrongState)
+            present += quantity;
     }
 };
 } // namespace lholo::structure

@@ -38,6 +38,10 @@ struct Snapshot {
     bool activeProjectionAvailable{};
 };
 Snapshot snapshot();
+// A completed manual verifier report, validated against the SAME active
+// world/placement/filter as the verifier tab. Snapshot totals are intentionally
+// stable until the user verifies again. Never expose a running partial report.
+std::optional<VerificationTally> completedVerifierTallyForHud();
 void refreshFiles();
 bool place(std::string const& file);
 bool importSavedProjection();

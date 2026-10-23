@@ -6,6 +6,7 @@
 #include "structure/SchematicRuntime.h"
 #include "structure/PlacementTransform.h"
 #include "structure/Verification.h"
+#include "structure/MaterialTypePresence.h"
 #include "mc/world/level/block/VanillaStates.h"
 #include "app/FutureResult.h"
 #include "app/NativeCallbackBoundary.h"
@@ -220,8 +221,11 @@ MaterialHudResult countMaterialHud(MaterialHudInput input) {
     auto const& blocks = input.structure->renderBlocks;
     result.counts.body.reserve(std::min<std::size_t>(blocks.size(), 4096));
     result.counts.liquid.reserve(std::min<std::size_t>(blocks.size(), 64));
+    if (input.materialTypePresent.size() != blocks.size()) return result;
     for (std::size_t index = 0; index < blocks.size(); ++index) {
-        if (input.progressCorrect[index] != 0) continue;
+        auto const present = input.materialTypePresent[index];
+        if (!structure::materialStillNeeded(present, false)
+            && !structure::materialStillNeeded(present, true)) continue;
         auto const& entry = blocks[index];
         auto const layer = layerOf({{input.structure->sizeX,input.structure->sizeY,input.structure->sizeZ},{},input.key.rotation,input.key.mirror},
             {entry.x,entry.y,entry.z}, input.key.layerAxis);
@@ -233,8 +237,10 @@ MaterialHudResult countMaterialHud(MaterialHudInput input) {
         }
         // Block pointers are opaque keys here. Registry, localization and item
         // resolution remain on the game tick thread after aggregation.
-        countBlock(result.counts.body, entry.block);
-        countBlock(result.counts.liquid, entry.liquid);
+        if (structure::materialStillNeeded(present, false))
+            countBlock(result.counts.body, entry.block);
+        if (structure::materialStillNeeded(present, true))
+            countBlock(result.counts.liquid, entry.liquid);
     }
     return result;
 }

@@ -31,6 +31,7 @@
 #include "structure/StructureUiState.h"
 #include "overlay/CompanionBridge.h"
 #include "ui/HudSummaryPolicy.h"
+#include "ui/VerifierHudConsistency.h"
 #include "ui/PresentationText.h"
 #include "ui/HotkeyFormat.h"
 #include "ui/MenuController.h"
@@ -908,7 +909,23 @@ void renderHud() {
         auto const showAnyProgress = showOverallProgress || showProgress || showWrongState
             || showWrongType || showExtraBlocks;
         projection::BuildProgress progress{};
-        if (showAnyProgress) progress = projection::getBuildProgress();
+        // The verifier page is an explicit scan snapshot whereas the existing
+        // HUD counters are updated by the render correction worker. Do not
+        // mix their differing scopes/timestamps when a completed report exists.
+        auto const verification = showAnyProgress
+            ? schematic::completedVerifierTallyForHud()
+            : std::optional<VerificationTally>{};
+        if (showAnyProgress) progress = verification
+            ? lholo::ui::verifierTallyBuildProgress(*verification)
+            : projection::getBuildProgress();
+        if (verification) {
+            ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HudVerifierSnapshot));
+            ImGui::Text(i18n::tr(i18n::TextKey::VerifierTotals),
+                static_cast<unsigned long long>(verification->missing
+                    + verification->wrongType + verification->wrongState + verification->extra),
+                static_cast<unsigned long long>(verification->correct),
+                static_cast<unsigned long long>(verification->unknown + verification->unknownAir));
+        }
         if (showOverallProgress) {
             ImGui::Text(
                 i18n::tr(i18n::TextKey::HudOverallProgress),

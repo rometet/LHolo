@@ -401,6 +401,17 @@ Snapshot snapshot() {
         && placementCurrent(stampFor(*p,s.session.revision,structure.loaded->generation,1),structure);
     return s;
 }
+std::optional<VerificationTally> completedVerifierTallyForHud() {
+    // Keep lock order the same as snapshot(): structure session before
+    // schematic control. No native reads or reports allocated per frame.
+    auto const structure=detail::StructureSession::getInstance().snapshot();
+    std::lock_guard lock(gMutex);
+    if (!gReport || gReport->running
+        || gVerification.phase()!=VerificationPhase::Completed
+        || !reportCurrent(structure)) return std::nullopt;
+    return gReport->tally;
+}
+
 void refreshFiles() {
     std::lock_guard lock(gMutex);
     try {

@@ -181,7 +181,12 @@ std::optional<MaterialProgressSnapshot> captureMaterialProgress(
                 && state.cachedLayerAxis == expected.layerAxis
                 && state.cachedRotation == expected.rotation && state.cachedMirror == expected.mirror;
             if (!matches) return std::nullopt;
-            return MaterialProgressSnapshot{expected, state.structure, state.progressCorrect};
+            if (state.progressMaterialTypePresent.size()
+                    != state.structure->renderBlocks.size())
+                return std::nullopt;
+            return MaterialProgressSnapshot{
+                expected, state.structure, state.progressMaterialTypePresent
+            };
         }
     );
 }

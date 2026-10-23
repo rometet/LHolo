@@ -125,6 +125,10 @@ struct ProjectionState {
     // One byte per structure block. This is updated by the existing bounded
     // correction scan, so the HUD never performs its own world-block queries.
     std::vector<uchar>              progressCorrect;
+    // Bit 0: real body has expected item/block type (may have wrong states);
+    // bit 1: liquid layer has expected type. Completeness still uses
+    // progressCorrect. This separate mask is only for material quantity.
+    std::vector<uchar>              progressMaterialTypePresent;
     // Changes whenever the per-cell correctness snapshot changes. Consumers
     // can use this to rebuild derived data (such as material HUD rows) only
     // when necessary instead of rescanning the structure every frame.

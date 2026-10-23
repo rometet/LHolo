@@ -159,6 +159,7 @@
   "hud.currentLayer": "現在のレイヤー: %d / %d（%s 軸）",
   "hud.rangeFromZero": "表示範囲: レイヤー 0～%d（%s 軸）",
   "hud.rangeBetween": "表示範囲: レイヤー %d～%d（%s 軸）",
+  "hud.verifierSnapshot": "検証結果（前回のスキャン時点）",
   "hud.overallProgress": "全体: %llu / %llu",
   "hud.transform": "オフセット: %d, %d, %d | 回転: %d | 反転: %s",
   "hud.remaining": "表示範囲の残り: %llu",

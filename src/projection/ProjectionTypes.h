@@ -49,7 +49,9 @@ struct MaterialProgressKey {
 struct MaterialProgressSnapshot {
     MaterialProgressKey                         key;
     std::shared_ptr<structure::LoadedStructure const> structure;
-    std::vector<unsigned char>                  progressCorrect;
+    // A single compact byte per projected cell, not the full correction mesh.
+    // The background HUD worker does not need the more expensive state snapshot.
+    std::vector<unsigned char>                  materialTypePresent;
 };
 
 // Easy-place support: one locked lookup of the projected virtual world.

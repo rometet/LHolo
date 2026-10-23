@@ -53,6 +53,8 @@
 #include "projection/runtime/EpochFailure.h"
 #include "settings/SettingsStore.h"
 #include "structure/StructureSession.h"
+#include "structure/MaterialTypePresence.h"
+#include "ui/VerifierHudConsistency.h"
 #include "structure/LoadIntent.h"
 #include "structure/capture/CaptureBounds.h"
 #include "structure/capture/CaptureRequests.h"
@@ -1974,6 +1976,63 @@ void testStructureUiState() {
     state.applyHud(HudStateSnapshot{});
 }
 
+void testMaterialAndVerifierHudConsistency() {
+    using namespace lholo::structure;
+    // A real block of the expected type still supplies material even if its
+    // facing/open/powered state is different. Verification is independently
+    // responsible for warning about that wrong state.
+    constexpr auto bodyPresent = materialTypePresentMask(true,true,true,false,false);
+    LHOLO_CHECK(bodyPresent == MaterialBodyPresent);
+    LHOLO_CHECK(!materialStillNeeded(bodyPresent,false));
+    LHOLO_CHECK(materialStillNeeded(bodyPresent,true));
+    LHOLO_CHECK(materialTypePresentMask(true,true,false,false,false) == 0);
+    LHOLO_CHECK(materialStillNeeded(0,false));
+    LHOLO_CHECK(materialTypePresentMask(false,true,true,true,true) == 0);
+    constexpr auto waterlogged = materialTypePresentMask(true,true,true,true,false);
+    LHOLO_CHECK(waterlogged == MaterialBodyPresent);
+    LHOLO_CHECK(!materialStillNeeded(waterlogged,false)
+        && materialStillNeeded(waterlogged,true));
+    constexpr auto liquidOnly = materialTypePresentMask(true,true,false,true,true);
+    LHOLO_CHECK(liquidOnly == MaterialLiquidPresent);
+    LHOLO_CHECK(materialStillNeeded(liquidOnly,false)
+        && !materialStillNeeded(liquidOnly,true));
+    constexpr auto complete = materialTypePresentMask(true,true,true,true,true);
+    LHOLO_CHECK(complete == (MaterialBodyPresent|MaterialLiquidPresent));
+    LHOLO_CHECK(!materialStillNeeded(complete,false)
+        && !materialStillNeeded(complete,true));
+
+    MaterialCount sameTypeWrongState;
+    sameTypeWrongState.add(4,VerificationState::WrongState);
+    LHOLO_CHECK(sameTypeWrongState.total==4 && sameTypeWrongState.correct==0
+        && sameTypeWrongState.present==4 && sameTypeWrongState.remaining()==0);
+    sameTypeWrongState.add(2,VerificationState::WrongType);
+    LHOLO_CHECK(sameTypeWrongState.total==6 && sameTypeWrongState.present==4
+        && sameTypeWrongState.remaining()==2);
+    sameTypeWrongState.add(1,VerificationState::Correct);
+    LHOLO_CHECK(sameTypeWrongState.total==7 && sameTypeWrongState.correct==1
+        && sameTypeWrongState.present==5 && sameTypeWrongState.remaining()==2);
+    sameTypeWrongState.add(2,VerificationState::Unknown);
+    LHOLO_CHECK(sameTypeWrongState.remaining()==4);
+
+    VerificationTally tally;
+    for(int index=0;index<3;++index)tally.add(VerificationState::Correct,true);
+    for(int index=0;index<2;++index)tally.add(VerificationState::Missing,true);
+    tally.add(VerificationState::WrongType,true);
+    for(int index=0;index<4;++index)tally.add(VerificationState::WrongState,true);
+    for(int index=0;index<2;++index)tally.add(VerificationState::Extra,false);
+    tally.add(VerificationState::Unknown,true);
+    tally.add(VerificationState::Unknown,false);
+    auto const hud=lholo::ui::verifierTallyBuildProgress(tally);
+    LHOLO_CHECK(tally.total()==11 && tally.correct==3
+        && tally.unknown==1 && tally.unknownAir==1);
+    LHOLO_CHECK(hud.total==tally.total() && hud.visibleTotal==tally.total());
+    LHOLO_CHECK(hud.placed==tally.correct && hud.visiblePlaced==tally.correct);
+    LHOLO_CHECK(hud.wrongState==tally.wrongState
+        && hud.wrongType==tally.wrongType && hud.extra==tally.extra);
+    LHOLO_CHECK(hud.placed+hud.wrongState+hud.wrongType+tally.missing+tally.unknown
+        ==hud.total);
+}
+
 void testHotkeyFormat() {
     LHOLO_CHECK(lholo::ui::isModifierKey(VK_CONTROL));
     LHOLO_CHECK(lholo::ui::isModifierKey(VK_MENU));
@@ -2379,6 +2438,7 @@ int main() {
     testWorldEventInterest();
     testFutureResult();
     testMaterialHudAvailabilityRevision();
+    testMaterialAndVerifierHudConsistency();
     testMaterialHudPublicationRetirement();
     testMaterialHudImmutableView();
     testCaptureRequestsAndBounds();
