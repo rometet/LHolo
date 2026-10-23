@@ -5,6 +5,7 @@
 
 #include "projection/core/WaterloggedFaceClip.h"
 #include "projection/core/WaterloggedClipFamily.h"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -19,6 +20,8 @@ struct WaterloggedBodyCellCoverage {
     std::size_t structureIndex{};
     std::vector<WaterloggedFaceRect> solidFaces;
     WaterloggedClipFamily family{WaterloggedClipFamily::None};
+    std::vector<WaterloggedFaceRect> cutoutFaces; // never cull: inset water only
+    std::array<float, 3> cellCenter{};
 };
 struct WaterloggedClipReport {
     std::size_t beforeVertices{};
@@ -29,6 +32,7 @@ struct WaterloggedClipReport {
     std::size_t stairClippedQuads{};
     std::size_t slabClippedQuads{};
     std::size_t trapdoorClippedQuads{};
+    std::size_t cutoutInsetWaterQuads{};
     bool committed{};
 };
 

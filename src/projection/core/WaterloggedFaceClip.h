@@ -163,4 +163,38 @@ clipWaterloggedNativeFace(
     };
 }
 
+// Alpha-tested trapdoors retain real texture holes that a native mesh face
+// cannot describe. Never cull those faces. When a same-cell liquid quad lies
+// within ~0.001 block of the cutout face, shift it slightly INTO the fluid
+// volume instead. Opaque pixels then win depth testing, while water remains
+// visible through the texture's transparent holes.
+inline constexpr float WaterloggedCutoutConflictRange = 0.0025F;
+inline constexpr float WaterloggedCutoutInsetDistance = 0.006F;
+
+[[nodiscard]] inline std::optional<float> waterloggedCutoutInset(
+    WaterloggedQuadPositions const& liquidQuad,
+    std::span<WaterloggedFaceRect const> cutoutFaces,
+    std::array<float, 3> const& cellCenter
+) noexcept {
+    auto const liquid = waterloggedAxisRect(liquidQuad);
+    if (!liquid || cutoutFaces.empty() || cutoutFaces.size() > WaterloggedMaxBodyRects)
+        return std::nullopt;
+    for (auto const center : cellCenter) if (!std::isfinite(center)) return std::nullopt;
+    if (std::fabs(liquid->plane - cellCenter[liquid->axis]) < 0.35F)
+        return std::nullopt;
+    for (auto const& face : cutoutFaces) {
+        if (face.axis != liquid->axis
+            || !std::isfinite(face.plane)
+            || std::fabs(face.plane - liquid->plane) > WaterloggedCutoutConflictRange)
+            continue;
+        auto const du = std::min(face.u1, liquid->u1) - std::max(face.u0, liquid->u0);
+        auto const dv = std::min(face.v1, liquid->v1) - std::max(face.v0, liquid->v0);
+        if (du > 0.01F && dv > 0.01F && du * dv > 0.005F) {
+            return liquid->plane > cellCenter[liquid->axis]
+                ? -WaterloggedCutoutInsetDistance : WaterloggedCutoutInsetDistance;
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace lholo::projection::detail

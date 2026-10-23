@@ -1,5 +1,6 @@
 #include "projection/core/WaterloggedFaceClip.h"
 #include "projection/core/WaterloggedClipFamily.h"
+#include "projection/core/ProjectionBubbleGlyph.h"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -149,5 +150,50 @@ void opaqueTrapdoorGeometry() {
 int main(){
     staircaseTop();staircaseSide();fullOcclusion();unrelatedOrUnsafe();multiBody();
     safeFamilyPolicy();slabGeometry();opaqueTrapdoorGeometry();
+    // Captured native R9 waterlogged trapdoor faces are ~0.001 apart;
+    // keep alpha-test holes and move water behind the body instead of culling.
+    auto waterSide=quad(-44.999001F,0,138.F,138.999F,147.F,148.F);
+    auto bodySide=waterloggedAxisRect(quad(-45.F,0,138.F,138.1825F,147.F,148.F));
+    CHECK(bodySide);
+    std::array<float,3> cellCenter{-44.5F,138.5F,147.5F};
+    auto inset=waterloggedCutoutInset(waterSide,std::span{&*bodySide,1U},cellCenter);
+    CHECK(inset && *inset > 0.F);
+    near(*inset,WaterloggedCutoutInsetDistance);
+    auto otherSide=quad(-44.000999F,0,138.F,138.999F,147.F,148.F);
+    CHECK(!waterloggedCutoutInset(otherSide,std::span{&*bodySide,1U},cellCenter));
+    auto topWater=quad(138.998993F,1,149.F,150.F,-45.F,-44.F);
+    auto topTrap=waterloggedAxisRect(quad(139.F,1,149.F,150.F,-45.F,-44.8175F));
+    CHECK(topTrap);
+    std::array<float,3> topCenter{-44.5F,138.5F,149.5F};
+    auto topInset=waterloggedCutoutInset(topWater,std::span{&*topTrap,1U},topCenter);
+    CHECK(topInset && *topInset < 0.F);
+    near(*topInset,-WaterloggedCutoutInsetDistance);
+    auto farFace=waterloggedAxisRect(quad(138.3F,1,149.F,150.F,-45.F,-44.F));
+    CHECK(farFace);
+    CHECK(!waterloggedCutoutInset(topWater,std::span{&*farFace,1U},topCenter));
+    CHECK(!waterloggedCutoutInset(topWater,{},topCenter));
+    // Static bubble indicators must stay inside their cell and cannot spawn particles.
+    for (bool down : {false,true}) {
+        std::size_t glyphQuads{};
+        float minY=1.F,maxY=0.F;
+        bool allInCell=true;
+        emitBubbleColumnGlyph({-45.F,138.F,153.F},down,
+            [&](BubbleGlyphQuad const& glyph) {
+                ++glyphQuads;
+                for(auto const& p : glyph) {
+                    allInCell &= std::isfinite(p[0]) && std::isfinite(p[1])
+                        && std::isfinite(p[2]);
+                    allInCell &= p[0] > -45.F && p[0] < -44.F
+                        && p[1] > 138.F && p[1] < 139.F
+                        && p[2] > 153.F && p[2] < 154.F;
+                    minY=std::min(minY,p[1]-138.F);
+                    maxY=std::max(maxY,p[1]-138.F);
+                }
+            });
+        CHECK(glyphQuads == BubbleGlyphQuadsPerCell);
+        CHECK(glyphQuads * 4U == BubbleGlyphVerticesPerCell);
+        CHECK(allInCell);
+        CHECK(minY > .1F && maxY < .9F);
+    }
     std::cout<<"LHoloWaterloggedClipTests PASS checks="<<checks<<" GPU=NOT_RUN\n";
 }

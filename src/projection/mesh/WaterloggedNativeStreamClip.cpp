@@ -70,7 +70,7 @@ WaterloggedClipReport clipWaterloggedNativeStream(
     report.afterVertices = positions.size();
     if (coverage.empty()
         || std::none_of(coverage.begin(), coverage.end(), [](auto const& cell) {
-            return !cell.solidFaces.empty();
+            return !cell.solidFaces.empty() || !cell.cutoutFaces.empty();
         })
         || positions.empty() || positions.size() % 4U != 0U
         || data.mMode != mce::PrimitiveMode::QuadList
@@ -96,7 +96,8 @@ WaterloggedClipReport clipWaterloggedNativeStream(
     std::vector<WaterloggedBodyCellCoverage const*> eligible;
     eligible.reserve(coverage.size());
     for (auto const& cell : coverage) {
-        if (!cell.solidFaces.empty() && cell.family != WaterloggedClipFamily::None)
+        if ((!cell.solidFaces.empty() && cell.family != WaterloggedClipFamily::None)
+            || !cell.cutoutFaces.empty())
             eligible.push_back(&cell);
     }
     if (eligible.empty()) return report;
@@ -164,6 +165,31 @@ WaterloggedClipReport clipWaterloggedNativeStream(
         }
         auto const& cell = **it;
         auto const rawPoints = pointsForQuad(sourcePos);
+        if (!cell.cutoutFaces.empty()
+            && cell.family == WaterloggedClipFamily::None) {
+            auto const inset = waterloggedCutoutInset(
+                rawPoints, cell.cutoutFaces, cell.cellCenter
+            );
+            appendOriginal();
+            if (inset) {
+                auto const axisRect = waterloggedAxisRect(rawPoints);
+                if (axisRect) {
+                    auto const axis = axisRect->axis;
+                    for (std::size_t i = stagedPositions.size() - 4U;
+                         i < stagedPositions.size(); ++i)
+                        stagedPositions[i][axis] += *inset;
+                    if (!stagedQuadInfo.empty()) {
+                        auto& centroid = stagedQuadInfo.back().centroid.get();
+                        if (axis == 0) centroid.x += *inset;
+                        else if (axis == 1) centroid.y += *inset;
+                        else centroid.z += *inset;
+                    }
+                    ++report.cutoutInsetWaterQuads;
+                    changed = true;
+                }
+            }
+            continue;
+        }
         auto const sourceRect = waterloggedAxisRect(rawPoints);
         auto const fragments = clipWaterloggedNativeFace(rawPoints, cell.solidFaces);
         if (!sourceRect || !fragments) {

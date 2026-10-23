@@ -19,6 +19,7 @@
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
 #include "projection/core/WaterloggedFaceClip.h"
+#include "projection/core/ProjectionBubbleGlyph.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
@@ -33,6 +34,7 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -49,6 +51,7 @@
 #include "mc/client/renderer/texture/TextureUVCoordinateSet.h"
 #include "mc/client/world/level/biome/biome_color_sampling/TessellationPolicy.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#include "mc/deps/nbt/ByteTag.h"
 #include "mc/deps/nbt/IntTag.h"
 #include "mc/deps/nbt/Tag.h"
 #include "mc/deps/core/math/Vec3.h"
@@ -56,6 +59,8 @@
 #include "mc/world/Facing.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/registry/BlockTypeRegistry.h"
+#include "mc/deps/core/string/HashedString.h"
 #include "mc/world/level/block/VanillaBlockTypeIds.h"
 #include "mc/world/level/biome/biome_color_sampling/BiomeColorSampling.h"
 #include "mc/world/level/material/Material.h"
@@ -80,6 +85,8 @@ std::atomic<std::uint32_t> gSubmergedBodyLogCount{};
 std::atomic<std::uint32_t> gWaterloggedR9TrapdoorDeferredLogCount{};
 std::atomic<std::uint32_t> gLiquidR9CellOwnerDiagnostics{};
 std::atomic_bool gSubmergedPlantLogged{};
+std::atomic_bool gBubbleGlyphR10Logged{};
+std::atomic_bool gBubbleGlyphR10MissingTextureLogged{};
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 std::atomic<std::uint32_t> gGeometryProbeBuilds{};
 #endif
@@ -530,6 +537,7 @@ void buildProjectionSection(
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     std::vector<WaterloggedBodyCellCoverage> bodyFaceCoverage;
     layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
+    std::size_t bubbleGlyphCellsBuilt{};
     for (auto const index : state.sectionBlockIndices[section]) {
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
@@ -584,6 +592,13 @@ void buildProjectionSection(
                     compositeOutcomeIndex
                 });
             };
+            // The vanilla bubble_column body produces no terrain quads.
+            // Own only the projection's blend bucket for this special body;
+            // the real water is still independently owned by Exact Replay.
+            if (typeName == "minecraft:bubble_column") {
+                appendLayer(BlockRenderLayer::RenderlayerBlend);
+                return;
+            }
             appendLayer(primaryLayer);
             if (graphics) {
                 // This is Minecraft's current BlockGraphics classification,
@@ -637,17 +652,32 @@ void buildProjectionSection(
     }
     ScopedNativeGeometryProbe probeScope{geometryProbe};
 #endif
+    // A bubble glyph adds more vertices than a normal cube. Reserve enough
+    // on the blend bucket, without reserving glyph space for opaque sections.
+    auto const plannedBubbleCells = std::min<std::size_t>(
+        128U, std::count_if(layeredBlocks.begin(), layeredBlocks.end(),
+            [](auto const& layer) {
+                return layer.bucket == RenderBucket::Blend
+                    && layer.block->getTypeName() == "minecraft:bubble_column";
+            })
+    );
     for (std::size_t bucketIndex = 0;
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
          ++bucketIndex) {
+        auto const bucket = static_cast<RenderBucket>(bucketIndex);
+        auto const baseBudget = layeredBlocks.size() * 24U;
+        auto const glyphBudget = bucket == RenderBucket::Blend
+            ? plannedBubbleCells * BubbleGlyphVerticesPerCell : 0U;
+        auto const budget = std::min<std::size_t>(
+            (std::numeric_limits<int>::max)(), baseBudget + glyphBudget
+        );
         tessellator.begin(
             Tessellator::DebugContextCallback{},
             mce::PrimitiveMode::QuadList,
-            std::max(128, static_cast<int>(layeredBlocks.size() * 24)),
+            static_cast<int>(std::max<std::size_t>(128U, budget)),
             false
         );
         bool bucketTessellated{};
-        auto const bucket = static_cast<RenderBucket>(bucketIndex);
         if (bucket == RenderBucket::Blend) {
             state.sections[section].blendSortKeyValid = false;
             state.sections[section].blendSortUnsupported = false;
@@ -705,6 +735,70 @@ void buildProjectionSection(
                     [&](std::string const& record) { logger().info("PRAXIS_GEOMETRY_CAPTURE {}", record); });
             }
 #endif
+            // bubble_column is a particle-driven native block with zero
+            // BlockTessellator vertices (confirmed in the R9 runtime capture).
+            // Render a bounded, static schematic-only bubble marker, not
+            // persistent particles spawned into the real Minecraft world.
+            if (layered.block->getTypeName() == "minecraft:bubble_column"
+                && bucket == RenderBucket::Blend
+                && tessellator.mMeshData->mPositions.get().size() == firstPosition
+                && bubbleGlyphCellsBuilt < 128U) {
+                auto const whiteBlock =
+                    Block::tryGetFromRegistry(HashedString("minecraft:white_concrete"));
+                auto const* whiteGraphics = whiteBlock
+                    ? BlockGraphics::getForBlock(*whiteBlock) : nullptr;
+                if (whiteGraphics) {
+                    auto const& whiteUv = whiteGraphics->getTexture(0, 0);
+                    auto const u = (whiteUv._u0 + whiteUv._u1) * .5F;
+                    auto const v = (whiteUv._v0 + whiteUv._v1) * .5F;
+                    if (std::isfinite(u) && std::isfinite(v)
+                        && whiteUv._u1 > whiteUv._u0
+                        && whiteUv._v1 > whiteUv._v0) {
+                        bool dragDown{};
+                        for (auto const& [name, tag] :
+                             layered.block->mSerializationId.get()) {
+                            if (name != "states" || !tag.hold<::CompoundTag>())
+                                continue;
+                            for (auto const& [key, state] : tag.get<::CompoundTag>()) {
+                                if (key == "drag_down"
+                                    && state.getId() == ::Tag::Type::Byte) {
+                                    dragDown = state.get<::ByteTag>().data != 0;
+                                }
+                            }
+                        }
+                        setColorAbgr(tessellator, 0xD9F7FCFFU);
+                        emitBubbleColumnGlyph(
+                            {
+                                static_cast<float>(layered.position.x),
+                                static_cast<float>(layered.position.y),
+                                static_cast<float>(layered.position.z)
+                            },
+                            dragDown,
+                            [&](BubbleGlyphQuad const& quad) {
+                                for (auto const& pt : quad) {
+                                    tessellator.tex2({u, v});
+                                    tessellator.vertex(pt[0], pt[1], pt[2]);
+                                }
+                            }
+                        );
+                        ++bubbleGlyphCellsBuilt;
+                        if (!gBubbleGlyphR10Logged.exchange(
+                                true, std::memory_order_acq_rel)) {
+                            logger().info(
+                                "LHoloBubbleR10 enabled=1 appearance=static_schematic_glyph "
+                                "nativeBodyVertices=0 glyphVerticesPerCell={} "
+                                "dragDown={} whiteTerrainAtlas=1 worldParticlesSpawned=0",
+                                BubbleGlyphVerticesPerCell, dragDown ? 1 : 0
+                            );
+                        }
+                    }
+                } else if (!gBubbleGlyphR10MissingTextureLogged.exchange(
+                               true, std::memory_order_acq_rel)) {
+                    logger().warn(
+                        "LHoloBubbleR10 enabled=0 reason=white_concrete_atlas_unavailable"
+                    );
+                }
+            }
             // Several legacy shape tessellators (notably doors) return
             // false after successfully appending vertices. The return
             // value describes the dispatch path, not mesh production.
@@ -717,21 +811,35 @@ void buildProjectionSection(
                 auto& composite =
                     compositeBodyOutcomes[layered.compositeOutcomeIndex];
                 composite.vertices += verticesAdded;
-                // R9 extends R8's verified native-face path to opaque slab
-                // models and opaque trapdoors only. Alpha-test trapdoors have
-                // texture cutouts which cannot be inferred from a quad outline:
-                // they must retain the original water stream (fail closed).
-                // No block-state/rotation geometry is guessed.
+                // R10: opaque slabs/stairs keep R8 native clipping. Alpha
+                // trapdoors have texture holes; keep their liquid quad and
+                // use only the native body face to offset near-conflicting
+                // water geometry slightly behind the cutout pixel depth.
+                auto const family = waterloggedClipCandidate(
+                    layered.block->getTypeName()
+                );
                 auto const clipFamily = waterloggedSafeClipFamily(
                     layered.block->getTypeName(),
                     layered.bucket == RenderBucket::Opaque
                 );
-                if (geometryAdded && clipFamily != WaterloggedClipFamily::None
+                auto const cutoutTrapdoor = family == WaterloggedClipFamily::Trapdoor
+                    && (layered.bucket == RenderBucket::AlphaOneSided
+                        || layered.bucket == RenderBucket::Alpha);
+                if (geometryAdded && (clipFamily != WaterloggedClipFamily::None
+                                      || cutoutTrapdoor)
                     && verticesAdded % 4U == 0U && verticesAdded <= 512U
                     && tessellator.mMeshData->mMode == mce::PrimitiveMode::QuadList) {
                     auto& coverage = bodyFaceCoverage[layered.compositeOutcomeIndex];
-                    coverage.family = clipFamily;
-                    auto& faces = coverage.solidFaces;
+                    if (!cutoutTrapdoor) coverage.family = clipFamily;
+                    if (cutoutTrapdoor) {
+                        coverage.cellCenter = {
+                            static_cast<float>(layered.position.x) + 0.5F,
+                            static_cast<float>(layered.position.y) + 0.5F,
+                            static_cast<float>(layered.position.z) + 0.5F
+                        };
+                    }
+                    auto& faces = cutoutTrapdoor
+                        ? coverage.cutoutFaces : coverage.solidFaces;
                     auto const& vertices = tessellator.mMeshData->mPositions.get();
                     for (std::size_t begin = firstPosition;
                          begin + 4U <= vertices.size()
@@ -746,19 +854,17 @@ void buildProjectionSection(
                             faces.push_back(*rect);
                         }
                     }
-                } else if (geometryAdded && clipFamily == WaterloggedClipFamily::None
-                    && waterloggedClipCandidate(layered.block->getTypeName())
-                        == WaterloggedClipFamily::Trapdoor
-                    && gWaterloggedR9TrapdoorDeferredLogCount.fetch_add(
-                        1U, std::memory_order_acq_rel
-                    ) < 4U) {
-                    logger().info(
-                        "LHoloWaterloggedR9 trapdoorClippingDeferred=1 body={} "
-                        "layer={} bucket={} reason=non_opaque_or_unsupported",
-                        layered.block->getTypeName(),
-                        static_cast<unsigned int>(layered.layer),
-                        static_cast<unsigned int>(layered.bucket)
-                    );
+                    if (cutoutTrapdoor
+                        && gWaterloggedR9TrapdoorDeferredLogCount.fetch_add(
+                            1U, std::memory_order_acq_rel
+                        ) < 4U) {
+                        logger().info(
+                            "LHoloWaterloggedR10 nativeCutoutFaces={} "
+                            "body={} layer={} noTextureAlphaCull=1",
+                            faces.size(), layered.block->getTypeName(),
+                            static_cast<unsigned int>(layered.layer)
+                        );
+                    }
                 }
                 auto const logIndex = gSubmergedBodyLogCount.fetch_add(
                     1U,
@@ -1600,6 +1706,13 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
             r8.stairClippedQuads, r8.slabClippedQuads,
             r8.trapdoorClippedQuads, r8.beforeVertices, r8.afterVertices
         );
+        if (r8.cutoutInsetWaterQuads != 0U) {
+            logger().info(
+                "LHoloWaterloggedR10 insetCutoutWaterQuads={} insetDistance={} "
+                "waterQuadsRemovedByCutout=0 preserveAlphaTestHoles=1",
+                r8.cutoutInsetWaterQuads, WaterloggedCutoutInsetDistance
+            );
+        }
     }
 
     auto& meshData = tessellator.mMeshData.get();
