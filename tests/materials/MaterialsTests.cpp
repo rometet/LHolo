@@ -1,4 +1,5 @@
 #include "structure/StructureUiState.h"
+#include "structure/MaterialGrabRules.h"
 #include "ui/MaterialsPage.h"
 #include "ui/MenuPages.h"
 #include "i18n/LanguageStore.h"
@@ -23,6 +24,21 @@ std::vector<MaterialRequirement> fixture() {
         {"水",{},"minecraft:water",{},8,64,"liquid:water|item="}};
 }
 std::string read(std::filesystem::path const& path) {std::ifstream stream(path,std::ios::binary);return {std::istreambuf_iterator<char>(stream),{}};}
+void testMaterialGrabRules() {
+    auto req=fixture();
+    req.push_back({"double stone",{},"minecraft:stone_stairs","minecraft:stone",32,64,"extra"});
+    auto budget=computeGrabBudget(req,{{"minecraft:stone",100},{"item_a",12},{"item_b",64}},true);
+    check(budget.size()==2 && budget.at("minecraft:stone")==60
+        && budget.at("item_a")==20,"aggregate duplicated item identities then subtract held amounts");
+    check(grabAmountForSlot(budget,"minecraft:stone",64)==60,"exact partial stack");
+    check(grabAmountForSlot(budget,"item_a",64)==20,"different requirement only");
+    check(grabAmountForSlot(budget,"item_b",64)==0,"already met never extracted");
+    check(grabAmountForSlot(budget,"minecraft:stone",1)==1,"single item count cap");
+    check(grabAmountForSlot(budget,"minecraft:stone",0)==0,"empty source skipped");
+    check(computeGrabBudget(req,{},false).empty(),"malformed carried NBT fails closed");
+    req.push_back({"unknown",{},"no-item","",999,64,"unknown"});
+    check(!computeGrabBudget(req,{},true).contains(""),"unknown item never collected");
+}
 void testState() {
     auto& state=StructureUiState::getInstance();state.clearMaterials();auto const token=state.materialListToken();
     check(state.publishMaterialList(fixture(),{64,32,4,std::nullopt},101,"fixture.mcstructure",token),"initial publication");
@@ -150,6 +166,6 @@ void testUi() {
 }
 int main(int argc,char** argv) {
     try {lholo::i18n::initLanguageStore();auto dir=std::filesystem::path(argc>1?argv[1]:"build/material-fixtures");std::filesystem::create_directories(dir);
-        testState();testExport(dir);testUi();std::printf("Materials tests: %zu checks PASS\n",checks);return 0;
+        testMaterialGrabRules();testState();testExport(dir);testUi();std::printf("Materials tests: %zu checks PASS\n",checks);return 0;
     }catch(std::exception const& error){std::fprintf(stderr,"Materials failure after %zu checks: %s\n",checks,error.what());return 1;}
 }

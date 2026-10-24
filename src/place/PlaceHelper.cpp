@@ -24,6 +24,7 @@
 #include "place/PlacementExecutor.h"
 #include "place/PlacementState.h"
 #include "place/PlacementRotationDelivery.h"
+#include "structure/MaterialGrabber.h"
 #include "place/EasyPlaceTelemetry.h"
 
 #include "plugin/LHolo.h"
@@ -73,6 +74,7 @@ struct PlaceHookStatus {
     bool manualStop{};
     bool manualBuild{};
     bool rotation{};
+    bool materialGrab{};
 };
 
 PlaceHookStatus gHookStatus;
@@ -474,6 +476,8 @@ bool installHook() {
     gPlacementHooksReady.store(true, std::memory_order_release);
     gHookStatus.rotation=detail::installRotationDeliveryHook();
     if (!gHookStatus.rotation) logger().warn("Placement rotation delivery unavailable; retaining current-facing placement");
+    gHookStatus.materialGrab=structure::detail::installMaterialGrabberHook();
+    if (!gHookStatus.materialGrab) logger().warn("Material Grabber hook unavailable; ordinary containers unaffected");
     return true;
 }
 
@@ -485,6 +489,7 @@ bool uninstallHook() {
         if (unhook()) installed = false;
         else ok = false;
     };
+    remove(gHookStatus.materialGrab, [] { return structure::detail::uninstallMaterialGrabberHook(); });
     remove(gHookStatus.rotation, [] { return detail::uninstallRotationDeliveryHook(); });
     remove(gHookStatus.manualBuild, [] { return GameModeBuildBlockHook::unhook(); });
     remove(gHookStatus.manualStop, [] { return GameModeStopBuildHook::unhook(); });
