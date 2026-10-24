@@ -1,4 +1,5 @@
 #include "place/PlacementRotationDelivery.h"
+#include "place/ExternalRotationDeliveryPolicy.h"
 #include "place/LocalPlacementRotation.h"
 #include "place/FlexiblePlacementBridge.h"
 #include "place/PlacementState.h"
@@ -69,10 +70,38 @@ struct PendingRotation {
     std::uint32_t flags{};
     float maxPickRange{};
     bool airTarget{};
+    ExternalRotationWarmup warmup{};
 };
 std::mutex pendingMutex;
 std::optional<PendingRotation> pending;
 std::atomic_bool available{};
+
+struct ScopedExternalInputRotation {
+    PlayerAuthInputPacket& input;
+    Vec2 rot, interact, move, analog, raw;
+    Vec3 camera;
+    float head;
+    ScopedExternalInputRotation(PlayerAuthInputPacket& p,float pitch,float yaw)
+        : input(p),rot(p.mRot.get()),interact(p.mInteractRotation.get()),
+          move(p.mMove.get()),analog(p.mAnalogMoveVector.get()),raw(p.mRawMoveVector.get()),
+          camera(p.mCameraOrientation.get()),head(p.mYHeadRot) {
+        auto remap=[&](Vec2 v) {
+            auto r=preserveWorldMove(v.x,v.y,rot.y,yaw);return Vec2{r.x,r.y};
+        };
+        input.mMove.get()=remap(move);input.mAnalogMoveVector.get()=remap(analog);
+        input.mRawMoveVector.get()=remap(raw);
+        input.mRot.get()={pitch,yaw};input.mInteractRotation.get()={pitch,yaw};
+        input.mYHeadRot=yaw;
+        float const pRad=pitch*0.01745329251994329577F,yRad=yaw*0.01745329251994329577F;
+        input.mCameraOrientation.get()={-std::sin(yRad)*std::cos(pRad),-std::sin(pRad),std::cos(yRad)*std::cos(pRad)};
+    }
+    ~ScopedExternalInputRotation() {
+        input.mRot.get()=rot;input.mInteractRotation.get()=interact;input.mYHeadRot=head;
+        input.mCameraOrientation.get()=camera;input.mMove.get()=move;
+        input.mAnalogMoveVector.get()=analog;input.mRawMoveVector.get()=raw;
+    }
+    ScopedExternalInputRotation(ScopedExternalInputRotation const&)=delete;
+};
 
 std::int64_t bridgeCellKey(BlockPos const& p) noexcept {
     auto const x = static_cast<std::uint64_t>(static_cast<std::int64_t>(p.x)) & 0x3FFFFFFULL;
@@ -231,7 +260,10 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
     if (input.mItemUseTransaction.get() || input.mItemStackRequest.get()
         || input.mInputData.get().contains(Input::PerformItemInteraction)
         || input.mInputData.get().contains(Input::PerformItemStackRequest)
-        || input.mInputData.get().contains(Input::PerformBlockActions)) { origin(packet);return; }
+        || input.mInputData.get().contains(Input::PerformBlockActions)) {
+        { std::lock_guard lock(pendingMutex); if (pending && pending->external) pending->warmup.reset(); }
+        origin(packet);return;
+    }
     std::optional<PendingRotation> request;
     {
         std::lock_guard lock(pendingMutex);
@@ -252,6 +284,27 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
             valid,unsigned(request->face),request->yaw,input.mRot.get().y,
             request->cell.x,request->cell.y,request->cell.z);
     if (!valid) { origin(packet);return; }
+    std::optional<ScopedExternalInputRotation> externalRotation;
+    if (request->external && request->requireNativeRotationSync) {
+        auto const tick=static_cast<std::uint64_t>(input.mClientTick.get().mValue);
+        bool const placeNow=request->warmup.ready(tick);
+        externalRotation.emplace(input,request->pitch,request->yaw);
+        if (!placeNow) {
+            auto const forwarded=app::invokeNativeCallback([&] { origin(packet); },
+                [](char const* reason) noexcept { app::reportNativeCallbackFailure("flexible rotation pre-roll",reason); });
+            if (forwarded) {
+                request->warmup.forwardedPrime(tick);
+                traceFlexibleDelivery("BDS_PRIME tick=%llu primes=%u yaw=%.2f head=%.2f no-placement=1",
+                    static_cast<unsigned long long>(tick),request->warmup.primes,request->yaw,float(input.mYHeadRot));
+                std::lock_guard lock(pendingMutex);
+                if (!pending && GetTickCount64()<request->expires
+                    && request->epoch==PlacementState::getInstance().manualInputEpoch()) pending=std::move(request);
+            }
+            return;
+        }
+        traceFlexibleDelivery("BDS_PLACE tick=%llu primes=%u yaw=%.2f head=%.2f",
+            static_cast<unsigned long long>(tick),request->warmup.primes,request->yaw,float(input.mYHeadRot));
+    }
     auto const savedRotation=input.mInteractRotation.get();
     auto const savedPlayerRotation=input.mRot.get();
     auto const savedFlags=input.mInputData.get();
@@ -260,12 +313,11 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         auto& payload=*request->payload;
         auto const* tx=std::get_if<ItemUseInventoryTransaction>(&payload.mVariantTransaction.get());
         if (!tx) return;
-        if (request->external && request->requireNativeRotationSync
-            && !rememberLocalPlacementRotation(*request->player,request->cell,*tx,
-                request->pitch,request->yaw,request->ownerToken,request->ownerEpoch)) {
-            traceFlexibleDelivery("local-receipt-full-or-unavailable: placement not sent");
-            return;
-        }
+        // Flexible placement now uses genuine rotation-only input ticks before
+        // this transaction. Do not register an integrated-server yaw override:
+        // the same protocol path must work when the server is a separate BDS.
+        if (request->external && request->requireNativeRotationSync)
+            traceFlexibleDelivery("BDS_PROTOCOL_ONLY local-receiver-override=0 primes=%u",request->warmup.primes);
         // Preserve native legacy request ID / slot actions / transaction fields.
         input.mItemUseTransaction=std::make_unique<PackedItemUseLegacyInventoryTransaction>(
             PackedItemUseLegacyInventoryTransaction{payload.mLegacyRequestId.get(),
@@ -529,7 +581,7 @@ bool queueExternalRotationPlacement(LocalPlayer& player, BlockPos const& cell,
     if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return false;
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
-    pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+250,
+    pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+500,
         cell,bridgeCellKey(cell),targetBlockId,slot,item,pitch,yaw,
         (flags & lholo::flexible_placement_abi::RequestRotationSync) != 0,std::move(payload),
         true,support,targetBlockId,face,ownerToken,ownerEpoch,worldGeneration,dimension,flags,
