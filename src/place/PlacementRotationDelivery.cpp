@@ -1,4 +1,5 @@
 #include "place/PlacementRotationDelivery.h"
+#include "place/LocalPlacementRotation.h"
 #include "place/FlexiblePlacementBridge.h"
 #include "place/PlacementState.h"
 #include "place/EasyPlaceTelemetry.h"
@@ -27,12 +28,24 @@
 #include <Windows.h>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdarg>
 #include <mutex>
 #include <optional>
 #include <thread>
 
 namespace lholo::place::detail {
 namespace {
+// Bounded per-session diagnostic. Never runs on the inactive frame path.
+void traceFlexibleDelivery(char const* format, ...) noexcept {
+    static std::atomic_uint records{};
+    if (records.fetch_add(1,std::memory_order_relaxed) >= 512) return;
+    auto* file = std::fopen("./mods/LHolo/flexible-placement-trace.log", "ab");
+    if (!file) return;
+    std::fprintf(file,"%llu ",GetTickCount64());
+    va_list args; va_start(args,format); std::vfprintf(file,format,args); va_end(args);
+    std::fputc('\n',file); std::fclose(file);
+}
 struct PendingRotation {
     LocalPlayer* player;
     std::thread::id thread;
@@ -193,8 +206,20 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
 LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
     LoopbackPacketSender,&LoopbackPacketSender::$sendToServer,void,Packet& packet) {
     app::hook_lifecycle::DetourGuard guard;
-    if (!guard || !available.load(std::memory_order_acquire)
-        || packet.getId()!=MinecraftPacketIds::PlayerAuthInputPacket) { origin(packet);return; }
+    if (!guard || !available.load(std::memory_order_acquire)) { origin(packet); return; }
+    {
+        std::lock_guard lock(pendingMutex);
+        if (pending && pending->external) {
+            static std::uint64_t tracedExpires{};
+            static unsigned observed{};
+            if (tracedExpires != pending->expires) { tracedExpires=pending->expires; observed=0; }
+            if (observed++ < 4)
+                traceFlexibleDelivery("packet id=%u external=1 threadMatch=%d expiresIn=%lld", unsigned(packet.getId()),
+                    pending->thread==std::this_thread::get_id(),
+                    static_cast<long long>(pending->expires)-static_cast<long long>(GetTickCount64()));
+        }
+    }
+    if (packet.getId()!=MinecraftPacketIds::PlayerAuthInputPacket) { origin(packet);return; }
     auto client=ll::service::getClientInstance();
     if (!client || &client->getPacketSender()!=static_cast<PacketSender*>(this)) { origin(packet);return; }
     // Another admitted Range candidate may have used the legacy path since
@@ -222,6 +247,10 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
     bool valid=false;
     app::invokeNativeCallback([&] { valid=stillValid(*request,*client); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement validation",reason); });
+    if (request->external)
+        traceFlexibleDelivery("validate=%d face=%u requestedYaw=%.2f nativeYaw=%.2f cell=%d,%d,%d",
+            valid,unsigned(request->face),request->yaw,input.mRot.get().y,
+            request->cell.x,request->cell.y,request->cell.z);
     if (!valid) { origin(packet);return; }
     auto const savedRotation=input.mInteractRotation.get();
     auto const savedPlayerRotation=input.mRot.get();
@@ -231,6 +260,12 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         auto& payload=*request->payload;
         auto const* tx=std::get_if<ItemUseInventoryTransaction>(&payload.mVariantTransaction.get());
         if (!tx) return;
+        if (request->external && request->requireNativeRotationSync
+            && !rememberLocalPlacementRotation(*request->player,request->cell,*tx,
+                request->pitch,request->yaw,request->ownerToken,request->ownerEpoch)) {
+            traceFlexibleDelivery("local-receipt-full-or-unavailable: placement not sent");
+            return;
+        }
         // Preserve native legacy request ID / slot actions / transaction fields.
         input.mItemUseTransaction=std::make_unique<PackedItemUseLegacyInventoryTransaction>(
             PackedItemUseLegacyInventoryTransaction{payload.mLegacyRequestId.get(),
@@ -245,6 +280,9 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
     },[](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement attach",reason); });
     // Forward one fresh native input: its tick, movement, camera and main/head
     // rotations are unchanged. No invented movement packet or duplicate tick.
+    if (request->external)
+        traceFlexibleDelivery("forward attached=%d packetYaw=%.2f interactYaw=%.2f localYaw=%.2f",
+            attached,input.mRot.get().y,input.mInteractRotation.get().y,request->player->getRotation().y);
     auto const forwarded=app::invokeNativeCallback([&] { origin(packet); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement forward",reason); });
     if (attached) input.mItemUseTransaction.reset();
@@ -297,6 +335,11 @@ lholo_flexible_placement_v2_get_status() noexcept {
         if (state.manualMode()) result.statusBits |= ManualOwnsPlacement;
         if (state.rangeEnabled()) result.statusBits |= RangeOwnsPlacement;
         std::lock_guard lock(pendingMutex);
+        if (pending && pending->external
+            && (GetTickCount64() >= pending->expires || pending->epoch != state.manualInputEpoch())) {
+            traceFlexibleDelivery("retire-expired pending request (was falsely reported busy)");
+            pending.reset();
+        }
         if (pending && pending->external) {
             result.ownerToken = pending->ownerToken;
             result.ownerEpoch = pending->ownerEpoch;
@@ -491,10 +534,14 @@ bool queueExternalRotationPlacement(LocalPlayer& player, BlockPos const& cell,
         (flags & lholo::flexible_placement_abi::RequestRotationSync) != 0,std::move(payload),
         true,support,targetBlockId,face,ownerToken,ownerEpoch,worldGeneration,dimension,flags,
         maxPickRange,airTarget});
+    traceFlexibleDelivery("queue face=%u yaw=%.2f pitch=%.2f cell=%d,%d,%d rotSync=%d",
+        unsigned(face),yaw,pitch,cell.x,cell.y,cell.z,
+        (flags & lholo::flexible_placement_abi::RequestRotationSync)!=0);
     return true;
 }
 
 bool cancelExternalRotationPlacement(std::uint64_t ownerToken,std::uint64_t ownerEpoch) noexcept {
+    cancelLocalPlacementRotations(ownerToken,ownerEpoch);
     std::lock_guard lock(pendingMutex);
     if (!pending || !pending->external || pending->ownerToken != ownerToken
         || pending->ownerEpoch != ownerEpoch) return false;
@@ -503,12 +550,15 @@ bool cancelExternalRotationPlacement(std::uint64_t ownerToken,std::uint64_t owne
 }
 
 void cancelAllExternalRotationPlacements() noexcept {
+    cancelLocalPlacementRotations();
     std::lock_guard lock(pendingMutex);
     if (pending && pending->external) pending.reset();
 }
 
 bool installRotationDeliveryHook() {
+    if (!installLocalPlacementRotationHook()) return false;
     auto const ok=RotationAuthInputHook::hook()==0;
+    if (!ok) uninstallLocalPlacementRotationHook();
     available.store(ok,std::memory_order_release);return ok;
 }
 bool uninstallRotationDeliveryHook() {
@@ -517,6 +567,8 @@ bool uninstallRotationDeliveryHook() {
     // selective external cancellation API above is the only path that leaves
     // LHolo's own pending request untouched.
     { std::lock_guard lock(pendingMutex); pending.reset(); }
-    return RotationAuthInputHook::unhook();
+    auto const sendRemoved=RotationAuthInputHook::unhook();
+    auto const receiveRemoved=uninstallLocalPlacementRotationHook();
+    return sendRemoved && receiveRemoved;
 }
 }
