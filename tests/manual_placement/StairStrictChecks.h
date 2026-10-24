@@ -34,7 +34,7 @@ inline void runStairStrictChecks(Player& player) {
                         "R18 stair requires native sync and non-air support");
                     auto const queued=placeBlock(player,plan,0,{1,0,64,101});
                     check(queued==detail::PlacementDispatchResult::Queued
-                        && detail::rotatedQueueStrict && sent.empty(),
+                        && detail::rotatedQueueStrict && detail::rotatedQueueStair && sent.empty(),
                         "R18 correct stair is queued, not legacy-sent");
                     check(detail::rotatedQueueYaw==(wantDir==3?-90.F:wantDir*90.F),
                         "R19 yaw override matches exact native predictor direction");
@@ -65,7 +65,7 @@ inline void runStairStrictChecks(Player& player) {
     fixtureTime+=50;
     tickEasyPlaceImpl(player);
     check(detail::rotatedQueueCalls==1 && detail::rotatedQueueStrict
-        && sent.empty(),
+        && detail::rotatedQueueStair && sent.empty(),
         "R18 stair queues only after hotbar already selected");
 
     std::printf("STAIRS_R18_STRICT checks=%d accepted=%d refused=%d failures=%d "

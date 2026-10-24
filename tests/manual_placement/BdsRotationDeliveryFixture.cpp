@@ -183,5 +183,22 @@ int main(){
      std::make_unique<ItemUseInventoryTransaction>(),true),"EasyPlace aligned admission");
  send(30);check(forwarded.back().attached&&!pending&&internalRotationReceipts==1,
      "EasyPlace aligned native placement avoids warmup");
+ // Stairs must send two fresh native input ticks even if yaw looks aligned.
+ reset();state.setEnabled(true);
+ check(queueRotationPlacement(player,BlockPos{0,0,0},44,20,0,player.inventory.items[0],17,90,
+     std::make_unique<ItemUseInventoryTransaction>(),true,true),"aligned stair queue");
+ check(pending && pending->strictStair,"stair flag retained");
+ send(40);check(!forwarded.back().attached && pending && pending->warmup.primes==1,"stair first tick primes");
+ send(41);check(!forwarded.back().attached && pending && pending->warmup.primes==2,"stair second tick primes");
+ send(42);check(forwarded.back().attached && !pending && internalRotationReceipts==1,"stair aligned third tick applies");
+ reset();state.setEnabled(true);
+ check(queueRotationPlacement(player,BlockPos{0,0,0},45,20,0,player.inventory.items[0],17,180,
+     std::make_unique<ItemUseInventoryTransaction>(),true,true),"off-axis stair queue");
+ send(50);send(51);
+ {PlayerAuthInputPacket p;p.mClientTick.get().mValue=52;
+ p.mInputData.get().insert(PlayerAuthInputPacketPayload::InputData::PerformBlockActions);hook.run(p);}
+ check(pending && pending->warmup.primes==0 && !forwarded.back().attached,"native action resets stair primes");
+ send(53);send(54);send(55);
+ check(forwarded.back().attached && !pending && internalRotationReceipts==1,"stair sends after reset");
  std::printf("ACTUAL_DELIVERY_BODY checks=%d failures=%d; SDK/network boundary doubles, real BDS test separate\n",checks,failures);return failures?1:0;
 }

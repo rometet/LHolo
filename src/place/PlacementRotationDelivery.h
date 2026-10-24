@@ -6,7 +6,8 @@ namespace lholo::place::detail {
 // Admission is not a send/ack. The caller leaves its Manual request pending.
 [[nodiscard]] bool queueRotationPlacement(LocalPlayer&,BlockPos const& cell,std::int64_t cellKey,
     unsigned ghostId,int slot,ItemStack const&,float pitch,float yaw,
-    std::unique_ptr<ComplexInventoryTransaction>,bool requireNativeRotationSync=false);
+    std::unique_ptr<ComplexInventoryTransaction>,bool requireNativeRotationSync=false,
+    bool requireStairWarmup=false);
 [[nodiscard]] bool queueExternalRotationPlacement(LocalPlayer&,BlockPos const& cell,
     BlockPos const& support,unsigned targetBlockId,unsigned char face,int slot,ItemStack const&,
     float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,std::uint64_t ownerToken,

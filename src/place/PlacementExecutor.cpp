@@ -597,7 +597,8 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
         if (detail::queueRotationPlacement(
                 player,target.cell,packBlockPos(target.cell),
                 target.block->mNetworkId,slot,item,angles.pitch,angles.yaw,
-                std::move(transactionBase),target.requireNativeRotationSync)) {
+                std::move(transactionBase),target.requireNativeRotationSync,
+                target.block->getTypeName().ends_with("_stairs"))) {
             telemetry::count(telemetry::Event::NativeQueued);
             if(target.requireNativeRotationSync)
                 telemetry::count(telemetry::Event::StairQueued);

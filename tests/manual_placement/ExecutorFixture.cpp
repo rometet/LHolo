@@ -285,12 +285,12 @@ std::vector<i18n::TextKey> hints;
 void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
-int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};bool rotatedQueueStrict{};
+int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};bool rotatedQueueStrict{};bool rotatedQueueStair{};
 bool queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
     ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,
-    bool mustMatchNative) {
+    bool mustMatchNative,bool mustPrimeStair) {
     ++rotatedQueueCalls;rotatedQueuePitch=pitch;rotatedQueueYaw=yaw;
-    rotatedQueueStrict=mustMatchNative;
+    rotatedQueueStrict=mustMatchNative;rotatedQueueStair=mustPrimeStair;
     return true;
 }
 enum class ManualTargetStatus { None,Ready,MissingMaterial };
@@ -395,7 +395,7 @@ void reset(Player& p) {
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
-    detail::rotatedQueueYaw=0;detail::rotatedQueueStrict=false;
+    detail::rotatedQueueYaw=0;detail::rotatedQueueStrict=false;detail::rotatedQueueStair=false;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
 #include "DeliveryChecks.h"

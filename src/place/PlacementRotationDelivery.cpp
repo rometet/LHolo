@@ -71,6 +71,7 @@ struct PendingRotation {
     float maxPickRange{};
     bool airTarget{};
     ExternalRotationWarmup warmup{};
+    bool strictStair{};
 };
 std::mutex pendingMutex;
 std::optional<PendingRotation> pending;
@@ -261,7 +262,7 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         || input.mInputData.get().contains(Input::PerformItemInteraction)
         || input.mInputData.get().contains(Input::PerformItemStackRequest)
         || input.mInputData.get().contains(Input::PerformBlockActions)) {
-        { std::lock_guard lock(pendingMutex); if (pending && pending->external) pending->warmup.reset(); }
+        { std::lock_guard lock(pendingMutex); if (pending && pending->requireNativeRotationSync) pending->warmup.reset(); }
         origin(packet);return;
     }
     std::optional<PendingRotation> request;
@@ -289,7 +290,10 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
     // same server-authoritative rotation protocol. The first two native input
     // ticks establish a different facing before a real item-use is attached.
     // Already-aligned LHolo placements use the current native tick directly.
-    bool const needsWarmup=needsOrientationWarmup(request->external,
+    // A just-turned camera can already match the desired yaw on THIS native
+    // packet while the server still has the previous yaw. Always pre-roll
+    // stairs, including when the local packet's rotations appear aligned.
+    bool const needsWarmup=request->strictStair || needsOrientationWarmup(request->external,
         request->requireNativeRotationSync,input.mRot.get().x,input.mRot.get().y,
         request->pitch,request->yaw);
     std::optional<ScopedExternalInputRotation> externalRotation;
@@ -531,7 +535,7 @@ std::uint32_t lholo_flexible_placement_v2_cancel(
 bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_t cellKey,
     unsigned ghostId,int slot,ItemStack const& item,float pitch,float yaw,
     std::unique_ptr<ComplexInventoryTransaction> tx,
-    bool requireNativeRotationSync) {
+    bool requireNativeRotationSync,bool requireStairWarmup) {
     // Both angles must be validated before borrowing any native packet state.
     // Pitch is the Bedrock interaction pitch in [-90,90]; do not set camera,
     // body/head yaw or invent a second network tick.
@@ -550,6 +554,7 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
     pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+500,
         cell,cellKey,ghostId,slot,item,pitch,yaw,requireNativeRotationSync,
         std::move(payload)});
+    pending->strictStair=requireStairWarmup && requireNativeRotationSync;
     return true;
 }
 
