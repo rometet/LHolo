@@ -1,11 +1,14 @@
 // One-shot, opt-in material grabbing for the native Bedrock container GUI.
 #include "structure/MaterialGrabber.h"
 #include "structure/MaterialGrabRules.h"
+#include "structure/InvisibleContainerRenderContext.h"
 #include "structure/InventoryContents.h"
 #include "structure/StructureUiState.h"
 #include "structure/StructureSession.h"
 #include "app/HookLifecycle.h"
 #include "app/NativeCallbackBoundary.h"
+#include "plugin/LHolo.h"
+#include "ll/api/mod/NativeMod.h"
 #include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/gui/screens/controllers/ContainerScreenController.h"
@@ -43,7 +46,7 @@ struct TransferReceipt {
 };
 struct GrabSession {
     ContainerScreenController const* screen{};
-    bool armed{}, finished{}, closeIssued{};
+    bool armed{}, finished{}, closeIssued{}, firstTickLogged{};
     std::uint64_t openedAt{}, nextAction{}, closeAt{};
     std::optional<TransferReceipt> pending;
 };
@@ -136,6 +139,7 @@ void collectOne(ContainerScreenController& screen) {
             if(!amount)continue;
             int const previous=inventory.contains(id)?inventory.at(id):0;
             int const before=static_cast<int>(stack.mCount);
+            LHolo::getInstance().getSelf().getLogger().info("MATERIAL_GRAB_SEND id={} amount={} slot={}",id,amount,slot);
             screen._handleAutoPlace(amount,collection,slot);
             session.pending=TransferReceipt{
                 std::move(id),collection,slot,before,previous,
@@ -159,8 +163,9 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabOpenHook,ll::memory::HookPriority::Low,
     auto const loaded=StructureSession::getInstance().loaded();
     bool const armed=altPressed() && loaded && hud && hud->ready
         && !hud->requirements.empty();
-    session=GrabSession{this,armed,false,false,GetTickCount64(),
+    session=GrabSession{this,armed,false,false,false,GetTickCount64(),
         GetTickCount64()+150,0,{}};
+    LHolo::getInstance().getSelf().getLogger().info("MATERIAL_GRAB_OPEN alt={} armed={}",altPressed(),armed);
     if(armed)
         suppressedScreen.store(static_cast<ScreenController const*>(this),
             std::memory_order_release);
@@ -171,6 +176,10 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabTickHook,ll::memory::HookPriority::Low,
     auto native=origin();
     if(!guard || !available.load(std::memory_order_acquire))return native;
     if(session.screen!=this || !session.armed)return native;
+    if(!session.firstTickLogged) {
+        session.firstTickLogged=true;
+        LHolo::getInstance().getSelf().getLogger().info("MATERIAL_GRAB_FIRST_TICK");
+    }
     if(!session.finished) {
         app::invokeNativeCallback([&] {collectOne(*this);},[](char const* reason) noexcept {
             app::reportNativeCallbackFailure("material grab from container",reason);
@@ -179,6 +188,7 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabTickHook,ll::memory::HookPriority::Low,
     if(session.finished && !session.closeIssued) {
         session.closeIssued=true;
         session.closeAt=GetTickCount64();
+        LHolo::getInstance().getSelf().getLogger().info("MATERIAL_GRAB_CLOSE_REQUEST");
         // Ask Bedrock to close both the native UI and the server container.
         // Never destroy a screen or manipulate the stack directly in its tick.
         auto client=ll::service::getClientInstance();
@@ -200,8 +210,14 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabRenderHook,ll::memory::HookPriority::Low,
     ScreenView,&ScreenView::render,void,UIRenderContext& renderContext) {
     app::hook_lifecycle::DetourGuard guard;
     if(guard && available.load(std::memory_order_acquire)
-        && mController.get()==suppressedScreen.load(std::memory_order_acquire))
+        && mController.get()==suppressedScreen.load(std::memory_order_acquire)) {
+        // Running ScreenView::render is mandatory: the UI pipeline advances
+        // container callbacks and slot responses here. Do not skip it.
+        // The proxy drops draw calls only, not model/controller updates.
+        InvisibleContainerRenderContext displaySink(renderContext);
+        origin(displaySink);
         return;
+    }
     origin(renderContext);
 }
 LL_TYPE_INSTANCE_HOOK(MaterialGrabLeaveHook,ll::memory::HookPriority::Low,

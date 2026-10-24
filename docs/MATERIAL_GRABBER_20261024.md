@@ -12,3 +12,9 @@
 ## Hidden-GUI handling
 
 The ScreenView::render hook suppresses only the active material-grab session by exact screen-controller identity. It does not suppress other vanilla screens. The native controller still ticks and validates server-authoritative transfer receipts; the screen closes after completion. If a GUI controller never initializes or a close request fails, visibility is restored rather than leaving a stuck hidden menu. This behavior is not yet verified by live play.
+
+## R2: keep native UI updates while hiding the picture
+
+A live test of the first hidden-GUI build confirmed that the window disappeared but the player was left in a container screen and item transfer did not complete. The first implementation returned before the real `ScreenView::render` and may therefore have skipped native screen/update work. R2 no longer skips it: it passes an `InvisibleContainerRenderContext` to the normal render pipeline. The adapter preserves model/update/measurement operations and discards display commands only. Normal container validation, item requests, and close handling stay intact.
+
+R2 logs bounded `MATERIAL_GRAB_OPEN`, `MATERIAL_GRAB_FIRST_TICK`, `MATERIAL_GRAB_SEND`, and `MATERIAL_GRAB_CLOSE_REQUEST` events for diagnosis. The first live test should confirm Alt+right-click obtains materials, suppresses all chest visuals, and exits back to normal movement with a visible hotbar. If not, inspect the fresh launcher `logs/latest.log` before additional changes. The binary was compiled and material logic tests passed, but **R2 is not yet verified in live gameplay**.
