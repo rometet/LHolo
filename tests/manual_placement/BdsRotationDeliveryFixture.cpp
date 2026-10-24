@@ -116,7 +116,8 @@ void reportNativeCallbackFailure(char const*,char const*){}
 struct Forward {bool attached{};Vec2 rotation{},main{};float head{},camera{};std::uint64_t tick{};int id{},slots{},net{};};
 std::vector<Forward> forwarded;
 namespace lholo::place::detail {namespace {
-template<class... T> bool rememberLocalPlacementRotation(T&&...){return true;}
+int internalRotationReceipts{};
+template<class... T> bool rememberLocalPlacementRotation(T&&...){++internalRotationReceipts;return true;}
 template<class... T> void cancelLocalPlacementRotations(T&&...){}
 bool installLocalPlacementRotationHook(){return true;}
 bool uninstallLocalPlacementRotationHook(){return true;}
@@ -151,7 +152,7 @@ using namespace lholo::place::detail;
 int main(){
  using namespace lholo::flexible_placement_abi;
  LocalPlayer player;Block itemBlock{99,false};RotationAuthInputHook hook;auto& state=PlacementState::getInstance();
- auto reset=[&]{uninstallRotationDeliveryHook();state.resetWorldSession();state.setManualPlacementAllowedItems({});player=LocalPlayer{};player.inventory.items[0]={1,64,101,&itemBlock};player.region.cells[{-1,0,0}]={12,false};client={&player,&hook,true};clockMs=1000;gui=false;throwForward=false;forwarded.clear();praxisFeature=praxisFocused=praxisModifiers=praxisWorld=true;installRotationDeliveryHook();};
+ auto reset=[&]{uninstallRotationDeliveryHook();state.resetWorldSession();state.setManualPlacementAllowedItems({});player=LocalPlayer{};player.inventory.items[0]={1,64,101,&itemBlock};player.region.cells[{-1,0,0}]={12,false};client={&player,&hook,true};clockMs=1000;gui=false;throwForward=false;forwarded.clear();internalRotationReceipts=0;praxisFeature=praxisFocused=praxisModifiers=praxisWorld=true;installRotationDeliveryHook();};
  auto queue=[&]{FlexiblePlacementRequestV2 r{};r.ownerToken=44;r.ownerEpoch=5;r.worldGeneration=6;r.dimension=0;r.flags=RequestGameplay|RequestFocused|RequestGuiClear|RequestModifiers|RequestRotationSync|RequestRotationMode;r.supportX=-1;r.targetBlockId=12;r.face=5;r.selectedSlot=0;r.itemId=1;r.itemAux=1;r.itemCount=64;r.relativeHitX=1;r.relativeHitY=.5f;r.relativeHitZ=.5f;r.pitch=17;r.yaw=180;r.maxPickRange=6;check(lholo_flexible_placement_v2_queue(r)==QueueAccepted,"actual ABI queue accepts request");};
  auto send=[&](std::uint64_t tick){PlayerAuthInputPacket p;p.mClientTick.get().mValue=tick;auto flags=p.mInputData.get();auto move=p.mMove.get();auto camera=p.mCameraOrientation.get();hook.run(p);check(p.mRot.get()==Vec2{17,90} && p.mInteractRotation.get()==Vec2{17,23} && p.mYHeadRot==91,"production hook restores all original rotations");check(p.mMove.get()==move&&p.mCameraOrientation.get()==camera&&p.mClientTick.get().mValue==tick,"production hook preserves movement camera tick");check(!p.mItemUseTransaction.get()&&p.mInputData.get()==flags,"production hook restores transaction and flags");};
  reset();queue();send(10);check(!forwarded.back().attached&&pending&&pending->warmup.primes==1,"first real packet primes only");send(11);check(!forwarded.back().attached&&pending&&pending->warmup.primes==2,"second real packet primes only");send(12);check(forwarded.back().attached&&!pending,"third packet dispatches exactly once");for(auto const&f:forwarded)check(f.main==Vec2{17,180}&&f.rotation==Vec2{17,180}&&f.head==180,"all forwarded warmup/use rotations coherent");send(13);check(!forwarded.back().attached,"no replay after successful attachment");
@@ -165,5 +166,22 @@ int main(){
  reset();queue();send(1);send(2);throwForward=true;send(3);check(!pending&&forwarded.back().attached,"ambiguous placement forward not replayed");throwForward=false;send(4);check(!forwarded.back().attached,"no duplicate transaction after exception");
  reset();queue();send(1);{PlayerAuthInputPacket p;p.mClientTick.get().mValue=2;p.mInputData.get().insert(PlayerAuthInputPacketPayload::InputData::PerformBlockActions);hook.run(p);}check(pending&&pending->warmup.primes==0&&!forwarded.back().attached,"native action ownership resets priming");send(3);send(4);send(5);check(forwarded.back().attached,"clean input sequence resumes safely after conflict");
  reset();queue();send(1);check(lholo_flexible_placement_v2_cancel(44,5)==QueueAccepted,"cancel removes primed request");send(2);check(!forwarded.back().attached,"canceled priming never places");
+ // Exercise LHolo's own EasyPlace delivery path, not only the Praxis ABI.
+ reset();state.setEnabled(true);
+ check(queueRotationPlacement(player,BlockPos{0,0,0},42,20,0,player.inventory.items[0],17,180,
+     std::make_unique<ItemUseInventoryTransaction>(),true),"EasyPlace off-axis admission");
+ send(20);check(!forwarded.back().attached && pending && pending->warmup.primes==1,
+     "EasyPlace first native tick primes only");
+ send(21);check(!forwarded.back().attached && pending && pending->warmup.primes==2,
+     "EasyPlace second native tick primes only");
+ send(22);check(forwarded.back().attached && !pending && internalRotationReceipts==1,
+     "EasyPlace attaches one use and guards singleplayer facing");
+ for(auto const&f:forwarded)check(f.main==Vec2{17,180}&&f.rotation==Vec2{17,180}&&f.head==180,
+     "EasyPlace network rotation stays coherent");
+ reset();state.setEnabled(true);
+ check(queueRotationPlacement(player,BlockPos{0,0,0},43,20,0,player.inventory.items[0],17,90,
+     std::make_unique<ItemUseInventoryTransaction>(),true),"EasyPlace aligned admission");
+ send(30);check(forwarded.back().attached&&!pending&&internalRotationReceipts==1,
+     "EasyPlace aligned native placement avoids warmup");
  std::printf("ACTUAL_DELIVERY_BODY checks=%d failures=%d; SDK/network boundary doubles, real BDS test separate\n",checks,failures);return failures?1:0;
 }

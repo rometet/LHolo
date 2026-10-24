@@ -272,10 +272,11 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         }
     }
     if (!request) { origin(packet);return; }
-    // R19: strict stair input must not conflict with an ongoing native
-    // action (screen, movement flag, item use); that gate is above. We now
-    // synchronize the two authoritative rotation fields for this one packet,
-    // not the local camera, actor, head, or subsequent network ticks.
+    // Direction-sensitive placements cannot steal a native item/block action.
+    // The guard above checks packet ownership; when a different facing is
+    // required, native input ticks first synchronize server rotation. A
+    // scoped packet override preserves world movement and restores all fields
+    // after forwarding without changing the player's rendered local camera.
     bool valid=false;
     app::invokeNativeCallback([&] { valid=stillValid(*request,*client); },
         [](char const* reason) noexcept { app::reportNativeCallbackFailure("rotation placement validation",reason); });
@@ -284,10 +285,17 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
             valid,unsigned(request->face),request->yaw,input.mRot.get().y,
             request->cell.x,request->cell.y,request->cell.z);
     if (!valid) { origin(packet);return; }
+    // Both Praxis FlexiblePlacement and LHolo EasyPlace/Manual/Range use the
+    // same server-authoritative rotation protocol. The first two native input
+    // ticks establish a different facing before a real item-use is attached.
+    // Already-aligned LHolo placements use the current native tick directly.
+    bool const needsWarmup=needsOrientationWarmup(request->external,
+        request->requireNativeRotationSync,input.mRot.get().x,input.mRot.get().y,
+        request->pitch,request->yaw);
     std::optional<ScopedExternalInputRotation> externalRotation;
-    if (request->external && request->requireNativeRotationSync) {
+    if (request->requireNativeRotationSync) {
         auto const tick=static_cast<std::uint64_t>(input.mClientTick.get().mValue);
-        bool const placeNow=request->warmup.ready(tick);
+        bool const placeNow=!needsWarmup || request->warmup.ready(tick);
         externalRotation.emplace(input,request->pitch,request->yaw);
         if (!placeNow) {
             auto const forwarded=app::invokeNativeCallback([&] { origin(packet); },
@@ -313,9 +321,15 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         auto& payload=*request->payload;
         auto const* tx=std::get_if<ItemUseInventoryTransaction>(&payload.mVariantTransaction.get());
         if (!tx) return;
-        // Flexible placement now uses genuine rotation-only input ticks before
-        // this transaction. Do not register an integrated-server yaw override:
-        // the same protocol path must work when the server is a separate BDS.
+        // LHolo's projected placements have an exact, native-predicted target
+        // state. Singleplayer's integrated server may still read ServerPlayer
+        // facing rather than the packet fields, so borrow the verified facing
+        // for this exact transaction (never a raw block-state rewrite).
+        if (!request->external && request->requireNativeRotationSync) {
+            rememberLocalPlacementRotation(*request->player,request->cell,*tx,
+                request->pitch,request->yaw,0x4C486F6C6F455059ULL,
+                request->epoch+1U);
+        }
         if (request->external && request->requireNativeRotationSync)
             traceFlexibleDelivery("BDS_PROTOCOL_ONLY local-receiver-override=0 primes=%u",request->warmup.primes);
         // Preserve native legacy request ID / slot actions / transaction fields.
@@ -533,7 +547,7 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
     if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return true;
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
-    pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+250,
+    pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+500,
         cell,cellKey,ghostId,slot,item,pitch,yaw,requireNativeRotationSync,
         std::move(payload)});
     return true;

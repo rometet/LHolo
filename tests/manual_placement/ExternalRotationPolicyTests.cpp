@@ -7,6 +7,13 @@ int checks=0,failures=0;
 void ck(bool ok,char const* msg){++checks;if(!ok){++failures;std::printf("FAIL %s\n",msg);}}
 int main(){
  ExternalRotationWarmup s;
+ ck(!needsOrientationWarmup(false,true,10,90,10,90),"same-facing EasyPlace has no extra ticks");
+ ck(!needsOrientationWarmup(false,true,10,-270,10,90),"yaw wrap keeps direct placement fast");
+ ck(needsOrientationWarmup(false,true,10,90,10,180),"off-axis EasyPlace requires coherent pre-roll");
+ ck(needsOrientationWarmup(false,true,10,90,70,90),"vertical EasyPlace requires pre-roll");
+ ck(!needsOrientationWarmup(false,false,10,90,10,180),"ordinary placement needs no pre-roll");
+ ck(needsOrientationWarmup(true,true,10,90,10,90),"Praxis external pre-roll preserved");
+ ck(needsOrientationWarmup(false,true,10,NAN,10,90),"bad native packet rotation cannot bypass warmup");
  ck(!s.ready(100),"no placement on initial tick");s.forwardedPrime(100);
  ck(!s.ready(100),"duplicate first tick cannot place");s.forwardedPrime(100);
  ck(s.primes==1,"duplicate does not count as second prime");
