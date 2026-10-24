@@ -115,6 +115,19 @@ Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,
         predicted.states["open_bit"]="0";
         return predicted;
     }
+    if (orientationProbe && (lholo::place::detail::isGlazedTerracotta(name)
+        || name == "minecraft:fence_gate" || name.ends_with("_fence_gate"))) {
+        static Block predicted;
+        predicted=*this;
+        ++predicted.mNetworkId;
+        int const quadrant=static_cast<int>(std::floor(
+            std::fmod(p.rotation.y+360.F,360.F)/90.F));
+        if (lholo::place::detail::isGlazedTerracotta(name))
+            predicted.states["facing_direction"]=
+                std::to_string(std::array<int,4>{3,4,2,5}[quadrant]);
+        else predicted.states["direction"]=std::to_string(quadrant);
+        return predicted; // Explicitly supplied model, not an actual native call.
+    }
     if (orientationProbe && (name == "minecraft:observer"
         || name == "minecraft:piston" || name == "minecraft:sticky_piston"
         || name == "minecraft:dispenser" || name == "minecraft:dropper"

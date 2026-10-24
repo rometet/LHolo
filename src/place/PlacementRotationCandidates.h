@@ -2,6 +2,7 @@
 // Predict using vanilla Block::getPlacementBlock for each candidate; do not
 // guess a Bedrock state/runtime ID from yaw/pitch or force a raw block write.
 #pragma once
+#include "place/PlacementDirectionRules.h"
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -35,7 +36,7 @@ inline constexpr std::size_t MaxPlacementRotationProbes = 12U;
         || name == "minecraft:barrel") {
         return PlacementRotationSearch::FacingSixWay;
     }
-    if (lowerDoor || name == "minecraft:trapdoor"
+    if (isGlazedTerracotta(name) || lowerDoor || name == "minecraft:trapdoor"
         || name.ends_with("_trapdoor") || name.ends_with("_stairs")
         || name == "minecraft:unpowered_repeater"
         || name == "minecraft:powered_repeater"

@@ -364,10 +364,50 @@ bool sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, Item
 // hotbar is completely full do we fall back to the currently selected slot.
 int chooseHotbarSwapTarget(Player& player) {
     auto& inventory = player.getInventory();
+    // An empty selected slot avoids a second selected-slot round trip.
+    auto const selected = player.getSelectedItemSlot();
+    if (selected >= 0 && selected < kHotbarSlots && inventory.getItem(selected).isNull())
+        return selected;
     for (int slot = 0; slot < kHotbarSlots; ++slot) {
         if (inventory.getItem(slot).isNull()) return slot;
     }
     return player.getSelectedItemSlot();
+}
+
+// Inventory acknowledgements are observed through both local slot images. A
+// completed swap may unlock the next material immediately rather than waiting
+// out the former unconditional 200ms throttle. A missing/rejected response
+// still cannot trigger a duplicate swap before the retry timeout.
+template <class Stack>
+int swapCount(Stack const& stack) {
+    if (stack.isNull()) return 0;
+    if constexpr (requires { stack.mCount; }) return static_cast<int>(stack.mCount);
+    else return stack.count; // Portable fixture stack.
+}
+int swapAux(ItemStack const& stack) {
+    return stack.isNull() ? -1 : stack.getIdAux();
+}
+bool canSendAnotherInventorySwap(Player& player, std::uint64_t now) {
+    auto& state=placementState();
+    if (auto const receipt=state.pendingInventorySwap()) {
+        auto const& inventory=player.getInventory();
+        auto const& source=inventory.getItem(receipt->sourceSlot);
+        auto const& target=inventory.getItem(receipt->targetSlot);
+        bool const observed = now > receipt->issuedAt
+            && swapAux(source)==receipt->outgoingAux
+            && swapCount(source)==receipt->outgoingCount
+            && swapAux(target)==receipt->incomingAux
+            && swapCount(target)==receipt->incomingCount;
+        if (!observed && now < receipt->retryAt) return false;
+        state.clearInventorySwap();
+        state.setNextSwapAt(0);
+    }
+    return now >= state.nextSwapAt();
+}
+detail::InventorySwapReceipt makeSwapReceipt(int sourceSlot, int targetSlot,
+    ItemStack const& incoming, ItemStack const& outgoing, std::uint64_t now) {
+    return {sourceSlot,targetSlot,swapAux(incoming),swapCount(incoming),
+        swapAux(outgoing),swapCount(outgoing),now,now+kSwapRetryMs};
 }
 
 // A projected ghost cell the player aims at: the cell itself, the real block
@@ -1205,16 +1245,18 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
         if (found.slot >= kHotbarSlots) {
             // Back off a rejected swap; see sendInventorySwap and the same
             // logic in tickEasyPlaceImpl.
-            if (now < placementState().nextSwapAt()) continue;
+            if (!canSendAnotherInventorySwap(player, now)) continue;
             auto& inventory = player.getInventory();
             int const hotbarSlot = chooseHotbarSwapTarget(player);
             auto const& toItem = inventory.getItem(hotbarSlot);
+            auto const receipt=makeSwapReceipt(found.slot,hotbarSlot,*found.item,toItem,now);
             if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) {
                 // No packet was sent. Keep later hotbar candidates eligible in
                 // this tick; a local factory/sender failure is not a pending swap.
                 cacheFailedPlan(failedKey, now);
                 continue;
             }
+            placementState().recordInventorySwap(receipt);
             placementState().setNextSwapAt(now + kSwapRetryMs);
             telemetry::count(telemetry::Event::SwapRequested);
             return;
@@ -1383,7 +1425,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     if (found.slot >= kHotbarSlots) {
         // Back off a rejected swap so it never retries more often than
         // kSwapRetryMs.
-        if (now < placementState().nextSwapAt()) {
+        if (!canSendAnotherInventorySwap(*player,now)) {
             telemetry::count(telemetry::Event::InventorySwapBlocked);
             return;
         }
@@ -1397,7 +1439,9 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         auto& inventory = player->getInventory();
         int const hotbarSlot = chooseHotbarSwapTarget(*player);
         auto const& toItem = inventory.getItem(hotbarSlot);
+        auto const receipt=makeSwapReceipt(found.slot,hotbarSlot,*found.item,toItem,now);
         if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
+        placementState().recordInventorySwap(receipt);
         placementState().setNextSwapAt(now + kSwapRetryMs);
         telemetry::count(telemetry::Event::SwapRequested);
         return;

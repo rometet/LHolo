@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,6 +53,13 @@ struct FailedPlanKeyHash {
         combine(key.viewZ);
         return result;
     }
+};
+
+struct InventorySwapReceipt {
+    int sourceSlot{}, targetSlot{};
+    int incomingAux{}, incomingCount{};
+    int outgoingAux{}, outgoingCount{};
+    std::uint64_t issuedAt{}, retryAt{};
 };
 
 class PlacementState {
@@ -103,6 +111,9 @@ public:
     void setNextPlaceAt(std::uint64_t time);
     [[nodiscard]] std::uint64_t nextSwapAt() const;
     void setNextSwapAt(std::uint64_t time);
+    void recordInventorySwap(InventorySwapReceipt receipt);
+    [[nodiscard]] std::optional<InventorySwapReceipt> pendingInventorySwap() const;
+    void clearInventorySwap();
 
     [[nodiscard]] bool recentPlacementActive(std::int64_t cell, std::uint64_t now) const;
     void recordRecentPlacement(std::int64_t cell, std::uint64_t now, std::uint64_t expiresAt);
@@ -142,6 +153,7 @@ private:
 
     mutable std::mutex                               mSessionCacheMutex;
     std::unordered_map<std::int64_t, std::uint64_t> mRecentPlacements;
+    std::optional<InventorySwapReceipt> mPendingInventorySwap;
     std::unordered_map<std::int64_t, std::uint64_t> mAutoPlacementSuppressions;
     std::atomic_uint64_t                             mNextAutoPlacementSuppressionExpiry{0};
     std::unordered_map<FailedPlanKey, std::uint64_t, FailedPlanKeyHash> mFailedRangePlans;

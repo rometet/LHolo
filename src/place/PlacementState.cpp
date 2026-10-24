@@ -172,6 +172,18 @@ std::uint64_t PlacementState::nextSwapAt() const {
 void PlacementState::setNextSwapAt(std::uint64_t time) {
     mNextSwapAt.store(time, std::memory_order_release);
 }
+void PlacementState::recordInventorySwap(InventorySwapReceipt receipt) {
+    std::lock_guard lock(mSessionCacheMutex);
+    mPendingInventorySwap=receipt;
+}
+std::optional<InventorySwapReceipt> PlacementState::pendingInventorySwap() const {
+    std::lock_guard lock(mSessionCacheMutex);
+    return mPendingInventorySwap;
+}
+void PlacementState::clearInventorySwap() {
+    std::lock_guard lock(mSessionCacheMutex);
+    mPendingInventorySwap.reset();
+}
 
 bool PlacementState::recentPlacementActive(std::int64_t cell, std::uint64_t now) const {
     std::lock_guard lock(mSessionCacheMutex);
@@ -276,6 +288,7 @@ void PlacementState::resetDimensionSession() {
     {
         std::lock_guard lock(mSessionCacheMutex);
         mRecentPlacements.clear();
+        mPendingInventorySwap.reset();
         mAutoPlacementSuppressions.clear();
         mFailedRangePlans.clear();
     }

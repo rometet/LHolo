@@ -7,6 +7,14 @@
 
 namespace lholo::place::detail {
 
+// Plain/colored terracotta has no facing. Glazed terracotta does, and its
+// Bedrock facing_direction is established by the placing player's yaw.
+inline constexpr bool isGlazedTerracotta(std::string_view name) noexcept {
+    return name.starts_with("minecraft:") &&
+        (name == "minecraft:glazed_terracotta" ||
+         name.ends_with("_glazed_terracotta"));
+}
+
 enum class PlacementDirectionRule {
     None,
     Facing,
@@ -18,7 +26,8 @@ enum class PlacementDirectionRule {
 };
 
 inline constexpr PlacementDirectionRule placementDirectionRule(std::string_view name) {
-    if (name == "minecraft:hopper"
+    if (isGlazedTerracotta(name)
+        || name == "minecraft:hopper"
         || name == "minecraft:observer"
         || name == "minecraft:dispenser"
         || name == "minecraft:dropper"

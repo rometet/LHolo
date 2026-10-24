@@ -222,6 +222,75 @@ inline void runLatencyChecks(Player& player) {
     tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
     check(planned==2,"R14 refreshed prediction permitted at 150ms");
 
+    // Glazed terracotta (unlike plain terracotta) has four player-controlled
+    // Bedrock facing_direction values. Fence gates are similarly directional;
+    // ordinary fences derive all four connection flags from neighboring blocks.
+    for (auto name: {"minecraft:white_glazed_terracotta",
+            "minecraft:cyan_glazed_terracotta","minecraft:oak_fence_gate"}) {
+        for (int from=0;from<4;++from) for (int to=0;to<4;++to) {
+            reset(player);state.setEnabled(true);orientationProbe=true;
+            player.rotation={17.0F,from==3?-90.F:from*90.F};
+            Block solid;solid.mNetworkId=12;
+            player.region.cells[{-1,0,0}]=solid;
+            Block ghost;ghost.name=name;ghost.mNetworkId=20;
+            bool const glazed=detail::isGlazedTerracotta(name);
+            if(glazed) ghost.states={{"facing_direction",
+                    std::to_string(std::array<int,4>{3,4,2,5}[to])}};
+            else ghost.states={{"direction",std::to_string(to)},
+                    {"open_bit","0"},{"in_wall_bit","0"}};
+            ProjectionTarget target;
+            check(resolveOrientedPlacementActual(player,player.region,
+                makePlacementContext({}, {}, 4),{},ghost,0,target),
+                "glazed/fence gate plans four directions independent of player facing");
+            check(player.rotation==Vec2{17.0F,from==3?-90.F:from*90.F},
+                "glazed/fence gate restores player yaw after planning");
+            Block mismatched=ghost;
+            mismatched.mNetworkId=21;
+            if(glazed) mismatched.states["facing_direction"]="0";
+            else mismatched.states["direction"]=std::to_string((to+1)%4);
+            check(!placementPredictionMatches(mismatched,ghost),
+                "glazed/fence gate never accepts wrong directional state");
+        }
+    }
+    check(!detail::isGlazedTerracotta("minecraft:blue_terracotta")
+        && detail::isGlazedTerracotta("minecraft:blue_glazed_terracotta"),
+        "plain and glazed terracotta have different placement policies");
+    for (auto name: {"minecraft:oak_fence","minecraft:nether_brick_fence",
+            "minecraft:fence"}) {
+        Block ghost{.name=name,.states={{"minecraft:connection_north","1"},
+            {"minecraft:connection_east","0"}},.mNetworkId=60};
+        Block predicted=ghost;predicted.mNetworkId=61;
+        predicted.states["minecraft:connection_north"]="0";
+        check(placementPredictionMatches(predicted,ghost),
+            "fence neighbor-derived direction may change after placement");
+        predicted.states["facing_direction"]="2";
+        check(!placementPredictionMatches(predicted,ghost),
+            "fence connection tolerance does not ignore arbitrary facing");
+    }
+    // In-flight swap may NOT be replayed before timeout. As soon as both slot
+    // after-images are visible, allow next unrelated material immediately.
+    reset(player);state.setEnabled(true);player.selected=0;
+    Block other=stone;other.name="minecraft:dirt";other.material=2;other.mNetworkId=22;
+    player.inventory.items[12]={1,0,64};
+    player.inventory.items[13]={2,0,32};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    tickEasyPlaceImpl(player);
+    check(swapSent.size()==1 && swapSent[0].actions.back().slot==0
+        && state.pendingInventorySwap().has_value(),
+        "swap into empty selected slot and track expected two-slot receipt");
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&other,{.5f,.25f,.5f}};
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(swapSent.size()==1,"pending swap blocks duplicate even for new material");
+    player.inventory.items[0]={1,0,64};
+    player.inventory.items[12]={};
+    fixtureTime=1060;tickEasyPlaceImpl(player);
+    check(swapSent.size()==2 && swapSent[1].actions.front().slot==13
+        && state.pendingInventorySwap().has_value(),
+        "observed swap immediately unlocks next material before 200ms");
+    reset(player);
+    check(!state.pendingInventorySwap().has_value() && state.nextSwapAt()==0,
+        "world reset invalidates inventory swap receipts");
+
     std::printf("EASYPLACE_R14_LATENCY_CHECKS checks=%d newFailures=%d "
                 "manualDelay=100ms manualRepeat=50ms failedRetry=150ms "
                 "heldSelectedFirst=1 aimedRangePriority=1 queuedDoesNotConsumeAck=1 "
