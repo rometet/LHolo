@@ -12,6 +12,8 @@
 #include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/gui/screens/controllers/ContainerScreenController.h"
+#include "mc/client/gui/screens/controllers/ChestScreenController.h"
+#include "mc/world/level/block/actor/BlockActorType.h"
 #include "mc/client/gui/screens/ScreenView.h"
 #include "mc/client/game/ClientInstance.h"
 #include "mc/client/player/LocalPlayer.h"
@@ -32,6 +34,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 namespace lholo::structure::detail {
 namespace {
@@ -39,6 +42,10 @@ std::atomic_bool available{};
 // Cross-thread display gate: no engine pointers are dereferenced through this
 // atomic; only exact pointer identity is compared in ScreenView::render.
 std::atomic<ScreenController const*> suppressedScreen{};
+// The opening-screen constructor runs before any render or onOpen callback.
+std::atomic<ScreenController const*> earlyArmedScreen{};
+std::atomic<std::uint64_t> suppressionDeadline{};
+constexpr std::uint64_t kExitTransitionGuardMs=900;
 struct TransferReceipt {
     std::string id, collection;
     int sourceSlot{}, sourceCount{}, inventoryCount{}, attempted{};
@@ -54,9 +61,18 @@ thread_local GrabSession session;
 // The player must explicitly opt in. Regular right-click always works normally.
 // Holding Alt while opening the chest/shulker GUI arms ONE collection session.
 bool altPressed() noexcept { return (GetAsyncKeyState(VK_MENU)&0x8000)!=0; }
+bool hasPendingMaterialNeed() {
+    auto const hud=StructureUiState::getInstance().materialHudView();
+    return StructureSession::getInstance().loaded() && hud && hud->ready
+        && !hud->requirements.empty();
+}
 void stopSuppression(ContainerScreenController const* expected) {
     auto* pointer=static_cast<ScreenController const*>(expected);
-    suppressedScreen.compare_exchange_strong(pointer,nullptr,std::memory_order_acq_rel);
+    bool const cleared=suppressedScreen.compare_exchange_strong(
+        pointer,nullptr,std::memory_order_acq_rel);
+    earlyArmedScreen.compare_exchange_strong(
+        pointer,nullptr,std::memory_order_acq_rel);
+    if(cleared) suppressionDeadline.store(0,std::memory_order_release);
 }
 bool supportedContainer(ContainerManagerController const& controller) {
     auto manager=controller.mContainerManagerModel.lock();
@@ -152,6 +168,32 @@ void collectOne(ContainerScreenController& screen) {
     // No matching accessible stack in this GUI, or no valid vanilla destination.
     session.finished=true;
 }
+// Prepare the draw sink during the native chest controller's construction,
+// before the first ScreenView::render and before onOpen. Prevents a one-frame
+// vanilla chest flash on Alt+right-click.
+LL_TYPE_INSTANCE_HOOK(MaterialGrabEarlyChestHook,ll::memory::HookPriority::Low,
+    ChestScreenController,&ChestScreenController::$ctor,void*,
+    std::shared_ptr<ClientInstanceScreenModel> model,
+    Player& player, BlockPos const& pos, ActorUniqueID uniqueId,
+    BlockActorType blockType) {
+    app::hook_lifecycle::DetourGuard guard;
+    auto* result=origin(std::move(model),player,pos,uniqueId,blockType);
+    if(!guard || !available.load(std::memory_order_acquire)) return result;
+    auto* native=static_cast<ScreenController const*>(this);
+    if((blockType==BlockActorType::Chest || blockType==BlockActorType::ShulkerBox
+        || blockType==BlockActorType::BarrelBlock)
+        && altPressed() && hasPendingMaterialNeed()) {
+        earlyArmedScreen.store(native,std::memory_order_release);
+        suppressionDeadline.store(0,std::memory_order_release);
+        suppressedScreen.store(native,std::memory_order_release);
+        LHolo::getInstance().getSelf().getLogger().info(
+            "MATERIAL_GRAB_EARLY_ARM type={}",static_cast<int>(blockType));
+    } else {
+        // A normal new chest may reuse the address of a retired hidden screen.
+        stopSuppression(this);
+    }
+    return result;
+}
 LL_TYPE_INSTANCE_HOOK(MaterialGrabOpenHook,ll::memory::HookPriority::Low,
     ContainerScreenController,&ContainerScreenController::$onOpen,void) {
     app::hook_lifecycle::DetourGuard guard;
@@ -159,16 +201,21 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabOpenHook,ll::memory::HookPriority::Low,
     if(!guard || !available.load(std::memory_order_acquire))return;
     // Native screen must exist for valid server-authoritative item transfers.
     // It remains completely unrendered during the short collection session.
-    auto const hud=StructureUiState::getInstance().materialHudView();
-    auto const loaded=StructureSession::getInstance().loaded();
-    bool const armed=altPressed() && loaded && hud && hud->ready
-        && !hud->requirements.empty();
+    auto* native=static_cast<ScreenController const*>(this);
+    bool const early=earlyArmedScreen.load(std::memory_order_acquire)==native;
+    bool const armed=(early || altPressed()) && hasPendingMaterialNeed();
     session=GrabSession{this,armed,false,false,false,GetTickCount64(),
         GetTickCount64()+150,0,{}};
-    LHolo::getInstance().getSelf().getLogger().info("MATERIAL_GRAB_OPEN alt={} armed={}",altPressed(),armed);
-    if(armed)
-        suppressedScreen.store(static_cast<ScreenController const*>(this),
-            std::memory_order_release);
+    LHolo::getInstance().getSelf().getLogger().info(
+        "MATERIAL_GRAB_OPEN alt={} early={} armed={}",altPressed(),early,armed);
+    if(armed) {
+        suppressionDeadline.store(0,std::memory_order_release);
+        suppressedScreen.store(native,std::memory_order_release);
+    } else {
+        stopSuppression(this);
+    }
+    earlyArmedScreen.compare_exchange_strong(
+        native,nullptr,std::memory_order_acq_rel);
 }
 LL_TYPE_INSTANCE_HOOK(MaterialGrabTickHook,ll::memory::HookPriority::Low,
     ContainerScreenController,&ContainerScreenController::$tick,::ui::DirtyFlag) {
@@ -211,12 +258,17 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabRenderHook,ll::memory::HookPriority::Low,
     app::hook_lifecycle::DetourGuard guard;
     if(guard && available.load(std::memory_order_acquire)
         && mController.get()==suppressedScreen.load(std::memory_order_acquire)) {
-        // Running ScreenView::render is mandatory: the UI pipeline advances
-        // container callbacks and slot responses here. Do not skip it.
-        // The proxy drops draw calls only, not model/controller updates.
-        InvisibleContainerRenderContext displaySink(renderContext);
-        origin(displaySink);
-        return;
+        auto const until=suppressionDeadline.load(std::memory_order_acquire);
+        if(until==0 || GetTickCount64()<until) {
+            // Keep the native update pipeline, even in final closing frames.
+            InvisibleContainerRenderContext displaySink(renderContext);
+            origin(displaySink);
+            return;
+        }
+        ScreenController const* expected=mController.get();
+        suppressedScreen.compare_exchange_strong(expected,nullptr,
+            std::memory_order_acq_rel);
+        suppressionDeadline.store(0,std::memory_order_release);
     }
     origin(renderContext);
 }
@@ -224,7 +276,13 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabLeaveHook,ll::memory::HookPriority::Low,
     ContainerScreenController,&ContainerScreenController::$onLeave,void) {
     app::hook_lifecycle::DetourGuard guard;
     if(guard && session.screen==this) {
-        stopSuppression(this);
+        // onLeave can precede final transition frames.
+        auto* pointer=static_cast<ScreenController const*>(this);
+        earlyArmedScreen.compare_exchange_strong(
+            pointer,nullptr,std::memory_order_acq_rel);
+        if(suppressedScreen.load(std::memory_order_acquire)==pointer)
+            suppressionDeadline.store(GetTickCount64()+kExitTransitionGuardMs,
+                std::memory_order_release);
         session={};
     }
     origin();
@@ -232,16 +290,20 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabLeaveHook,ll::memory::HookPriority::Low,
 } // namespace
 bool installMaterialGrabberHook() {
     available.store(false,std::memory_order_release);
-    if(MaterialGrabOpenHook::hook()!=0)return false;
+    if(MaterialGrabEarlyChestHook::hook()!=0)return false;
+    if(MaterialGrabOpenHook::hook()!=0) {
+        MaterialGrabEarlyChestHook::unhook();return false;
+    }
     if(MaterialGrabTickHook::hook()!=0) {
-        MaterialGrabOpenHook::unhook();return false;
+        MaterialGrabOpenHook::unhook();MaterialGrabEarlyChestHook::unhook();return false;
     }
     if(MaterialGrabLeaveHook::hook()!=0) {
-        MaterialGrabTickHook::unhook();MaterialGrabOpenHook::unhook();return false;
+        MaterialGrabTickHook::unhook();MaterialGrabOpenHook::unhook();
+        MaterialGrabEarlyChestHook::unhook();return false;
     }
     if(MaterialGrabRenderHook::hook()!=0) {
         MaterialGrabLeaveHook::unhook();MaterialGrabTickHook::unhook();
-        MaterialGrabOpenHook::unhook();return false;
+        MaterialGrabOpenHook::unhook();MaterialGrabEarlyChestHook::unhook();return false;
     }
     available.store(true,std::memory_order_release);
     return true;
@@ -249,11 +311,14 @@ bool installMaterialGrabberHook() {
 bool uninstallMaterialGrabberHook() {
     available.store(false,std::memory_order_release);
     suppressedScreen.store(nullptr,std::memory_order_release);
+    earlyArmedScreen.store(nullptr,std::memory_order_release);
+    suppressionDeadline.store(0,std::memory_order_release);
     session={};
     auto d=MaterialGrabRenderHook::unhook();
     auto a=MaterialGrabLeaveHook::unhook();
     auto b=MaterialGrabTickHook::unhook();
     auto c=MaterialGrabOpenHook::unhook();
-    return d&&a&&b&&c;
+    auto e=MaterialGrabEarlyChestHook::unhook();
+    return d&&a&&b&&c&&e;
 }
 }
