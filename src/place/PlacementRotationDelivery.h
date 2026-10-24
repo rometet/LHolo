@@ -9,7 +9,11 @@ namespace lholo::place::detail {
     std::unique_ptr<ComplexInventoryTransaction>,bool requireNativeRotationSync=false);
 [[nodiscard]] bool queueExternalRotationPlacement(LocalPlayer&,BlockPos const& cell,
     BlockPos const& support,unsigned targetBlockId,unsigned char face,int slot,ItemStack const&,
-    float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>);
+    float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,std::uint64_t ownerToken,
+    std::uint64_t ownerEpoch,std::uint64_t worldGeneration,int dimension,std::uint32_t flags,
+    float maxPickRange);
+bool cancelExternalRotationPlacement(std::uint64_t ownerToken,std::uint64_t ownerEpoch) noexcept;
+void cancelAllExternalRotationPlacements() noexcept;
 bool installRotationDeliveryHook();
 bool uninstallRotationDeliveryHook();
 }

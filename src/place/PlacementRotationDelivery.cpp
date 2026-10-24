@@ -49,6 +49,13 @@ struct PendingRotation {
     BlockPos support{};
     std::uint32_t targetBlockId{};
     uchar face{};
+    std::uint64_t ownerToken{};
+    std::uint64_t ownerEpoch{};
+    std::uint64_t worldGeneration{};
+    int dimension{};
+    std::uint32_t flags{};
+    float maxPickRange{};
+    bool airTarget{};
 };
 std::mutex pendingMutex;
 std::optional<PendingRotation> pending;
@@ -79,6 +86,47 @@ auto transactionFace(T const& transaction) {
     }
 }
 
+struct PraxisModuleLease {
+    HMODULE module{};
+    PraxisModuleLease() noexcept {
+        if (!GetModuleHandleExW(0, L"PraxisCompanion.dll", &module))
+            GetModuleHandleExW(0, L"praxiscompanion.dll", &module);
+    }
+    ~PraxisModuleLease() { if (module) FreeLibrary(module); }
+    PraxisModuleLease(PraxisModuleLease const&) = delete;
+    PraxisModuleLease& operator=(PraxisModuleLease const&) = delete;
+};
+
+using PraxisOwnerStatusV2Fn =
+    lholo::flexible_placement_abi::FlexiblePlacementOwnerStatusV2(__cdecl*)(
+        lholo::flexible_placement_abi::FlexiblePlacementOwnerQueryV2);
+
+bool praxisOwnerStillLive(PendingRotation const& p) {
+    PraxisModuleLease lease;
+    if (!lease.module) return false;
+    auto const status = reinterpret_cast<PraxisOwnerStatusV2Fn>(GetProcAddress(
+        lease.module, "praxis_flexible_placement_v2_get_owner_status"));
+    if (!status) return false;
+    using namespace lholo::flexible_placement_abi;
+    FlexiblePlacementOwnerQueryV2 query{};
+    query.flags = p.flags;
+    query.ownerToken = p.ownerToken;
+    query.ownerEpoch = p.ownerEpoch;
+    query.worldGeneration = p.worldGeneration;
+    query.dimension = p.dimension;
+    query.selectedSlot = p.slot;
+    query.itemId = p.item.getId();
+    query.itemAux = p.item.getIdAux();
+    query.itemCount = p.item.mCount;
+    auto const live = status(query);
+    return live.version == kVersion2 && (live.flags & OwnerLive) != 0
+        && live.ownerToken == p.ownerToken && live.ownerEpoch == p.ownerEpoch
+        && live.worldGeneration == p.worldGeneration && live.dimension == p.dimension
+        && live.selectedSlot == p.slot && live.itemId == p.item.getId()
+        && live.itemAux == p.item.getIdAux()
+        && live.itemCount == static_cast<std::uint32_t>(p.item.mCount);
+}
+
 // Strict stair uses MUST be attached to a genuine native AuthInput that
 // already carries the same viewing direction. Never rewrite player/movement
 // rotation or accept the local planner's yaw without this same-tick proof.
@@ -87,7 +135,15 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
     if (GetTickCount64()>=p.expires || p.epoch!=state.manualInputEpoch()
         || client.getLocalPlayer()!=p.player || !client.isInGameInputEnabled()
         || structure::isGuiVisible()) return false;
-    if (!p.external && !state.enabled() && !state.manualMode() && !state.rangeEnabled()) return false;
+    if (p.external) {
+        // Praxis owns this one request only while its exact token/epoch is
+        // still live. Mode transitions, focus loss, GUI entry, world reset,
+        // and feature disable cancel it through the v2 contract; recheck the
+        // LHolo side here as the final pre-serialization owner gate too.
+        if (!p.ownerToken || !p.ownerEpoch || state.enabled() || state.manualMode()
+            || state.rangeEnabled() || p.dimension != static_cast<int>(p.player->getDimensionId())) return false;
+        if (!praxisOwnerStillLive(p)) return false;
+    } else if (!state.enabled() && !state.manualMode() && !state.rangeEnabled()) return false;
     auto const now=GetTickCount64();
     // The shared legacy path can fulfill a tap while this request is deferred.
     // Respect the existing Manual initial/repeat timing before forwarding it.
@@ -108,11 +164,26 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
     if (!tx) return false;
     if (p.external) {
         auto const support = transactionSupport(*tx);
+        auto const& destination = region.getBlock(p.cell);
+        if (!destination.isAir()) return false;
+        auto const local = tx->mClickPos.get();
+        auto const eye = p.player->getEyePos();
+        auto const worldHit = Vec3{static_cast<float>(support.x) + local.x,
+            static_cast<float>(support.y) + local.y, static_cast<float>(support.z) + local.z};
+        auto const dx = worldHit.x - eye.x, dy = worldHit.y - eye.y, dz = worldHit.z - eye.z;
+        auto const pickRange = p.player->getPickRange();
+        if (!std::isfinite(pickRange) || pickRange <= 0.0F || !std::isfinite(p.maxPickRange)
+            || p.maxPickRange <= 0.0F || p.maxPickRange > pickRange + 0.001F
+            || !std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)
+            || dx * dx + dy * dy + dz * dz > pickRange * pickRange) return false;
+        if (p.airTarget) {
+            if (support != p.cell || tx->mTargetBlockId != p.targetBlockId
+                || region.getBlock(p.cell).mNetworkId != p.targetBlockId) return false;
+        } else if (region.getBlock(p.support).isAir()
+            || region.getBlock(p.support).mNetworkId != p.targetBlockId) return false;
         return support == p.support
             && transactionFace(*tx) == p.face
-            && tx->mTargetBlockId == p.targetBlockId
-            && !region.getBlock(p.support).isAir()
-            && region.getBlock(p.support).mNetworkId == p.targetBlockId;
+            && tx->mTargetBlockId == p.targetBlockId;
     }
     auto const ghost=projection::queryPlacementProjection(*p.player,p.cell);
     return ghost.block && ghost.missing && ghost.block->mNetworkId==p.ghostId
@@ -207,43 +278,106 @@ std::uint32_t lholo_flexible_placement_v1_get_status() noexcept {
 extern "C" __declspec(dllexport)
 std::uint32_t lholo_flexible_placement_v1_queue(
     lholo::flexible_placement_abi::FlexiblePlacementRequest request) noexcept {
+    // v1 has no owner token, focus epoch, world generation, or dispatch
+    // cancellation. Keep the symbol for old binaries, but fail closed.
+    if (request.version != lholo::flexible_placement_abi::kVersion || request.reserved != 0)
+        return lholo::flexible_placement_abi::QueueRejected;
+    return lholo::flexible_placement_abi::QueueUnavailable;
+}
+
+extern "C" __declspec(dllexport)
+lholo::flexible_placement_abi::FlexiblePlacementStatusV2
+lholo_flexible_placement_v2_get_status() noexcept {
     using namespace lholo::flexible_placement_abi;
+    FlexiblePlacementStatusV2 result{};
     try {
-        if (request.version != kVersion || request.face >= 6
+        if (!available.load(std::memory_order_acquire)) return result;
+        auto const& state = PlacementState::getInstance();
+        if (state.enabled()) result.statusBits |= EasyPlaceOwnsPlacement;
+        if (state.manualMode()) result.statusBits |= ManualOwnsPlacement;
+        if (state.rangeEnabled()) result.statusBits |= RangeOwnsPlacement;
+        std::lock_guard lock(pendingMutex);
+        if (pending && pending->external) {
+            result.ownerToken = pending->ownerToken;
+            result.ownerEpoch = pending->ownerEpoch;
+            result.worldGeneration = pending->worldGeneration;
+            result.dimension = pending->dimension;
+        }
+    } catch (...) {
+        result = {};
+    }
+    return result;
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t lholo_flexible_placement_v2_queue(
+    lholo::flexible_placement_abi::FlexiblePlacementRequestV2 request) noexcept {
+    using namespace lholo::flexible_placement_abi;
+    constexpr auto knownFlags = RequestGameplay | RequestFocused | RequestGuiClear
+        | RequestModifiers | RequestAirTarget | RequestRotationSync
+        | RequestRotationMode | RequestOffsetMode | RequestAdjacentMode;
+    constexpr auto modeFlags = RequestRotationMode | RequestOffsetMode | RequestAdjacentMode;
+    try {
+        if (request.version != kVersion2 || request.reserved != 0 || request.reserved2 != 0
+            || (request.flags & ~knownFlags) != 0
+            || (request.flags & (RequestGameplay | RequestFocused | RequestGuiClear | RequestModifiers))
+                != (RequestGameplay | RequestFocused | RequestGuiClear | RequestModifiers)
+            || (request.flags & modeFlags) == 0
+            || request.ownerToken == 0 || request.ownerEpoch == 0 || request.face >= 6
             || request.selectedSlot < 0 || request.selectedSlot >= 9
-            || !std::isfinite(request.relativeHitX)
-            || !std::isfinite(request.relativeHitY)
-            || !std::isfinite(request.relativeHitZ)
-            || !std::isfinite(request.pitch) || !std::isfinite(request.yaw)
-            || std::fabs(request.pitch) > 90.F) return QueueRejected;
+            || !std::isfinite(request.relativeHitX) || !std::isfinite(request.relativeHitY)
+            || !std::isfinite(request.relativeHitZ) || !std::isfinite(request.pitch)
+            || !std::isfinite(request.yaw) || !std::isfinite(request.maxPickRange)
+            || std::fabs(request.pitch) > 90.F || request.maxPickRange <= 0.0F) return QueueRejected;
         if (lholo_flexible_placement_v1_get_status() != 0) return QueueBusy;
         auto client = ll::service::getClientInstance();
-        if (!client) return QueueRejected;
+        if (!client || !client->isInGameInputEnabled() || structure::isGuiVisible()) return QueueRejected;
         auto* player = client->getLocalPlayer();
-        if (!player) return QueueRejected;
+        if (!player || static_cast<int>(player->getDimensionId()) != request.dimension) return QueueRejected;
+        auto const pickRange = player->getPickRange();
+        if (!std::isfinite(pickRange) || pickRange <= 0.0F || request.maxPickRange > pickRange + 0.001F)
+            return QueueRejected;
         auto const& item = player->getInventory().getItem(request.selectedSlot);
-        if (item.isNull() || item.mCount == 0 || !item.mBlock
-            || item.getId() != request.itemId
+        if (item.isNull() || item.mCount == 0 || !item.mBlock || item.getId() != request.itemId
             || item.getIdAux() != request.itemAux
-            || item.mCount != request.itemCount) return QueueRejected;
-        auto const local = Vec3{request.relativeHitX,request.relativeHitY,request.relativeHitZ};
+            || static_cast<std::uint32_t>(item.mCount) != request.itemCount) return QueueRejected;
         auto const inRange = [](float value) { return value >= 0.0F && value <= 1.0F; };
+        auto const on = [](float value, float boundary) { return std::fabs(value - boundary) <= 0.0001F; };
+        auto const local = Vec3{request.relativeHitX, request.relativeHitY, request.relativeHitZ};
         if (!inRange(local.x) || !inRange(local.y) || !inRange(local.z)) return QueueRejected;
-        auto const boundary = [](float value) {
-            return std::fabs(value) < 0.0001F || std::fabs(value - 1.0F) < 0.0001F;
+        if ((request.face == 0 && !on(local.y, 0.0F)) || (request.face == 1 && !on(local.y, 1.0F))
+            || (request.face == 2 && !on(local.z, 0.0F)) || (request.face == 3 && !on(local.z, 1.0F))
+            || (request.face == 4 && !on(local.x, 0.0F)) || (request.face == 5 && !on(local.x, 1.0F)))
+            return QueueRejected;
+        auto const inWorld = [](std::int64_t x, std::int64_t y, std::int64_t z) {
+            return x >= -30000000LL && x <= 30000000LL && z >= -30000000LL && z <= 30000000LL
+                && y >= -2048LL && y <= 4096LL;
         };
-        if ((request.face == 0 || request.face == 1) && !boundary(local.y)) return QueueRejected;
-        if ((request.face == 2 || request.face == 3) && !boundary(local.z)) return QueueRejected;
-        if ((request.face == 4 || request.face == 5) && !boundary(local.x)) return QueueRejected;
+        auto const sx = static_cast<std::int64_t>(request.supportX);
+        auto const sy = static_cast<std::int64_t>(request.supportY);
+        auto const sz = static_cast<std::int64_t>(request.supportZ);
+        bool const airTarget = (request.flags & RequestAirTarget) != 0;
+        auto const dx = airTarget ? sx : sx + (request.face == 5 ? 1 : request.face == 4 ? -1 : 0);
+        auto const dy = airTarget ? sy : sy + (request.face == 1 ? 1 : request.face == 0 ? -1 : 0);
+        auto const dz = airTarget ? sz : sz + (request.face == 3 ? 1 : request.face == 2 ? -1 : 0);
+        if (!inWorld(sx, sy, sz) || !inWorld(dx, dy, dz)) return QueueRejected;
+        BlockPos const support{request.supportX, request.supportY, request.supportZ};
+        BlockPos const destination{static_cast<int>(dx), static_cast<int>(dy), static_cast<int>(dz)};
+        auto& region = player->getDimensionBlockSource();
+        if (!region.getBlock(destination).isAir()) return QueueRejected;
+        if (airTarget) {
+            if (support != destination
+                || region.getBlock(destination).mNetworkId != request.targetBlockId
+                || !item.mBlock->getBlockType().mIsOpaqueFullBlock
+                || item.mBlock->getBlockType().isSlabBlock()) return QueueRejected;
+        } else if (region.getBlock(support).isAir()
+            || region.getBlock(support).mNetworkId != request.targetBlockId) return QueueRejected;
         auto const eye = player->getEyePos();
-        Vec3 const worldHit{
-            static_cast<float>(request.supportX) + local.x,
-            static_cast<float>(request.supportY) + local.y,
-            static_cast<float>(request.supportZ) + local.z,
-        };
-        auto const dx=worldHit.x-eye.x,dy=worldHit.y-eye.y,dz=worldHit.z-eye.z;
-        if (!std::isfinite(dx) || !std::isfinite(dy) || !std::isfinite(dz)
-            || dx*dx+dy*dy+dz*dz > 36.0F) return QueueRejected;
+        Vec3 const worldHit{static_cast<float>(request.supportX) + local.x,
+            static_cast<float>(request.supportY) + local.y, static_cast<float>(request.supportZ) + local.z};
+        auto const vx = worldHit.x - eye.x, vy = worldHit.y - eye.y, vz = worldHit.z - eye.z;
+        if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(vz)
+            || vx * vx + vy * vy + vz * vz > pickRange * pickRange) return QueueRejected;
         auto transactionBase = ComplexInventoryTransaction::fromType(
             ComplexInventoryTransaction::Type::ItemUseTransaction, InventoryTransaction{}
         );
@@ -252,7 +386,7 @@ std::uint32_t lholo_flexible_placement_v1_queue(
         transaction.mType = ComplexInventoryTransaction::Type::ItemUseTransaction;
         transaction.mActionType = ItemUseInventoryTransaction::ActionType::Place;
         transaction.mTriggerType = ItemUseInventoryTransaction::TriggerType::PlayerInput;
-        transaction.mPos = BlockPos{request.supportX,request.supportY,request.supportZ};
+        transaction.mPos = support;
         transaction.mFace = static_cast<uchar>(request.face);
         transaction.mSlot = request.selectedSlot;
         transaction.mHand = HandSlot::Mainhand;
@@ -263,18 +397,25 @@ std::uint32_t lholo_flexible_placement_v1_queue(
         transaction.mTargetBlockId = request.targetBlockId;
         transaction.setSelectedItem(item);
         transaction.mItem.get().mIncludeNetIds = true;
-        auto const destination = BlockPos{
-            request.supportX + (request.face == 5 ? 1 : request.face == 4 ? -1 : 0),
-            request.supportY + (request.face == 1 ? 1 : request.face == 0 ? -1 : 0),
-            request.supportZ + (request.face == 3 ? 1 : request.face == 2 ? -1 : 0),
-        };
         return lholo::place::detail::queueExternalRotationPlacement(
-            *player,destination,BlockPos{request.supportX,request.supportY,request.supportZ},
-            request.targetBlockId,static_cast<uchar>(request.face),request.selectedSlot,
-            item,request.pitch,request.yaw,std::move(transactionBase))
+            *player,destination,support,request.targetBlockId,static_cast<uchar>(request.face),
+            request.selectedSlot,item,request.pitch,request.yaw,std::move(transactionBase),
+            request.ownerToken,request.ownerEpoch,request.worldGeneration,request.dimension,
+            request.flags,request.maxPickRange)
             ? QueueAccepted : QueueRejected;
+    } catch (...) { return QueueRejected; }
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t lholo_flexible_placement_v2_cancel(
+    std::uint64_t ownerToken, std::uint64_t ownerEpoch) noexcept {
+    try {
+        if (!available.load(std::memory_order_acquire)) return lholo::flexible_placement_abi::QueueUnavailable;
+        return lholo::place::detail::cancelExternalRotationPlacement(ownerToken, ownerEpoch)
+            ? lholo::flexible_placement_abi::QueueAccepted
+            : lholo::flexible_placement_abi::QueueRejected;
     } catch (...) {
-        return QueueRejected;
+        return lholo::flexible_placement_abi::QueueRejected;
     }
 }
 
@@ -290,6 +431,8 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
         || std::fabs(pitch)>90.F || slot<0 || slot>=9) return false;
     std::lock_guard lock(pendingMutex);
     auto& state=PlacementState::getInstance();auto const now=GetTickCount64();
+    if (pending && pending->expires <= now) pending.reset();
+    if (pending && pending->external) return false;
     // An existing pending AuthInput placement owns this tick; a second
     // legacy placement would change the selected stack and invalidate it.
     if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return true;
@@ -304,37 +447,64 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
 bool queueExternalRotationPlacement(LocalPlayer& player, BlockPos const& cell,
     BlockPos const& support, std::uint32_t targetBlockId, uchar face, int slot,
     ItemStack const& item, float pitch, float yaw,
-    std::unique_ptr<ComplexInventoryTransaction> tx) {
+    std::unique_ptr<ComplexInventoryTransaction> tx, std::uint64_t ownerToken,
+    std::uint64_t ownerEpoch, std::uint64_t worldGeneration, int dimension,
+    std::uint32_t flags, float maxPickRange) {
     if (!available.load(std::memory_order_acquire) || !tx
         || face >= 6 || slot < 0 || slot >= 9
         || !std::isfinite(pitch) || !std::isfinite(yaw)
-        || std::fabs(pitch) > 90.F) return false;
+        || std::fabs(pitch) > 90.F || !ownerToken || !ownerEpoch
+        || !std::isfinite(maxPickRange) || maxPickRange <= 0.0F) return false;
     auto client = ll::service::getClientInstance();
     if (!client || client->getLocalPlayer() != &player
-        || player.getSelectedItemSlot() != slot) return false;
+        || !client->isInGameInputEnabled() || structure::isGuiVisible()
+        || player.getSelectedItemSlot() != slot
+        || static_cast<int>(player.getDimensionId()) != dimension) return false;
     auto const& current = player.getInventory().getItem(slot);
     if (current.isNull() || !current.matchesNetIdVariant(item)) return false;
     auto& region = player.getDimensionBlockSource();
-    if (!region.getBlock(cell).isAir() || region.getBlock(support).isAir()
+    bool const airTarget = (flags & lholo::flexible_placement_abi::RequestAirTarget) != 0;
+    if (!region.getBlock(cell).isAir()) return false;
+    if (airTarget) {
+        if (support != cell || region.getBlock(cell).mNetworkId != targetBlockId) return false;
+    } else if (region.getBlock(support).isAir()
         || region.getBlock(support).mNetworkId != targetBlockId) return false;
     BlockPos const expected{
         support.x + (face == 5 ? 1 : face == 4 ? -1 : 0),
         support.y + (face == 1 ? 1 : face == 0 ? -1 : 0),
         support.z + (face == 3 ? 1 : face == 2 ? -1 : 0),
     };
-    if (expected != cell) return false;
+    if ((!airTarget && expected != cell)
+        || (airTarget && support != cell)) return false;
 
     std::lock_guard lock(pendingMutex);
     auto& state=PlacementState::getInstance();
     if (state.enabled() || state.manualMode() || state.rangeEnabled()) return false;
     auto const now=GetTickCount64();
+    if (pending && pending->expires <= now) pending.reset();
+    if (pending && pending->external) return false;
     if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return false;
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
     pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+250,
-        cell,bridgeCellKey(cell),targetBlockId,slot,item,pitch,yaw,true,std::move(payload),
-        true,support,targetBlockId,face});
+        cell,bridgeCellKey(cell),targetBlockId,slot,item,pitch,yaw,
+        (flags & lholo::flexible_placement_abi::RequestRotationSync) != 0,std::move(payload),
+        true,support,targetBlockId,face,ownerToken,ownerEpoch,worldGeneration,dimension,flags,
+        maxPickRange,airTarget});
     return true;
+}
+
+bool cancelExternalRotationPlacement(std::uint64_t ownerToken,std::uint64_t ownerEpoch) noexcept {
+    std::lock_guard lock(pendingMutex);
+    if (!pending || !pending->external || pending->ownerToken != ownerToken
+        || pending->ownerEpoch != ownerEpoch) return false;
+    pending.reset();
+    return true;
+}
+
+void cancelAllExternalRotationPlacements() noexcept {
+    std::lock_guard lock(pendingMutex);
+    if (pending && pending->external) pending.reset();
 }
 
 bool installRotationDeliveryHook() {
@@ -343,7 +513,10 @@ bool installRotationDeliveryHook() {
 }
 bool uninstallRotationDeliveryHook() {
     available.store(false,std::memory_order_release);
-    { std::lock_guard lock(pendingMutex);pending.reset(); }
+    // Whole-hook shutdown must release every native-owned payload. The
+    // selective external cancellation API above is the only path that leaves
+    // LHolo's own pending request untouched.
+    { std::lock_guard lock(pendingMutex); pending.reset(); }
     return RotationAuthInputHook::unhook();
 }
 }

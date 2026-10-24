@@ -350,6 +350,7 @@ void setEnabled(bool enabled) {
         logger().info("Easy-place disabled");
     }
     placementState().setEnabled(enabled);
+    detail::cancelAllExternalRotationPlacements();
 }
 
 bool isEnabled() {
@@ -363,6 +364,7 @@ void setRangeEnabled(bool enabled) {
         logger().info("Range placement disabled");
     }
     placementState().setRangeEnabled(enabled);
+    detail::cancelAllExternalRotationPlacements();
 }
 
 bool isRangeEnabled() {
@@ -387,6 +389,7 @@ int getAutoPlacementBreakCooldownSeconds() {
 
 void setManualMode(bool manual) {
     placementState().setManualMode(manual);
+    detail::cancelAllExternalRotationPlacements();
 }
 
 bool isManualMode() {
@@ -400,6 +403,7 @@ PlacementModes getPlacementModes() {
 bool applyPlacementModes(PlacementModes const& modes) {
     auto const previous = placementState().modes();
     if (!placementState().applyModes(modes)) return false;
+    detail::cancelAllExternalRotationPlacements();
     if (previous.enabled != modes.enabled) {
         logger().info("Easy-place {}", modes.enabled ? "enabled" : "disabled");
     }
@@ -431,10 +435,12 @@ std::string getAimedProjectedBlockName() {
 }
 
 void resetDimensionSession() {
+    detail::cancelAllExternalRotationPlacements();
     placementState().resetDimensionSession();
 }
 
 void resetWorldSession() {
+    detail::cancelAllExternalRotationPlacements();
     placementState().resetWorldSession();
 }
 
