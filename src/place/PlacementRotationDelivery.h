@@ -7,6 +7,9 @@ namespace lholo::place::detail {
 [[nodiscard]] bool queueRotationPlacement(LocalPlayer&,BlockPos const& cell,std::int64_t cellKey,
     unsigned ghostId,int slot,ItemStack const&,float pitch,float yaw,
     std::unique_ptr<ComplexInventoryTransaction>,bool requireNativeRotationSync=false);
+[[nodiscard]] bool queueExternalRotationPlacement(LocalPlayer&,BlockPos const& cell,
+    BlockPos const& support,unsigned targetBlockId,unsigned char face,int slot,ItemStack const&,
+    float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>);
 bool installRotationDeliveryHook();
 bool uninstallRotationDeliveryHook();
 }

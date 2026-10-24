@@ -5,7 +5,7 @@ root=Path(__file__).resolve().parents[1];out=a.out.resolve();out.mkdir(parents=T
 source=(root/'src/place/PlacementRotationDelivery.cpp').read_text(encoding='utf-8')
 decls=source[source.index('struct PendingRotation'):source.index('LL_TYPE_INSTANCE_HOOK')]
 start=source.index(',Packet& packet) {')+len(',Packet& packet) {')
-end=source.index('\n}\n}\n\nbool queueRotationPlacement',start)
+end=source.index('\n}\n}\n\nextern "C" __declspec(dllexport)',start)
 hook=source[start:end]
 queue=source[source.index('bool queueRotationPlacement'):source.rindex('\n}')]
 for name,text in [('Decls',decls),('Hook',hook),('Queue',queue)]: (out/('RotationDelivery'+name+'.inc')).write_text(text,encoding='utf-8')
