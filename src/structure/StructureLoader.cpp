@@ -124,6 +124,7 @@ struct PendingStructureLoad {
     std::chrono::steady_clock::time_point started;
     std::uint64_t                       sourceWorldEpoch{};
     bool                                hasSourceWorld{};
+    std::optional<std::array<int,3>>    requestAnchor;
     std::uint64_t                       ticket{};
 };
 
@@ -137,13 +138,20 @@ detail::LoadIntent gLoadIntent;
 void commitNormalStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
     std::string const&               pathText,
-    ProjectionRequestStamp           request
+    ProjectionRequestStamp           request,
+    std::optional<std::array<int,3>> requestedAnchor = std::nullopt
 ) {
     auto& session = detail::StructureSession::getInstance();
     auto const renderBlocks = loaded->renderBlocks.size();
     auto const status = makeLoadedStatusMessage(*loaded);
 
     projection::cancelNextStructureAnchorRequest();
+    // Commit the position captured at click time, never at the async parse
+    // completion time. An invalid/unavailable snapshot falls back to native.
+    if(requestedAnchor) {
+        auto const& p=*requestedAnchor;
+        projection::requestNextStructureAnchor(p[0],p[1],p[2]);
+    }
     session.resetTransform();
     session.replaceLoaded(std::move(loaded), pathText, status, request);
     detail::invalidateMaterialList();
@@ -237,6 +245,7 @@ bool startPreparedStructureLoad(
     if (auto const view = capture::getClientViewSnapshot()) {
         pending.sourceWorldEpoch = view->worldEpoch;
         pending.hasSourceWorld = true;
+        pending.requestAnchor = view->projectionAnchor;
     }
     if (gPendingStructureLoad) {
         logger().info("Queued latest structure load: {}", pending.path);
@@ -339,7 +348,7 @@ void processCompletedStructureLoad() {
         if (mode == PendingStructureLoadMode::Restore) {
             commitRestoredStructureLoad(std::move(loaded), saved, pending.request);
         } else {
-            commitNormalStructureLoad(std::move(loaded), path, pending.request);
+            commitNormalStructureLoad(std::move(loaded), path, pending.request,pending.requestAnchor);
         }
         committed=true;
     });
@@ -1394,6 +1403,8 @@ void requestStructureFileLoad(std::string pathText) {
     bool handedOff{};
     app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
+    auto const clickView=capture::getClientViewSnapshot();
+    auto const requestedAnchor=clickView?clickView->projectionAnchor:std::nullopt;
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
         handedOff=startPreparedStructureLoad(
@@ -1415,7 +1426,8 @@ void requestStructureFileLoad(std::string pathText) {
         logger().error("Could not load structure {}: {}", pathText, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(std::move(loaded), pathText, request);handedOff=true; });
+    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(
+        std::move(loaded), pathText, request,requestedAnchor);handedOff=true; });
 }
 
 void restoreSavedProjection(std::uint64_t placementId) {

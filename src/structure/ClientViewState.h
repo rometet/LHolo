@@ -12,6 +12,9 @@ struct ClientViewSnapshot {
     std::uint64_t worldEpoch{};
     bool gameplayInputEnabled{};
     std::uint64_t sampledAtMillis{};
+    // Ground block under player's feet at request click time. Native tick
+    // snapshots values only; async workers never touch player pointers.
+    std::optional<std::array<int,3>> projectionAnchor;
 };
 
 // Protected by the capture value-state mutex. Identity pointers are compared
@@ -19,11 +22,12 @@ struct ClientViewSnapshot {
 class ClientViewState {
 public:
     void publish(void const* level, void const* dimension, float yaw, std::array<float, 3> forward,
-                 bool gameplayInputEnabled=false, std::uint64_t sampledAtMillis=0) {
+                 bool gameplayInputEnabled=false, std::uint64_t sampledAtMillis=0,
+                 std::optional<std::array<int,3>> projectionAnchor=std::nullopt) {
         if (level != mLevel || dimension != mDimension) ++mEpoch;
         mLevel = level;
         mDimension = dimension;
-        mSnapshot = ClientViewSnapshot{yaw, forward, mEpoch, gameplayInputEnabled, sampledAtMillis};
+        mSnapshot = ClientViewSnapshot{yaw, forward, mEpoch, gameplayInputEnabled, sampledAtMillis,projectionAnchor};
     }
     void invalidate() noexcept {
         mSnapshot.reset();

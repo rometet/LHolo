@@ -282,6 +282,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 );
                 state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
                 state.sections[section].uploadedRevision = result.revision;
+                ++state.meshUploadRevision;
                 state.sections[section].incrementalDirty = false;
                 state.sections[section].dirty = false;
                 state.consecutiveMeshWorkerFailures = 0;

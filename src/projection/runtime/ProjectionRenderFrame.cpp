@@ -20,6 +20,7 @@
 #include "projection/mesh/ProjectionRenderer.h"
 #include "projection/mesh/ProjectionSectionBuilder.h"
 #include "projection/runtime/ProjectionFramePipeline.h"
+#include "projection/runtime/ProjectionVisibility.h"
 #include "projection/runtime/ProjectionInvalidation.h"
 #include "projection/runtime/ProjectionLifecycle.h"
 #include "projection/runtime/ProjectionProgress.h"
@@ -365,6 +366,8 @@ void renderProjection(
             .correctionOutlineWidth   = correctionOutlineWidth,
             .identityTransform        = identityTransform
         };
+        // Recalculate view classification before choosing CPU mesh work.
+        updateProjectionVisibility(state,renderContext,camera);
         processProjectionOpaqueFrame(
             state,
             tessellator,

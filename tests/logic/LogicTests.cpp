@@ -53,6 +53,7 @@
 #include "projection/runtime/EpochFailure.h"
 #include "settings/SettingsStore.h"
 #include "structure/StructureSession.h"
+#include "structure/ClientViewState.h"
 #include "structure/MaterialTypePresence.h"
 #include "ui/VerifierHudConsistency.h"
 #include "structure/LoadIntent.h"
@@ -2421,8 +2422,35 @@ void testI18n() {
 
 } // namespace
 
+static void testLoadOriginSnapshot() {
+    lholo::structure::detail::ClientViewState view;
+    int level=1, dimension=2, newWorld=3;
+    auto const captured=std::array<int,3>{14,63,-8};
+    view.publish(&level,&dimension,90.0f,{1.0f,0.0f,0.0f},
+                 true,12345,captured);
+    auto const first=view.snapshot();
+    LHOLO_CHECK(first && first->projectionAnchor==captured);
+    view.publish(&level,&dimension,180.0f,{0.0f,0.0f,1.0f},
+                 true,12346,std::array<int,3>{500,70,500});
+    auto const later=view.snapshot();
+    LHOLO_CHECK(later && first->projectionAnchor!=later->projectionAnchor);
+    LHOLO_CHECK(first->worldEpoch==later->worldEpoch);
+    view.publish(&newWorld,&dimension,0.0f,{0.0f,0.0f,1.0f},true,12347);
+    auto const next=view.snapshot();
+    LHOLO_CHECK(next && next->worldEpoch!=first->worldEpoch);
+    LHOLO_CHECK(next && !next->projectionAnchor);
+    view.invalidate();
+    LHOLO_CHECK(!view.snapshot());
+}
+
+int runProjectionCullingTests();
+int runProjectionDrawCacheTests();
+
 int main() {
     try {
+    testLoadOriginSnapshot();
+    LHOLO_CHECK(runProjectionCullingTests()==0);
+    LHOLO_CHECK(runProjectionDrawCacheTests()==0);
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();

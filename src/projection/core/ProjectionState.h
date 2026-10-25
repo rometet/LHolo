@@ -8,6 +8,8 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/LiquidBoundaryMaskCache.h"
+#include "projection/core/ProjectionVisibilityRules.h"
+#include "projection/core/ProjectionDrawCache.h"
 #include "projection/ProjectionTypes.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
 #include "projection/mesh/SectionMissingLayerSnapshot.h"
@@ -48,6 +50,12 @@ using TextureVariant =
     std::variant<std::monostate, mce::TexturePtr, mce::ClientTexture, mce::ServerTexture>;
 
 struct SectionState {
+    // Conservative geometry AABB; fallback visibility stays true until layout
+    // and camera matrices are ready.
+    ProjectionBounds buildBounds{};
+    bool renderVisible{true};
+    bool buildVisible{true};
+    bool prefetchVisible{true};
     Vec3    center{};
     bool    dirty{};
     bool    incrementalDirty{};
@@ -83,6 +91,17 @@ struct ProjectionState {
     int animatedBubbleMirror{-1};
     int animatedBubbleRotation{-1};
     std::size_t                     blendSortCursor{};
+    // From MarmieQi 26.51.4: cache draw slots independently of heavy per-frame
+    // geometry and use view-prioritized, starvation-free section scheduling.
+    ProjectionDrawCache drawCache;
+    std::uint64_t meshUploadRevision{};
+    std::uint64_t visibilityRevision{};
+    std::uint64_t meshBuildSelections{};
+    std::uint64_t visibilityBoundsGeneration{};
+    std::size_t visibilityBoundsSections{};
+    int visibilityBoundsMirror{-999};
+    int visibilityBoundsRotation{-999};
+
     bool                            enabled{};
     bool                            placementCoordinatesInvalid{};
     BlockPos                        anchor{};

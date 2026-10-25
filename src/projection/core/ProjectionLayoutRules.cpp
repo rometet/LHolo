@@ -6,6 +6,7 @@
 // tests can link it without the game runtime.
 
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionVisibilityRules.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,20 @@ int representableCoordinate(std::int64_t value) {
         static_cast<std::int64_t>((std::numeric_limits<int>::max)())));
 }
 } // namespace
+
+ProjectionBounds projectionSectionBounds(
+    SubChunkKey const& key, structure::LoadedStructure const& loaded, int mirror, int rotation
+) {
+    auto const [sx,sy,sz]=key;
+    ProjectionBounds bounds;
+    for(int dx : {0,15}) for(int dy : {0,15}) for(int dz : {0,15}) {
+        auto const p=transformStructurePosition(
+            BlockPos{sx*16+dx,sy*16+dy,sz*16+dz},loaded,mirror,rotation);
+        bounds.include({static_cast<float>(p.x),static_cast<float>(p.y),static_cast<float>(p.z)});
+    }
+    bounds.maximum={bounds.maximum.x+1.0f,bounds.maximum.y+1.0f,bounds.maximum.z+1.0f};
+    return bounds;
+}
 
 RenderBucket renderBucketFor(BlockRenderLayer layer) {
     switch (layer) {

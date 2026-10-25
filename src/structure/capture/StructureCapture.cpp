@@ -214,8 +214,14 @@ void tick(LocalPlayer& player) {
         std::lock_guard lock(gMutex);
         syncContextLocked(context);
         auto const forward = player.getViewVector(1.0f);
+        auto const feet=player.getFeetPos();
+        auto const anchorCell=projection::detail::checkedBlockCell(
+            {feet.x,feet.y,feet.z},1);
+        std::optional<std::array<int,3>> anchor;
+        if(anchorCell)anchor=std::array<int,3>{
+            (*anchorCell)[0],(*anchorCell)[1]-1,(*anchorCell)[2]};
         gClientView.publish(context.level, context.dimension, player.getRotation().y,
-            {forward.x, forward.y, forward.z},gameplayInputEnabled,sampledAtMillis);
+            {forward.x, forward.y, forward.z},gameplayInputEnabled,sampledAtMillis,anchor);
         auto const points = gRequests.takePoints();
         if (points) {
             auto const position = player.getFeetPos();
