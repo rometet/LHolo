@@ -62,6 +62,7 @@
 #include "ll/api/mod/NativeMod.h"
 
 #include "render/OverlayMaterials.h"
+#include "render/ScopedShaderColor.h"
 
 namespace lholo::projection::detail {
 
@@ -287,29 +288,7 @@ private:
     bool                 mSaved{};
 };
 
-class ScopedShaderColorWhite {
-public:
-    explicit ScopedShaderColorWhite(ScreenContext& screenContext)
-        : mShader(screenContext.currentShaderColor),
-          mSaved(mShader.color.get()) {
-        mShader.color.get() = mce::Color{1.0F, 1.0F, 1.0F, 1.0F};
-        mShader.dirty = true;
-    }
 
-    ~ScopedShaderColorWhite() {
-        mShader.color.get() = mSaved;
-        // The immediate submit may have uploaded white. Mark the restored
-        // value dirty so the next vanilla owner cannot inherit that multiplier.
-        mShader.dirty = true;
-    }
-
-    ScopedShaderColorWhite(ScopedShaderColorWhite const&) = delete;
-    ScopedShaderColorWhite& operator=(ScopedShaderColorWhite const&) = delete;
-
-private:
-    ShaderColor& mShader;
-    mce::Color   mSaved;
-};
 
 template <class Value>
 bool appendMatchingNativeField(
@@ -942,7 +921,9 @@ void submitProjectionMeshPass(
             auto const& mesh = state.nativeLiquidSectionMeshes[section];
             auto const* compat = state.praxisCompatLiquidSections[section].get();
             if ((mesh && mesh->isValid()) || (compat && compat->ready())) {
-                nativeLiquidSections.push_back(section);
+                if(section>=state.sections.size() ||
+                   state.sections[section].renderVisible)
+                    nativeLiquidSections.push_back(section);
             }
         }
         std::sort(
@@ -1050,8 +1031,8 @@ void submitProjectionMeshPass(
                     }
 
                     auto submitExact = [&](PraxisCompatLiquidSectionData const& data) {
-                        ScopedShaderColorWhite shaderColorWhite{
-                            renderContext.mScreenContext
+                        render::ScopedShaderColor shaderColorWhite{
+                            renderContext.mScreenContext.currentShaderColor
                         };
                         telemetry.praxisCompatShaderColorWhite = 1;
                         auto const submitted = submitPraxisExactReplayImmediately(
@@ -1215,14 +1196,39 @@ void submitProjectionMeshPass(
             if (usingBlendMaterial) ++state.glassR3BlendDrawCalls;
         }
     };
+    // MarmieQi 26.51.4/26.51.5 CPU draw-record cache, integrated with the
+    // Praxis glass path. Do not cache or touch GPU resource ownership.
+    auto const eye=ProjectionDrawPosition{
+        camera.x-static_cast<float>(renderOrigin.x),
+        camera.y-static_cast<float>(renderOrigin.y),
+        camera.z-static_cast<float>(renderOrigin.z)};
+    state.drawCache.prepare(
+        state.activationGeneration,state.meshUploadRevision,
+        state.visibilityRevision,state.sections.size(),eye,
+        [&](std::size_t i) {
+            ProjectionDrawRecord record;
+            record.section=i;
+            auto const& section=state.sections[i];
+            record.center={section.center.x,section.center.y,section.center.z};
+            for(std::size_t bucket=0;bucket<static_cast<std::size_t>(RenderBucket::Count);++bucket) {
+                auto const& mesh=section.meshes[bucket];
+                if(mesh && mesh->isValid())
+                    record.slots|=static_cast<std::uint16_t>(1u<<bucket);
+            }
+            return record;
+        },[&](std::size_t i) {
+            return i<state.sections.size() && state.sections[i].renderVisible;
+        });
     auto collectBucket = [&](std::size_t bucket) {
         std::vector<VisibleMesh> result;
-        result.reserve(state.sections.size());
-        for (std::size_t section = 0; section < state.sections.size(); ++section) {
-            auto const& mesh = state.sections[section].meshes[bucket];
-            if (mesh && mesh->isValid()) {
-                result.push_back({bucket, section});
-            }
+        if(bucket==static_cast<std::size_t>(RenderBucket::Blend)) {
+            result.reserve(state.drawCache.transparentTerrain.size());
+            for(auto const& draw:state.drawCache.transparentTerrain)
+                result.push_back({bucket,draw.section});
+        } else {
+            auto const& indices=state.drawCache.lists.at(bucket);
+            result.reserve(indices.size());
+            for(auto const index:indices)result.push_back({bucket,index});
         }
         return result;
     };
@@ -1262,6 +1268,7 @@ void submitProjectionMeshPass(
                 || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
             auto const section = state.blendSortCursor++ % state.sections.size();
             auto& sectionState = state.sections[section];
+            if(!sectionState.renderVisible) continue;
             if (sectionState.requestedRevision != sectionState.uploadedRevision) {
                 ++revisionChurn;
                 ++state.glassR3RevisionChurn;
@@ -1545,7 +1552,9 @@ void submitProjectionMeshPass(
         }
 
         // Textured placeholder hulls for block-entity blocks.
-        for (auto const& placeholder : state.blockEntityPlaceholderSectionMeshes) {
+        for (std::size_t i=0; i<state.blockEntityPlaceholderSectionMeshes.size(); ++i) {
+            if(i<state.sections.size() && !state.sections[i].renderVisible)continue;
+            auto const& placeholder=state.blockEntityPlaceholderSectionMeshes[i];
             if (!placeholder || !placeholder->isValid()) continue;
             placeholder->renderMesh(
                 renderContext.mScreenContext,
@@ -1584,20 +1593,19 @@ void submitProjectionMeshPass(
     auto* levelRendererPlayer = levelRenderer
         ? levelRenderer->mLevelRendererPlayer.get()
         : nullptr;
-    auto const& outlineMaterial = levelRendererPlayer
-        ? levelRendererPlayer->mOutlineSelectionMaterial.get()
-        : itemRenderer.mMatBlendBlock.get();
+    auto const* nativeOutline=render::selectionOutlineMaterial(levelRenderer);
+    auto const& outlineMaterial=nativeOutline
+        ? *nativeOutline : itemRenderer.mMatBlendBlock.get();
     auto const overlayTexture = render::resolveWhiteTextureVariant(levelRenderer);
-    // Prefer the glow sign text material for the bounds box: its shader reads
-    // the vertex color the builder wrote (bright cyan) instead of the
-    // engine-driven uniform color of the selection outline family.
-    auto const glowMaterial = render::resolveGlowSignMaterial(outlineMaterial);
-    auto const& boundsMaterial = glowMaterial ? *glowMaterial : outlineMaterial;
-    if (materialExists(boundsMaterial) && structureBoundsEnabled
+    // The project bounds are generated through the shared BoxWireframeMesh
+    // and colored through the native selection material only for this draw.
+    if (materialExists(outlineMaterial) && structureBoundsEnabled
         && state.structureBoundsMesh && state.structureBoundsMesh->isValid()) {
+        render::ScopedShaderColor boundsColor{
+            renderContext.mScreenContext.currentShaderColor,0xFFFFD633U};
         state.structureBoundsMesh->renderMesh(
             renderContext.mScreenContext,
-            boundsMaterial,
+            outlineMaterial,
             overlayTexture,
             0,
             state.structureBoundsMesh->mVertexCount.get().value_or(0u),
@@ -1608,6 +1616,10 @@ void submitProjectionMeshPass(
     auto const& warningMaterial = levelRendererPlayer
         ? levelRendererPlayer->selectionBlockEntityOverlayColorMaterial.get()
         : itemRenderer.mMatBlendBlockNoColor.get();
+    // Preserve per-vertex correction colors independent of previously
+    // submitted bounding-box shader tints. Restore the native shader state
+    // even if a draw fails on shutdown/reload.
+    render::ScopedShaderColor correctionColor{renderContext.mScreenContext.currentShaderColor};
     // seeThroughMeshes is passed per call so the "missing" correction meshes stay
     // depth-tested while only the "wrong" ones honor the X-ray toggle.
     auto renderOverlayMeshes = [&] (
@@ -1618,7 +1630,9 @@ void submitProjectionMeshPass(
     ) {
         if (!materialExists(material)) return;
         ScopedNoDepthTest seeThrough(material, seeThroughMeshes);
-        for (auto const& overlay : meshes) {
+        for (std::size_t i=0; i<meshes.size(); ++i) {
+            if(i<state.sections.size() && !state.sections[i].renderVisible)continue;
+            auto const& overlay=meshes[i];
             if (!overlay || !overlay->isValid()) continue;
             // The async upload may still contain the preceding width setting.
             // Select topology from each uploaded mesh, never from live settings.

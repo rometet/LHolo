@@ -9,6 +9,7 @@
 #include "projection/mesh/SectionBuildCommit.h"
 #include "projection/mesh/DirtySectionSelection.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/core/ProjectionState.h"
 #include "structure/StructureLoader.h"
 
@@ -53,15 +54,21 @@ std::optional<std::size_t> selectNextDirtySection(
     Vec3 const&            cameraPosition,
     ProjectionSectionBuildSettings const& settings
 ) {
-    return selectDirtySection(std::span<SectionState const>{state.sections}, [&](SectionState const& sectionState) {
-        auto const center = sectionState.center + Vec3{
-            static_cast<float>(state.anchor.x + settings.offsetX),
-            static_cast<float>(state.anchor.y + settings.offsetY),
-            static_cast<float>(state.anchor.z + settings.offsetZ)
-        };
-        auto const delta = center - cameraPosition;
-        return delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
-    });
+    return selectProjectionBuild(
+        state.sections.size(),state.meshBuildSelections,state.dirtySectionCursor,
+        [&](std::size_t index) {
+            auto const& sec=state.sections[index];
+            auto const center=sec.center+Vec3{
+                static_cast<float>(state.anchor.x+settings.offsetX),
+                static_cast<float>(state.anchor.y+settings.offsetY),
+                static_cast<float>(state.anchor.z+settings.offsetZ)
+            };
+            auto const delta=center-cameraPosition;
+            return ProjectionBuildCandidate{
+                sec.dirty,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
+                sec.incrementalDirty,delta.x*delta.x+delta.y*delta.y+delta.z*delta.z
+            };
+        });
 }
 
 bool validateMeshData(
@@ -147,6 +154,7 @@ void scheduleProjectionMeshBuild(
 
     auto const snapshotStarted = std::chrono::steady_clock::now();
     auto const section = *selected;
+    ++state.meshBuildSelections;
     if (!sectionBuildStorageReady(state, section) || !state.level || !state.dimension) {
         if (section < state.sections.size()) {
             state.sections[section].buildInFlight = false;
@@ -509,6 +517,7 @@ void buildNextProjectionSectionSynchronously(
                 settings
             );
         });
+        ++state.meshUploadRevision;
         break;
     }
 }
