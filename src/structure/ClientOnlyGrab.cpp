@@ -69,6 +69,7 @@ struct SilentSession {
     ContainerID containerId{ContainerID::None};
     SharedTypes::Legacy::ContainerType type{SharedTypes::Legacy::ContainerType::Container};
     FullContainerName sourceName{};
+    ContainerEnumName expectedSource{ContainerEnumName::LevelEntityContainer};
     std::vector<Slot> slots;
     std::optional<ItemStackRequestId> requestId;
     int beforeInventoryCount{};
@@ -202,6 +203,11 @@ LL_TYPE_INSTANCE_HOOK(SilentInventoryContentHook,ll::memory::HookPriority::Norma
             && sess.containerId==packet.mInventoryId) {
             sess.slots.clear();
             sess.sourceName=packet.mFullContainerName;
+            // InventoryContentPacket does not carry the request collection
+            // name reliably (chest observed as anvil_input_items). Use the
+            // actual block type for the request slot collection instead.
+            sess.sourceName.mName=sess.expectedSource;
+            sess.sourceName.mDynamicId=std::nullopt;
             int index=0;
             for(auto const& desc:*packet.mSlots) {
                 if(index>=108)break;
@@ -304,6 +310,13 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
             if(sess.phase==SilentSession::Phase::Idle) {
                 sess={};
                 sess.phase=SilentSession::Phase::Armed;
+                auto const blockId=target->getTypeName();
+                sess.expectedSource=blockId=="minecraft:barrel"
+                    ? ContainerEnumName::BarrelContainer
+                    : ((blockId=="minecraft:shulker_box" ||
+                        blockId.ends_with("_shulker_box"))
+                        ? ContainerEnumName::ShulkerBoxContainer
+                        : ContainerEnumName::LevelEntityContainer);
                 sess.begun=GetTickCount64();
                 log("ARMED");
             }
@@ -358,17 +371,19 @@ bool submitOne(LocalPlayer& player) {
     ItemStackRequestId requestId{};
     requestId.clientInit();
     entry.mClientRequestId=requestId;
-    ItemStackRequestCereal::TakeActionData take{};
-    take.mAmount=static_cast<uchar>(amount);
-    take.mSource->mFullContainerName=sourceName;
-    take.mSource->mSlot=static_cast<uchar>(found.index);
-    take.mSource->mNetIdVariant=found.netId;
-    take.mDestination->mFullContainerName->mName=
+    // Native Shift-click uses a Place action when moving FROM the chest.
+    // Match the actual request, not the InventoryContentPacket's placeholder.
+    ItemStackRequestCereal::PlaceActionData place{};
+    place.mAmount=static_cast<uchar>(amount);
+    place.mSource->mFullContainerName=sourceName;
+    place.mSource->mSlot=static_cast<uchar>(found.index);
+    place.mSource->mNetIdVariant=found.netId;
+    place.mDestination->mFullContainerName->mName=
         ContainerEnumName::CombinedHotbarAndInventoryContainer;
-    take.mDestination->mFullContainerName->mDynamicId=std::nullopt;
-    take.mDestination->mSlot=static_cast<uchar>(targetSlot);
-    take.mDestination->mNetIdVariant=ItemStackNetIdVariant{};
-    entry.mActions->emplace_back(take);
+    place.mDestination->mFullContainerName->mDynamicId=std::nullopt;
+    place.mDestination->mSlot=static_cast<uchar>(targetSlot);
+    place.mDestination->mNetIdVariant=ItemStackNetIdVariant{};
+    entry.mActions->emplace_back(place);
     req.mRequests->push_back(std::move(entry));
     {
         std::lock_guard lock(mutex);
