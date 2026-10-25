@@ -24,8 +24,8 @@
 #include "mc/world/item/ItemStack.h"
 #include "mc/world/item/NetworkItemStackDescriptor.h"
 #include "mc/world/level/Level.h"
-#include "mc/world/item/NetworkItemStackDescriptor.h"
-#include "mc/world/level/Level.h"
+#include "mc/world/level/BlockSource.h"
+#include "mc/world/level/dimension/Dimension.h"
 #include "mc/world/item/HandSlot.h"
 #include "mc/world/level/Tick.h"
 #include "mc/world/level/block/Block.h"
@@ -38,6 +38,9 @@
 #include "mc/network/packet/InventoryContentPacket.h"
 #include "mc/network/packet/InventorySlotPacket.h"
 #include "mc/network/packet/ItemStackRequestPacket.h"
+#include "mc/network/packet/InventoryTransactionPacket.h"
+#include "mc/network/packet/PlayerAuthInputPacket.h"
+#include "mc/entity/components/PackedItemUseLegacyInventoryTransaction.h"
 #include "mc/network/packet/ItemStackResponseSlotInfo.h"
 #include "mc/network/packet/ItemStackResponseContainerInfo.h"
 #include "mc/network/packet/ItemStackResponseInfo.h"
@@ -60,7 +63,7 @@
 
 namespace lholo::structure::detail {
 namespace {
-constexpr std::uint64_t kOpenTimeout=900, kContentTimeout=1600, kRequestTimeout=2200;
+constexpr std::uint64_t kOpenTimeout=5000, kContentTimeout=3000, kRequestTimeout=3500;
 std::atomic_bool installed{false};
 struct Slot {
     std::string id;
@@ -103,6 +106,38 @@ bool validContainerBlock(Block const* block) {
         || id=="minecraft:barrel" || id=="minecraft:shulker_box"
         || (id.starts_with("minecraft:") && id.ends_with("_shulker_box"));
 }
+// Arm on the actual outgoing right-click packet as well as GameMode.
+// Some remote-server interactions skip GameMode::useItemOn(first=true).
+// The packet supplies the authoritative clicked position. Never arm for
+// arbitrary GUI openings or non-container targets.
+bool armFromPacketBlock(BlockPos const& pos,char const* trigger) {
+    if(!installed.load(std::memory_order_acquire) || !enabled() || !alt())return false;
+    auto client=ll::service::getClientInstance();
+    auto* player=client?client->getLocalPlayer():nullptr;
+    if(!player || !StructureSession::getInstance().loaded())return false;
+    auto hud=StructureUiState::getInstance().materialHudView();
+    if(!hud || !hud->ready || hud->requirements.empty())return false;
+    auto const& block=player->getDimension()
+        .getBlockSourceFromMainChunkSource().getBlock(pos);
+    if(!validContainerBlock(&block))return false;
+    bool complete=true;
+    auto const carried=structure::countInventoryItems(player->getInventory(),&complete);
+    if(computeGrabBudget(hud->requirements,carried,complete).empty())return false;
+    std::lock_guard lock(mutex);
+    if(sess.phase!=SilentSession::Phase::Idle)return false;
+    sess={};
+    sess.phase=SilentSession::Phase::Armed;
+    sess.begun=GetTickCount64();
+    auto const& id=block.getTypeName();
+    sess.expectedSource=id=="minecraft:barrel"
+        ? ContainerEnumName::BarrelContainer
+        : (id=="minecraft:shulker_box" || id.ends_with("_shulker_box"))
+            ? ContainerEnumName::ShulkerBoxContainer
+            : ContainerEnumName::LevelEntityContainer;
+    LHolo::getInstance().getSelf().getLogger().info(
+        "MATERIAL_GRAB_CLIENT_ONLY_ARMED_FROM_PACKET source={} block={}",trigger,id);
+    return true;
+}
 void log(char const* event,int a=0,int b=0) {
     LHolo::getInstance().getSelf().getLogger().info(
         "MATERIAL_GRAB_CLIENT_ONLY {} a={} b={}",event,a,b);
@@ -136,6 +171,23 @@ std::atomic_bool requestTraceInstalled{};
 LL_TYPE_INSTANCE_HOOK(SilentRequestTraceHook,ll::memory::HookPriority::Low,
     LoopbackPacketSender,&LoopbackPacketSender::$sendToServer,void,Packet& packet) {
     app::hook_lifecycle::DetourGuard guard;
+    if(guard && installed.load(std::memory_order_acquire) && enabled() && alt()) {
+        if(packet.getId()==MinecraftPacketIds::InventoryTransaction) {
+            auto& tx=static_cast<InventoryTransactionPacket&>(packet);
+            if(auto* use=std::get_if<ItemUseInventoryTransaction>(
+                    &*tx.mVariantTransaction)) {
+                if(use->mActionType==ItemUseInventoryTransaction::ActionType::Use)
+                    armFromPacketBlock(*use->mPos,"InventoryTransaction");
+            }
+        } else if(packet.getId()==MinecraftPacketIds::PlayerAuthInputPacket) {
+            auto& input=static_cast<PlayerAuthInputPacket&>(packet);
+            if(input.mItemUseTransaction) {
+                auto const& use=input.mItemUseTransaction->mTransaction;
+                if(use->mActionType==ItemUseInventoryTransaction::ActionType::Use)
+                    armFromPacketBlock(*use->mPos,"PlayerAuthInput");
+            }
+        }
+    }
     if(guard && packet.getId()==MinecraftPacketIds::ItemStackRequest) {
         static std::atomic<int> captured{};
         if(captured.fetch_add(1,std::memory_order_relaxed)<24) {
@@ -183,6 +235,10 @@ LL_TYPE_INSTANCE_HOOK(SilentContainerOpenHook,ll::memory::HookPriority::Normal,
     NetworkIdentifier const& source,ContainerOpenPacket const& packet) {
     app::hook_lifecycle::DetourGuard guard;
     if(guard && installed.load(std::memory_order_acquire) && enabled()) {
+        // Remote servers can skip the local GameMode hook altogether.
+        // Last-chance arming happens BEFORE origin() can create a UIScene.
+        if(packet.mType==SharedTypes::Legacy::ContainerType::Container)
+            armFromPacketBlock(*packet.mPos,"ContainerOpen");
         std::lock_guard lock(mutex);
         if(enabled() && alt()) {
             static std::atomic<int> diagnosticCount{};
