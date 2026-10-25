@@ -62,6 +62,7 @@
 #include "ll/api/mod/NativeMod.h"
 
 #include "render/OverlayMaterials.h"
+#include "render/ScopedShaderColor.h"
 
 namespace lholo::projection::detail {
 
@@ -287,29 +288,7 @@ private:
     bool                 mSaved{};
 };
 
-class ScopedShaderColorWhite {
-public:
-    explicit ScopedShaderColorWhite(ScreenContext& screenContext)
-        : mShader(screenContext.currentShaderColor),
-          mSaved(mShader.color.get()) {
-        mShader.color.get() = mce::Color{1.0F, 1.0F, 1.0F, 1.0F};
-        mShader.dirty = true;
-    }
 
-    ~ScopedShaderColorWhite() {
-        mShader.color.get() = mSaved;
-        // The immediate submit may have uploaded white. Mark the restored
-        // value dirty so the next vanilla owner cannot inherit that multiplier.
-        mShader.dirty = true;
-    }
-
-    ScopedShaderColorWhite(ScopedShaderColorWhite const&) = delete;
-    ScopedShaderColorWhite& operator=(ScopedShaderColorWhite const&) = delete;
-
-private:
-    ShaderColor& mShader;
-    mce::Color   mSaved;
-};
 
 template <class Value>
 bool appendMatchingNativeField(
@@ -1052,8 +1031,8 @@ void submitProjectionMeshPass(
                     }
 
                     auto submitExact = [&](PraxisCompatLiquidSectionData const& data) {
-                        ScopedShaderColorWhite shaderColorWhite{
-                            renderContext.mScreenContext
+                        render::ScopedShaderColor shaderColorWhite{
+                            renderContext.mScreenContext.currentShaderColor
                         };
                         telemetry.praxisCompatShaderColorWhite = 1;
                         auto const submitted = submitPraxisExactReplayImmediately(
@@ -1614,20 +1593,19 @@ void submitProjectionMeshPass(
     auto* levelRendererPlayer = levelRenderer
         ? levelRenderer->mLevelRendererPlayer.get()
         : nullptr;
-    auto const& outlineMaterial = levelRendererPlayer
-        ? levelRendererPlayer->mOutlineSelectionMaterial.get()
-        : itemRenderer.mMatBlendBlock.get();
+    auto const* nativeOutline=render::selectionOutlineMaterial(levelRenderer);
+    auto const& outlineMaterial=nativeOutline
+        ? *nativeOutline : itemRenderer.mMatBlendBlock.get();
     auto const overlayTexture = render::resolveWhiteTextureVariant(levelRenderer);
-    // Prefer the glow sign text material for the bounds box: its shader reads
-    // the vertex color the builder wrote (bright cyan) instead of the
-    // engine-driven uniform color of the selection outline family.
-    auto const glowMaterial = render::resolveGlowSignMaterial(outlineMaterial);
-    auto const& boundsMaterial = glowMaterial ? *glowMaterial : outlineMaterial;
-    if (materialExists(boundsMaterial) && structureBoundsEnabled
+    // The project bounds are generated through the shared BoxWireframeMesh
+    // and colored through the native selection material only for this draw.
+    if (materialExists(outlineMaterial) && structureBoundsEnabled
         && state.structureBoundsMesh && state.structureBoundsMesh->isValid()) {
+        render::ScopedShaderColor boundsColor{
+            renderContext.mScreenContext.currentShaderColor,0xFFFFD633U};
         state.structureBoundsMesh->renderMesh(
             renderContext.mScreenContext,
-            boundsMaterial,
+            outlineMaterial,
             overlayTexture,
             0,
             state.structureBoundsMesh->mVertexCount.get().value_or(0u),
@@ -1638,6 +1616,10 @@ void submitProjectionMeshPass(
     auto const& warningMaterial = levelRendererPlayer
         ? levelRendererPlayer->selectionBlockEntityOverlayColorMaterial.get()
         : itemRenderer.mMatBlendBlockNoColor.get();
+    // Preserve per-vertex correction colors independent of previously
+    // submitted bounding-box shader tints. Restore the native shader state
+    // even if a draw fails on shutdown/reload.
+    render::ScopedShaderColor correctionColor{renderContext.mScreenContext.currentShaderColor};
     // seeThroughMeshes is passed per call so the "missing" correction meshes stay
     // depth-tested while only the "wrong" ones honor the X-ray toggle.
     auto renderOverlayMeshes = [&] (

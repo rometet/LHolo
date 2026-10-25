@@ -16,6 +16,7 @@
 #include "mc/client/renderer/RenderMaterialGroup.h"
 #include "mc/client/renderer/TextureGroup.h"
 #include "mc/client/renderer/game/LevelRenderer.h"
+#include "mc/client/renderer/game/LevelRendererPlayer.h"
 #include "mc/deps/core/file/PathView.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
 #include "mc/deps/core/resource/ResourceLocation.h"
@@ -31,6 +32,14 @@
 namespace lholo::render {
 
 using TextureVariant = std::variant<std::monostate, mce::TexturePtr, mce::ClientTexture, mce::ServerTexture>;
+
+// One canonical selection outline material. No caching across resource
+// reload or renderer teardown; callers retain ownership of submission.
+inline mce::MaterialPtr const* selectionOutlineMaterial(LevelRenderer* renderer) {
+    if (!renderer) return nullptr;
+    auto* player=renderer->mLevelRendererPlayer.get();
+    return player ? &player->mOutlineSelectionMaterial.get() : nullptr;
+}
 
 inline bool materialExists(mce::MaterialPtr const& material) {
     return material.mRenderMaterialInfoPtr.get() != nullptr;

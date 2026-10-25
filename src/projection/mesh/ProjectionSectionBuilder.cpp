@@ -22,6 +22,7 @@
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionState.h"
+#include "render/BoxWireframeMesh.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
 #include "structure/StructureLoader.h"
@@ -42,6 +43,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <unordered_set>
 
 #include "mc/client/renderer/SupplementaryFieldAutoGenerationMode.h"
 #include "mc/client/renderer/TessellatorQuadInfo.h"
@@ -520,6 +522,7 @@ void buildProjectionSection(
         RenderBucket bucket{RenderBucket::Opaque};
         std::size_t                   structureIndex{};
         std::size_t compositeOutcomeIndex{NoCompositeBodyOutcome};
+        bool bubbleColumn{};
     };
     struct CompositeBodyOutcome {
         std::size_t  structureIndex{};
@@ -585,7 +588,8 @@ void buildProjectionSection(
                     layer,
                     renderBucketFor(layer),
                     index,
-                    compositeOutcomeIndex
+                    compositeOutcomeIndex,
+                    typeName == "minecraft:bubble_column"
                 });
             };
             appendLayer(primaryLayer);
@@ -623,6 +627,8 @@ void buildProjectionSection(
             "LHoloAlphaOneSided",
             "LHoloBlend"
         };
+    std::unordered_set<std::size_t> bubbleNativeAttempted;
+    bubbleNativeAttempted.reserve(state.sectionBlockIndices[section].size());
     ScopedTessellationBlocks tessellationBlocksScope(
         *state.expectedWorldBlocks,
         *state.expectedWorldLiquids,
@@ -693,9 +699,22 @@ void buildProjectionSection(
             auto const firstUv = tessellator.mMeshData->mTextureUVs[0].get().size();
             auto const extraBefore = blockTessellator.mRenderingExtra;
 #endif
-            auto const rendered = blockTessellator.tessellateInWorld(
+            auto rendered = blockTessellator.tessellateInWorld(
                 tessellator, renderBlock, layered.position, true
             );
+            if (layered.bubbleColumn
+                && tessellator.mMeshData->mPositions.get().size() == firstPosition
+                && !bubbleNativeAttempted.contains(layered.structureIndex)) {
+                // Native Bedrock bubble-column model is a separate shape.
+                // Try it only once after generic dispatch produced no
+                // vertices. Never fabricate a cube on failure.
+                bubbleNativeAttempted.insert(layered.structureIndex);
+                rendered = blockTessellator.tessellateBubbleColumnInWorld(
+                    tessellator, renderBlock, layered.position);
+            }
+            if (layered.bubbleColumn
+                && tessellator.mMeshData->mPositions.get().size() > firstPosition)
+                bubbleNativeAttempted.insert(layered.structureIndex);
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
             if (geometryProbe.select(layered.structureIndex)) {
                 auto const& entry = state.structure->renderBlocks[layered.structureIndex];
@@ -791,10 +810,10 @@ void buildProjectionSection(
                     );
                 }
             }
-            if (!rendered && !geometryAdded) {
-                // R11 animates bubble-column visuals in the projection render pass.
-                // Never substitute a misleading block-actor placeholder cube.
-                if (layered.block->getTypeName() == "minecraft:bubble_column") continue;
+            if (!geometryAdded && (!rendered || layered.bubbleColumn)) {
+                // A failed/dry vanilla bubble shape is not a chest model.
+                // R11 particle sprites remain a separate animated overlay.
+                if (layered.bubbleColumn) continue;
                 // No terrain-atlas model: needs a placeholder hull.
                 failedTessellationIndices.push_back(layered.structureIndex);
                 continue;
@@ -2394,43 +2413,20 @@ void buildCorrectionSectionMeshes(
 }
 
 void buildStructureBoundsMesh(
-    ProjectionState&                      state,
-    Tessellator&                          tessellator,
-    Tessellator::UploadMode               uploadMode,
+    ProjectionState& state, Tessellator& tessellator,
+    Tessellator::UploadMode uploadMode,
     ProjectionSectionBuildSettings const& settings
 ) {
-    if (uploadMode == Tessellator::UploadMode::Never || state.structureBoundsMesh) return;
+    if (uploadMode == Tessellator::UploadMode::Never || state.structureBoundsMesh
+        || !state.structure) return;
     auto const rotated = settings.rotationTurns == 1 || settings.rotationTurns == 3;
-    auto const width = static_cast<float>(rotated ? state.structure->sizeZ : state.structure->sizeX);
+    auto const width = static_cast<float>(
+        rotated ? state.structure->sizeZ : state.structure->sizeX);
     auto const height = static_cast<float>(state.structure->sizeY);
-    auto const depth = static_cast<float>(rotated ? state.structure->sizeX : state.structure->sizeZ);
-    // The wireframe wraps the structure extent exactly, with no outward
-    // expansion.
-    float const x0 = 0.0f, y0 = 0.0f, z0 = 0.0f;
-    float const x1 = width;
-    float const y1 = height;
-    float const z1 = depth;
-    tessellator.begin(
-        Tessellator::DebugContextCallback{}, mce::PrimitiveMode::LineList, 24, false
-    );
-    setColorAbgr(tessellator, 0xFFFFD633U);
-    auto addBoundsEdge = [&](Vec3 const& a, Vec3 const& b) {
-        // Center of the pure-white texture: the overlay material's alpha test
-        // samples it and never discards.
-        tessellator.tex2({0.5f, 0.5f}); tessellator.vertex(a.x, a.y, a.z);
-        tessellator.tex2({0.5f, 0.5f}); tessellator.vertex(b.x, b.y, b.z);
-    };
-    addBoundsEdge({x0,y0,z0},{x1,y0,z0}); addBoundsEdge({x1,y0,z0},{x1,y1,z0});
-    addBoundsEdge({x1,y1,z0},{x0,y1,z0}); addBoundsEdge({x0,y1,z0},{x0,y0,z0});
-    addBoundsEdge({x0,y0,z1},{x1,y0,z1}); addBoundsEdge({x1,y0,z1},{x1,y1,z1});
-    addBoundsEdge({x1,y1,z1},{x0,y1,z1}); addBoundsEdge({x0,y1,z1},{x0,y0,z1});
-    addBoundsEdge({x0,y0,z0},{x0,y0,z1}); addBoundsEdge({x1,y0,z0},{x1,y0,z1});
-    addBoundsEdge({x1,y1,z0},{x1,y1,z1}); addBoundsEdge({x0,y1,z0},{x0,y1,z1});
-    state.structureBoundsMesh = std::make_unique<mce::Mesh>(tessellator.end(
-        uploadMode,
-        "LHoloStructureBounds",
-        SupplementaryFieldAutoGenerationMode{0}
-    ));
+    auto const depth = static_cast<float>(
+        rotated ? state.structure->sizeX : state.structure->sizeZ);
+    state.structureBoundsMesh = render::buildBoxWireframeMesh(
+        tessellator, {0,0,0}, {width,height,depth}, "LHoloStructureBounds");
 }
 
 } // namespace lholo::projection::detail

@@ -2445,12 +2445,14 @@ static void testLoadOriginSnapshot() {
 
 int runProjectionCullingTests();
 int runProjectionDrawCacheTests();
+int runOverlayRenderingTests();
 
 int main() {
     try {
     testLoadOriginSnapshot();
     LHOLO_CHECK(runProjectionCullingTests()==0);
     LHOLO_CHECK(runProjectionDrawCacheTests()==0);
+    LHOLO_CHECK(runOverlayRenderingTests()==0);
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
