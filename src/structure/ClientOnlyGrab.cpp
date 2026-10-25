@@ -123,6 +123,13 @@ LL_TYPE_INSTANCE_HOOK(SilentContainerOpenHook,ll::memory::HookPriority::Normal,
     app::hook_lifecycle::DetourGuard guard;
     if(guard && installed.load(std::memory_order_acquire) && enabled()) {
         std::lock_guard lock(mutex);
+        if(enabled() && alt()) {
+            static std::atomic<int> diagnosticCount{};
+            if(diagnosticCount.fetch_add(1,std::memory_order_relaxed)<12)
+                LHolo::getInstance().getSelf().getLogger().info(
+                    "MATERIAL_GRAB_CLIENT_ONLY_OPEN_TRACE phase={} age_ms={}",
+                    static_cast<int>(sess.phase),GetTickCount64()-sess.begun);
+        }
         if(sess.phase==SilentSession::Phase::Armed
             && GetTickCount64()-sess.begun<kOpenTimeout
             && packet.mType==SharedTypes::Legacy::ContainerType::Container) {
@@ -203,6 +210,14 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
     ItemStack& item,BlockPos const& at,uchar face,Vec3 const& hit,
     HandSlot handSlot,Block const* target,bool first) {
     app::hook_lifecycle::DetourGuard guard;
+    if(guard && alt() && first && target) {
+        static std::atomic<int> diagnosticCount{};
+        if(diagnosticCount.fetch_add(1,std::memory_order_relaxed)<12)
+            LHolo::getInstance().getSelf().getLogger().info(
+                "MATERIAL_GRAB_CLIENT_ONLY_USE_TRACE enabled={} installed={} target={} hand={}",
+                enabled(),installed.load(std::memory_order_acquire),
+                target->getTypeName(),static_cast<int>(handSlot));
+    }
     if(guard && installed.load(std::memory_order_acquire) && enabled()
         && alt() && first && handSlot==HandSlot::Mainhand
         && validContainerBlock(target)) {
@@ -323,7 +338,10 @@ bool installClientOnlyGrabHooks() {
     if(SilentResponseHook::hook()!=0)goto failSlot;
     if(SilentUseHook::hook()!=0)goto failResponse;
     if(SilentTickHook::hook()!=0)goto failUse;
-    installed=true;return true;
+    installed=true;
+    LHolo::getInstance().getSelf().getLogger().info(
+        "MATERIAL_GRAB_CLIENT_ONLY_HOOKS_READY enabled={}",enabled());
+    return true;
 failUse: SilentUseHook::unhook();
 failResponse: SilentResponseHook::unhook();
 failSlot: SilentInventorySlotHook::unhook();
