@@ -1,3 +1,12 @@
+# LHolo v26.51.2-ja.11-rc.1 — Rendering Performance, Bubble & Outline Update
+
+**Prerelease** for Minecraft Bedrock Windows **1.26.51.01**, LeviLamina Client **26.51.5** (Windows x64).
+
+Changes: upstream-derived frustum-aware section rendering, draw-list caching, stable schematic load origin, native bubble-column geometry fallback, and shared selection/correction outline handling. Client-only Alt + right-click material grab remains available with its opt-in flag.
+
+See [ja.11 release details](docs/RELEASE_JA11_RENDER_20261026.md) and [GitHub Releases](https://github.com/rometet/LHolo/releases).
+
+---
 # LHolo v26.51.2-ja.10-rc.1 — Client-only Material Grab
 
 **Prerelease** for Minecraft Bedrock Windows **1.26.51.01** + LeviLamina Client **26.51.5** (x64).

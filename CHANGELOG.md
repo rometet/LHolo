@@ -1,5 +1,14 @@
 # Changelog
 
+## v26.51.2-ja.11-rc.1 — 2026-10-26
+
+- **Upstream performance port:** Per-section frustum culling, visible-first geometry build scheduling and CPU draw-list caching, while keeping Praxis glass/liquid paths.
+- **Async schematic loading:** Preserve the requested player anchor from the click, even if loading completes after movement.
+- **Bubble columns:** Use vanilla bubble geometry when generic tessellation emits no vertices, without placeholder cubes; retain animated sprite overlays and dry/wet layer classification.
+- **Wireframe outlines:** Share the selection and schematic bounds mesh code, use exact bounding edges and scoped shader color, and retain existing verifier/X-ray behavior.
+- **Compatibility:** Retains client-only Alt + right-click material grab. Minecraft Bedrock Windows 1.26.51.01 / LeviLamina Client 26.51.5.
+- **Tests:** Release build and culling/cache, overlay, materials, translucency, waterlogged, bubble, UI and graphics regression suites PASS. User reported in-game changes looked good before release.
+- See `docs/RELEASE_JA11_RENDER_20261026.md`.
 ## v26.51.2-ja.10-rc.1 — 2026-10-26
 
 - **Added:** Opt-in client-only schematic material grab. Hold Alt + right-click on a chest to transfer missing materials; no server-side add-on is required.
