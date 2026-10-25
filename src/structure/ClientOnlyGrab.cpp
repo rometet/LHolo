@@ -26,6 +26,7 @@
 #include "mc/world/level/block/Block.h"
 #include "mc/network/NetworkIdentifier.h"
 #include "mc/network/PacketSender.h"
+#include "mc/network/LoopbackPacketSender.h"
 #include "mc/network/MinecraftPackets.h"
 #include "mc/network/packet/ContainerOpenPacket.h"
 #include "mc/network/packet/ContainerClosePacket.h"
@@ -49,6 +50,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <variant>
 
 namespace lholo::structure::detail {
 namespace {
@@ -115,6 +117,53 @@ void closeSession() {
     client->getPacketSender().sendToServer(*packet);
     log("CLOSED");
 }
+// Diagnostic comparison with Mojang's normal quick-move requests.
+// Observe only, never mutate/rewrite packets. The local integrated world uses
+// LoopbackPacketSender; other transport implementations are untouched.
+std::atomic_bool requestTraceInstalled{};
+LL_TYPE_INSTANCE_HOOK(SilentRequestTraceHook,ll::memory::HookPriority::Low,
+    LoopbackPacketSender,&LoopbackPacketSender::$sendToServer,void,Packet& packet) {
+    app::hook_lifecycle::DetourGuard guard;
+    if(guard && packet.getId()==MinecraftPacketIds::ItemStackRequest) {
+        static std::atomic<int> captured{};
+        if(captured.fetch_add(1,std::memory_order_relaxed)<24) {
+            auto& req=static_cast<ItemStackRequestPacket&>(packet);
+            for(auto const& entry:*req.mRequests) {
+                LHolo::getInstance().getSelf().getLogger().info(
+                    "MATERIAL_GRAB_CLIENT_ONLY_PACKET_TRACE request={} actions={}",
+                    entry.mClientRequestId->mRawId,entry.mActions->size());
+                for(auto const& action:*entry.mActions) {
+                    if(auto const* take=std::get_if<ItemStackRequestCereal::TakeActionData>(&action)) {
+                        LHolo::getInstance().getSelf().getLogger().info(
+                            "MATERIAL_GRAB_CLIENT_ONLY_PACKET_TAKE src={} slot={} net={} dst={} slot={} net={} amount={}",
+                            take->mSource->mFullContainerName->toString(),
+                            static_cast<int>(take->mSource->mSlot),
+                            take->mSource->mNetIdVariant->toString(),
+                            take->mDestination->mFullContainerName->toString(),
+                            static_cast<int>(take->mDestination->mSlot),
+                            take->mDestination->mNetIdVariant->toString(),
+                            static_cast<int>(take->mAmount));
+                    } else if(auto const* place=std::get_if<ItemStackRequestCereal::PlaceActionData>(&action)) {
+                        LHolo::getInstance().getSelf().getLogger().info(
+                            "MATERIAL_GRAB_CLIENT_ONLY_PACKET_PLACE src={} slot={} net={} dst={} slot={} net={} amount={}",
+                            place->mSource->mFullContainerName->toString(),
+                            static_cast<int>(place->mSource->mSlot),
+                            place->mSource->mNetIdVariant->toString(),
+                            place->mDestination->mFullContainerName->toString(),
+                            static_cast<int>(place->mDestination->mSlot),
+                            place->mDestination->mNetIdVariant->toString(),
+                            static_cast<int>(place->mAmount));
+                    } else {
+                        LHolo::getInstance().getSelf().getLogger().info(
+                            "MATERIAL_GRAB_CLIENT_ONLY_PACKET_OTHER_ACTION type={}",action.index());
+                    }
+                }
+            }
+        }
+    }
+    origin(packet);
+}
+
 // Only use a server-named, successfully opened container. We do not accept
 // inventory contents before a matching container-open handshake.
 LL_TYPE_INSTANCE_HOOK(SilentContainerOpenHook,ll::memory::HookPriority::Normal,
@@ -167,6 +216,16 @@ LL_TYPE_INSTANCE_HOOK(SilentInventoryContentHook,ll::memory::HookPriority::Norma
             sess.phase=SilentSession::Phase::Ready;
             consumed=true;
             log("CONTENT_READY",index,static_cast<int>(sess.slots.size()));
+            LHolo::getInstance().getSelf().getLogger().info(
+                "MATERIAL_GRAB_CLIENT_ONLY_SOURCE_NAME id={} name={}",
+                static_cast<int>(packet.mInventoryId),
+                packet.mFullContainerName->toString());
+            for(auto const& sourceSlot:sess.slots) {
+                LHolo::getInstance().getSelf().getLogger().info(
+                    "MATERIAL_GRAB_CLIENT_ONLY_SOURCE_SLOT id={} slot={} count={} net={}",
+                    sourceSlot.id,sourceSlot.index,sourceSlot.amount,
+                    sourceSlot.netId.toString());
+            }
         }
     }
     if(!consumed)origin(source,packet);
@@ -316,6 +375,9 @@ bool submitOne(LocalPlayer& player) {
         if(sess.phase!=SilentSession::Phase::Waiting)return false;
         sess.requestId=requestId;
     }
+    LHolo::getInstance().getSelf().getLogger().info(
+        "MATERIAL_GRAB_CLIENT_ONLY_DIRECT_REQUEST source={} slot={} net={} destination={} amount={} request={}",
+        sourceName.toString(),found.index,found.netId.toString(),targetSlot,amount,requestId.mRawId);
     client->getPacketSender().sendToServer(*packet);
     log("SENT_DIRECT_ITEM_STACK_REQUEST",amount,targetSlot);
     return true;
@@ -352,6 +414,8 @@ bool installClientOnlyGrabHooks() {
     if(SilentResponseHook::hook()!=0)goto failSlot;
     if(SilentUseHook::hook()!=0)goto failResponse;
     if(SilentTickHook::hook()!=0)goto failUse;
+    requestTraceInstalled.store(SilentRequestTraceHook::hook()==0,
+        std::memory_order_release);
     installed=true;
     LHolo::getInstance().getSelf().getLogger().info(
         "MATERIAL_GRAB_CLIENT_ONLY_HOOKS_READY enabled={}",enabled());
@@ -365,6 +429,8 @@ failOpen: SilentContainerOpenHook::unhook();
 }
 bool uninstallClientOnlyGrabHooks() {
     installed=false;
+    if(requestTraceInstalled.exchange(false,std::memory_order_acq_rel))
+        SilentRequestTraceHook::unhook();
     SilentTickHook::unhook();SilentUseHook::unhook();
     SilentResponseHook::unhook();SilentInventorySlotHook::unhook();
     SilentInventoryContentHook::unhook();SilentContainerOpenHook::unhook();
