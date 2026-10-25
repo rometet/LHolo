@@ -1316,6 +1316,7 @@ void testSettingsStore() {
     settings.materialHudEnabled = true;
     settings.materialHudPosition = 3;
     settings.altWheelOffsetEnabled = false;
+    settings.clientOnlyGrabEnabled = true;
     settings.moveHotkeys[4] = 0x57; // W
     settings.hasSavedProjection = true;
     settings.savedAnchorX = 12;
@@ -1359,6 +1360,7 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.materialHudEnabled);
     LHOLO_CHECK(loaded.materialHudPosition == 3);
     LHOLO_CHECK(!loaded.altWheelOffsetEnabled);
+    LHOLO_CHECK(loaded.clientOnlyGrabEnabled && loaded.clientOnlyGrabConfigured);
     LHOLO_CHECK(loaded.moveHotkeys[4] == 0x57);
     LHOLO_CHECK(loaded.hasSavedProjection);
     LHOLO_CHECK(loaded.savedAnchorX == 12);
@@ -1430,6 +1432,7 @@ void testSettingsStore() {
     LHOLO_CHECK(migrated.manualPlacementAllowedItems.empty());
     LHOLO_CHECK(!migrated.correctionSeeThrough);
     LHOLO_CHECK(!migrated.materialHudEnabled);
+    LHOLO_CHECK(!migrated.clientOnlyGrabEnabled && !migrated.clientOnlyGrabConfigured);
     LHOLO_CHECK(migrated.materialHudPosition == 3);
     // The upstream schema-12 defaults migrate to this fork's Japanese/Insert defaults.
     LHOLO_CHECK(migrated.language == "ja_JP");

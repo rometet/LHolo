@@ -10,6 +10,7 @@
 #include "structure/StructurePaths.h"
 #include "structure/StructureLoader.h"
 #include "structure/MaterialTracker.h"
+#include "structure/ClientOnlyGrab.h"
 #include "structure/StructureSession.h"
 #include "structure/StructureUiState.h"
 #include "structure/capture/StructureCapture.h"
@@ -124,6 +125,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.rangeEnabled = placementModes.range;
     model.placementModesRevision = placementModes.revision;
     model.experimentalConsent = structure::experimentalConsentGiven();
+    model.clientOnlyGrabEnabled=structure::detail::clientOnlyGrabEnabled();
     model.materialHudEnabled = structure::materialHudEnabled();
     model.materialHudPosition = std::clamp(structure::materialHudPosition(), 0, 3);
     model.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
@@ -209,6 +211,10 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     if (projection::getMissingSeeThrough() != model.missingSeeThrough) {
         projection::setMissingSeeThrough(model.missingSeeThrough);
         changed = true;
+    }
+    if (structure::detail::clientOnlyGrabEnabled()!=model.clientOnlyGrabEnabled) {
+        structure::detail::setClientOnlyGrabEnabled(model.clientOnlyGrabEnabled);
+        changed=true;
     }
     // Assisted-placement modes are session-only safety controls. Applying a
     // mode must not dirty or rewrite the persistent settings file.

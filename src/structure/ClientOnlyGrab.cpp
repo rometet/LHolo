@@ -65,6 +65,7 @@ namespace lholo::structure::detail {
 namespace {
 constexpr std::uint64_t kOpenTimeout=5000, kContentTimeout=3000, kRequestTimeout=3500;
 std::atomic_bool installed{false};
+std::atomic_bool preferenceEnabled{false};
 struct Slot {
     std::string id;
     int amount{};
@@ -94,9 +95,7 @@ std::mutex mutex;
 SilentSession sess;
 
 bool enabled() noexcept {
-    constexpr auto file=L".\\mods\\LHolo\\config\\client_only_grab.enabled";
-    auto const flags=GetFileAttributesW(file);
-    return flags!=INVALID_FILE_ATTRIBUTES && !(flags&FILE_ATTRIBUTE_DIRECTORY);
+    return preferenceEnabled.load(std::memory_order_acquire);
 }
 bool alt() noexcept {return !!(GetAsyncKeyState(VK_MENU)&0x8000);}
 bool validContainerBlock(Block const* block) {
@@ -598,6 +597,22 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
     }
 }
 }
+bool clientOnlyGrabEnabled() noexcept { return enabled(); }
+
+bool hasLegacyClientOnlyGrabMarker() noexcept {
+    // Migration only. Never consulted during normal runtime operations.
+    constexpr auto file=L".\\mods\\LHolo\\config\\client_only_grab.enabled";
+    auto const flags=GetFileAttributesW(file);
+    return flags!=INVALID_FILE_ATTRIBUTES && !(flags&FILE_ATTRIBUTE_DIRECTORY);
+}
+
+void setClientOnlyGrabEnabled(bool enable) {
+    bool const previous=preferenceEnabled.exchange(enable,std::memory_order_acq_rel);
+    // Stop an in-flight silent session immediately on switch-off so no stale
+    // response can be accepted after the user disables the experimental path.
+    if(previous && !enable) closeSession();
+}
+
 bool installClientOnlyGrabHooks() {
     installed=false;
     if(SilentContainerOpenHook::hook()!=0)return false;

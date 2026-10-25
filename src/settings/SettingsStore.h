@@ -31,6 +31,11 @@ struct Settings {
     bool correctionSeeThrough{false};
     bool missingSeeThrough{false};
     bool experimentalConsent{false};
+    // Experimental no-GUI server-authoritative schematic material grabbing.
+    // Explicit user opt-in through the Experimental tab, no marker required.
+    bool clientOnlyGrabEnabled{false};
+    // Transient migration metadata: older versions used a marker file.
+    bool clientOnlyGrabConfigured{false};
     bool materialHudEnabled{false};
     int materialHudPosition{3};
     // Per-client preference; modes remain session-only. Empty means no exceptions.

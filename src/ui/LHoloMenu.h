@@ -109,6 +109,7 @@ struct MenuModel {
     bool rangeEnabled{};
     std::uint64_t placementModesRevision{};
     bool experimentalConsent{};
+    bool clientOnlyGrabEnabled{};
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
     int autoPlacementBreakCooldownSeconds{10};

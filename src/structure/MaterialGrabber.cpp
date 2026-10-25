@@ -63,6 +63,9 @@ thread_local GrabSession session;
 // Holding Alt while opening the chest/shulker GUI arms ONE collection session.
 bool altPressed() noexcept { return (GetAsyncKeyState(VK_MENU)&0x8000)!=0; }
 bool hasPendingMaterialNeed() {
+    // OFF means no automatic material grab at all (not a silent-to-hidden
+    // fallback). Native chest interaction remains unchanged.
+    if(!clientOnlyGrabEnabled())return false;
     auto const hud=StructureUiState::getInstance().materialHudView();
     return StructureSession::getInstance().loaded() && hud && hud->ready
         && !hud->requirements.empty();

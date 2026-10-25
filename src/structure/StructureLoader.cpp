@@ -23,6 +23,7 @@
 #include "input/ViewMoveBasis.h"
 #include "settings/SettingsStore.h"
 #include "structure/MaterialTracker.h"
+#include "structure/ClientOnlyGrab.h"
 #include "structure/formats/StructureFormatLoaders.h"
 #include "structure/StructureSession.h"
 #include "structure/SchematicRuntime.h"
@@ -1142,9 +1143,16 @@ void loadSettings() {
         auto& session = detail::StructureSession::getInstance();
         lholo::settings::Settings settings;
         if (!lholo::settings::loadSettingsFile(path, settings)) {
+            detail::setClientOnlyGrabEnabled(detail::hasLegacyClientOnlyGrabMarker());
             saveSettings();
             return;
         }
+        // One-time migration: explicit JSON preference always takes
+        // precedence over the obsolete marker (including explicit OFF).
+        bool const needsMigration=!settings.clientOnlyGrabConfigured;
+        detail::setClientOnlyGrabEnabled(
+            needsMigration ? detail::hasLegacyClientOnlyGrabMarker()
+                           : settings.clientOnlyGrabEnabled);
         if (!i18n::setLanguageByCode(settings.language)) {
             logger().warn(
                 "Invalid interface language '{}'; using '{}'",
@@ -1251,6 +1259,7 @@ void loadSettings() {
             },
             settings.savedStructurePath
         });
+        if (needsMigration) saveSettings();
         logger().info("Loaded projection settings from {}", path.string());
     } catch (std::exception const& exception) {
         logger().error("Could not load projection settings {}: {}", path.string(), exception.what());
@@ -1282,6 +1291,7 @@ void saveSettings() {
         settings.correctionSeeThrough = projection::getCorrectionSeeThrough();
         settings.missingSeeThrough = projection::getMissingSeeThrough();
         settings.experimentalConsent = experimentalConsentGiven();
+        settings.clientOnlyGrabEnabled = detail::clientOnlyGrabEnabled();
         settings.materialHudEnabled = materialHudEnabled();
         settings.materialHudPosition = materialHudPosition();
         settings.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();

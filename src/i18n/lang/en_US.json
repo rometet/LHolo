@@ -130,6 +130,8 @@
   "button.close": "Close",
   "checkbox.manualPlace": "Manual place (right-click; hold to keep placing)",
   "checkbox.easyPlace": "Easy place (place when the crosshair is on a projected block)",
+  "checkbox.clientOnlyGrab": "Silent material grab (Alt + right-click chest)",
+  "hint.clientOnlyGrab": "Take missing schematic materials without opening the chest UI or installing a server add-on. Experimental: test with disposable items.",
   "checkbox.rangePlace": "Range place (auto place nearby missing blocks)",
   "mode.manual": "Manual place",
   "mode.easy": "Easy place",

@@ -1,5 +1,13 @@
 # Changelog
 
+## v26.51.2-ja.12-rc.1 — 2026-10-26
+
+- Moved client-only silent schematic material grabbing into the Experimental menu with a translated ON/OFF switch and the existing experimental-consent gate.
+- The preference saves to the ordinary LHolo settings file and applies without restarting; ON means no-GUI Alt + right-click material transfer, OFF means ordinary chest operation with no automatic material grabbing.
+- First-run migration imports an existing client_only_grab.enabled marker only if JSON setting is absent. Subsequent JSON ON/OFF wins regardless of leftover marker files; no file creation is needed.
+- Added Japanese, English, Simplified/Traditional Chinese and Russian menu translations, settings migration and UI regression coverage.
+- Retains ja.11 upstream render optimization, native bubble-column geometry, shared outlines and no-server-addon material grab implementation.
+
 ## v26.51.2-ja.11-rc.1 — 2026-10-26
 
 - **Upstream performance port:** Per-section frustum culling, visible-first geometry build scheduling and CPU draw-list caching, while keeping Praxis glass/liquid paths.

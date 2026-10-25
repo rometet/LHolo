@@ -1,3 +1,11 @@
+# LHolo v26.51.2-ja.12-rc.1 — Experimental Material Grab UI
+
+The Experimental tab has a persistent Silent material grab switch. Turn it ON to take missing schematic materials with Alt + right-click on a chest, without a server-side add-on, chest GUI, or manual marker file. Turn it OFF for ordinary chest operation.
+
+New installs start OFF until consent and user opt-in. Existing legacy marker files are imported on first launch if no explicit JSON setting exists. See docs/RELEASE_JA12_MATERIAL_GRAB_UI_20261026.md.
+
+---
+
 # LHolo v26.51.2-ja.11-rc.1 — Rendering Performance, Bubble & Outline Update
 
 **Prerelease** for Minecraft Bedrock Windows **1.26.51.01**, LeviLamina Client **26.51.5** (Windows x64).

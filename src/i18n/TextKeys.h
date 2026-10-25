@@ -175,6 +175,8 @@
     LHOLO_TEXT_KEY("button.close", ButtonClose, "")                                                      \
     LHOLO_TEXT_KEY("checkbox.manualPlace", CheckboxManualPlace, "")                                      \
     LHOLO_TEXT_KEY("checkbox.easyPlace", CheckboxEasyPlace, "")                                          \
+    LHOLO_TEXT_KEY("checkbox.clientOnlyGrab", CheckboxClientOnlyGrab, "")                              \
+    LHOLO_TEXT_KEY("hint.clientOnlyGrab", HintClientOnlyGrab, "")                                      \
     LHOLO_TEXT_KEY("checkbox.rangePlace", CheckboxRangePlace, "")                                        \
     LHOLO_TEXT_KEY("mode.manual", ModeManual, "")                                                        \
     LHOLO_TEXT_KEY("mode.easy", ModeEasy, "")                                                            \
