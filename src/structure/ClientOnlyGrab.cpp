@@ -224,9 +224,23 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
         auto client=ll::service::getClientInstance();
         auto* player=client?client->getLocalPlayer():nullptr;
         auto hud=StructureUiState::getInstance().materialHudView();
-        if(player && &mPlayer==static_cast<Player*>(player)
-            && StructureSession::getInstance().loaded()
-            && hud && hud->ready && !hud->requirements.empty()) {
+        // A local world runs client and integrated-server Player instances
+        // in the same process. Their pointers differ even for the same human.
+        // Compare the server-assigned actor identity instead of addresses.
+        bool const sameActor=player
+            && mPlayer.getOrCreateUniqueID()==player->getOrCreateUniqueID();
+        bool const hasStructure=static_cast<bool>(StructureSession::getInstance().loaded());
+        bool const needs=hud && hud->ready && !hud->requirements.empty();
+        if(!sameActor || !hasStructure || !needs) {
+            static std::atomic<int> rejectedCount{};
+            if(rejectedCount.fetch_add(1,std::memory_order_relaxed)<12)
+                LHolo::getInstance().getSelf().getLogger().info(
+                    "MATERIAL_GRAB_CLIENT_ONLY_ARM_REJECT"
+                    " actorMatch={} pointerMatch={} structure={} needs={} player={}",
+                    sameActor,player&&(&mPlayer==static_cast<Player*>(player)),
+                    hasStructure,needs,player!=nullptr);
+        }
+        if(sameActor && hasStructure && needs) {
             std::lock_guard lock(mutex);
             if(sess.phase==SilentSession::Phase::Idle) {
                 sess={};
