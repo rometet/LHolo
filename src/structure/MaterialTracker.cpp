@@ -48,6 +48,7 @@ namespace {
 constexpr std::uint64_t kAvailabilityRefreshMs = 400;
 constexpr std::uint64_t kMaterialHudRecountIntervalMs = 400;
 std::atomic_bool gMaterialListInvalidated{};
+std::atomic_bool gHudAvailabilityRefreshRequested{};
 
 using BlockCounts = std::unordered_map<Block const*, std::uint64_t>;
 
@@ -369,7 +370,8 @@ void refreshAvailability(LocalPlayer& player) {
     auto const& requirements = snapshot->requirements;
     if (requirements.empty()) return;
     auto const now = GetTickCount64();
-    if (lastRefreshMs != 0 && now - lastRefreshMs < kAvailabilityRefreshMs) return;
+    const bool force = gHudAvailabilityRefreshRequested.exchange(false, std::memory_order_acq_rel);
+    if (!force && lastRefreshMs != 0 && now - lastRefreshMs < kAvailabilityRefreshMs) return;
     lastRefreshMs = now;
 
     (void)ui.setMaterialHudAvailability(snapshot->revision, collectInventoryAvailability(player, requirements));
@@ -379,6 +381,11 @@ void refreshAvailability(LocalPlayer& player) {
 
 void requestMaterialListRefresh() {
     StructureUiState::getInstance().requestMaterialList();
+}
+
+void requestMaterialHudAvailabilityRefresh() {
+    gHudAvailabilityRefreshRequested.store(true, std::memory_order_release);
+    StructureUiState::getInstance().requestMaterialAvailabilityRefresh();
 }
 
 void invalidateMaterialList() {
@@ -416,6 +423,7 @@ void shutdownMaterialTracker() {
     worker.published.reset();
     worker.nextScheduleAt = 0;
     gMaterialListInvalidated.store(false, std::memory_order_release);
+    gHudAvailabilityRefreshRequested.store(false, std::memory_order_release);
     StructureUiState::getInstance().clearMaterialHud();
 }
 

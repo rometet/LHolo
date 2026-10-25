@@ -10,6 +10,8 @@ class LocalPlayer;
 namespace lholo::structure::detail {
 
 void requestMaterialListRefresh();
+// Confirmed server-side material moves should refresh the HUD immediately.
+void requestMaterialHudAvailabilityRefresh();
 void invalidateMaterialList();
 void tickMaterialTracker(LocalPlayer& player);
 void shutdownMaterialTracker();

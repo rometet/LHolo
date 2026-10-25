@@ -3,6 +3,7 @@
 // It accepts the server's real ContainerOpen/InventoryContent then dispatches
 // one normal ItemStackRequest. No server behavior pack or custom command.
 #include "structure/ClientOnlyGrab.h"
+#include "structure/MaterialTracker.h"
 #include "structure/MaterialGrabRules.h"
 #include "structure/InventoryContents.h"
 #include "structure/StructureUiState.h"
@@ -63,7 +64,7 @@ struct Slot {
     int index{};
 };
 struct SilentSession {
-    enum class Phase {Idle, Armed, Open, Ready, Waiting, Closing};
+    enum class Phase {Idle, Armed, Open, Ready, Waiting, AwaitingInventory, Closing};
     Phase phase{Phase::Idle};
     std::uint64_t begun{},lastSent{};
     ContainerID containerId{ContainerID::None};
@@ -261,7 +262,12 @@ LL_TYPE_INSTANCE_HOOK(SilentResponseHook,ll::memory::HookPriority::Normal,
                 log(resp.mResult==ItemStackNetResult::Success
                     ?"REQUEST_ACCEPTED":"REQUEST_REJECTED",
                     static_cast<int>(resp.mResult),sess.attempt);
-                sess.phase=SilentSession::Phase::Closing;
+                // ACK alone does not guarantee the native client inventory
+                // has applied the resulting slot update. Keep the authenticated
+                // session open until we observe that update on the game thread.
+                sess.phase=resp.mResult==ItemStackNetResult::Success
+                    ? SilentSession::Phase::AwaitingInventory
+                    : SilentSession::Phase::Closing;
                 break;
             }
         }
@@ -413,6 +419,43 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
             [](char const* err) noexcept {
                 app::reportNativeCallbackFailure("client-only material transfer",err);
             });
+    } else if(phase==SilentSession::Phase::AwaitingInventory) {
+        // Keep the silent container alive until the normal client inventory
+        // reflects the server-accepted transfer; only then refresh HUD data.
+        app::invokeNativeCallback([&] {
+            std::string expected;
+            int previous=0,attempt=0;
+            {
+                std::lock_guard lock(mutex);
+                if(sess.phase!=SilentSession::Phase::AwaitingInventory)return;
+                expected=sess.expectedItem;
+                previous=sess.beforeInventoryCount;
+                attempt=sess.attempt;
+            }
+            bool complete=true;
+            auto items=structure::countInventoryItems(this->getInventory(),&complete);
+            auto found=items.find(expected);
+            int const current=found==items.end()?0:found->second;
+            if(complete && current>previous) {
+                {
+                    std::lock_guard lock(mutex);
+                    if(sess.phase!=SilentSession::Phase::AwaitingInventory)return;
+                    sess.phase=SilentSession::Phase::Closing;
+                }
+                LHolo::getInstance().getSelf().getLogger().info(
+                    "MATERIAL_GRAB_CLIENT_ONLY_INVENTORY_CONFIRMED before={} after={} requested={}",
+                    previous,current,attempt);
+                requestMaterialHudAvailabilityRefresh();
+                closeSession();
+            } else if(now-last>1200) {
+                // An ACK without inventory reconciliation is not evidence of
+                // actual receipt. Do not replay or manufacture any item.
+                log("ACK_AWAITING_INVENTORY_TIMED_OUT",previous,current);
+                closeSession();
+            }
+        }, [](char const* err) noexcept {
+            app::reportNativeCallbackFailure("client-only material reconciliation",err);
+        });
     } else if(phase==SilentSession::Phase::Closing
         || (phase==SilentSession::Phase::Armed && now-start>kOpenTimeout)
         || (phase==SilentSession::Phase::Open && now-start>kContentTimeout)
