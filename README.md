@@ -1,3 +1,16 @@
+# LHolo v26.51.2-ja.10-rc.1 — Client-only Material Grab
+
+**Prerelease** for Minecraft Bedrock Windows **1.26.51.01** + LeviLamina Client **26.51.5** (x64).
+
+- **Schematic material grab:** Hold **Alt + right-click** on a chest while a schematic has missing materials. LHolo requests only needed items without a **server-side add-on**.
+- The silent container path keeps the world HUD visible during the grab. The user confirmed this in a local world and an external server on 2026-10-26.
+- Other changes include Easy Place rotation and responsiveness, material/verifier HUD consistency, and bubble/waterlogged projection improvements.
+- The client-only grab path is **opt-in**: create the empty file `mods/LHolo/config/client_only_grab.enabled` under your LeviLauncher instance and restart Minecraft. Without it, the previous hidden-UI grab path remains active.
+- This is a prerelease. Test first with disposable inventory. Not all containers, world types and servers have been tested.
+- See [release details](docs/RELEASE_JA10_CLIENT_ONLY_20261026.md).
+
+---
+
 # LHolo Glass R5 + Praxis Resource ABI v4
 
 Experimental prerelease, designed for PraxisCompanion v0.1.3-rc.1 (R33).

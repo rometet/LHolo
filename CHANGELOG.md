@@ -1,5 +1,15 @@
 # Changelog
 
+## v26.51.2-ja.10-rc.1 — 2026-10-26
+
+- **Added:** Opt-in client-only schematic material grab. Hold Alt + right-click on a chest to transfer missing materials; no server-side add-on is required.
+- **Fixed:** Silent container handling for local and external servers, keeping world HUD/hotbar visible during material grabs. Remote right-click detection now also observes outgoing interactions and the incoming container-open event.
+- **Fixed:** Server-authoritative inventory transfer with the vanilla `container_items` / `Place` request and reconciliation of accepted destination slots.
+- **Improved:** Easy Place orientation and latency, including stairs, trapdoors and connected blocks; material/verifier HUD consistency.
+- **Improved:** Waterlogged and animated bubble projection behavior. Glass R5 and native resource reload ABI v4 are retained.
+- **Limitations:** Prerelease; client-only material grab must be explicitly enabled; not every container or multiplayer configuration has been verified. Prior settings-save/hot-unload limitations are not claimed fixed.
+- See [release details](docs/RELEASE_JA10_CLIENT_ONLY_20261026.md).
+
 ## v26.51.2-ja.9-rc.1 — 2026-10-21
 
 - Native LHolo resource reload ABI v4, real owner/epoch/GPU lifecycle checks.
