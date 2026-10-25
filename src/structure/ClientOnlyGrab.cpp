@@ -22,6 +22,10 @@
 #include "mc/client/network/ClientNetworkHandler.h"
 #include "mc/world/actor/player/Inventory.h"
 #include "mc/world/item/ItemStack.h"
+#include "mc/world/item/NetworkItemStackDescriptor.h"
+#include "mc/world/level/Level.h"
+#include "mc/world/item/NetworkItemStackDescriptor.h"
+#include "mc/world/level/Level.h"
 #include "mc/world/item/HandSlot.h"
 #include "mc/world/level/Tick.h"
 #include "mc/world/level/block/Block.h"
@@ -50,6 +54,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <memory>
 #include <algorithm>
 #include <variant>
 
@@ -62,6 +67,7 @@ struct Slot {
     int amount{};
     ItemStackNetIdVariant netId;
     int index{};
+    std::shared_ptr<NetworkItemStackDescriptor> descriptor;
 };
 struct SilentSession {
     enum class Phase {Idle, Armed, Open, Ready, Waiting, AwaitingInventory, Closing};
@@ -76,6 +82,10 @@ struct SilentSession {
     int beforeInventoryCount{};
     int attempt{};
     std::string expectedItem;
+    int destinationSlot{-1};
+    int acceptedDestinationAmount{};
+    std::optional<ItemStackNetId> acceptedDestinationNetId;
+    std::shared_ptr<NetworkItemStackDescriptor> sourceDescriptor;
 };
 std::mutex mutex;
 SilentSession sess;
@@ -216,7 +226,8 @@ LL_TYPE_INSTANCE_HOOK(SilentInventoryContentHook,ll::memory::HookPriority::Norma
                     auto name=desc.mImpl->getFullName();
                     if(!name.empty())sess.slots.push_back({
                         std::move(name),static_cast<int>(desc.mStackSize),
-                        desc.mNetIdVariant,index});
+                        desc.mNetIdVariant,index,
+                        std::make_shared<NetworkItemStackDescriptor>(desc)});
                 }
                 ++index;
             }
@@ -262,6 +273,32 @@ LL_TYPE_INSTANCE_HOOK(SilentResponseHook,ll::memory::HookPriority::Normal,
                 log(resp.mResult==ItemStackNetResult::Success
                     ?"REQUEST_ACCEPTED":"REQUEST_REJECTED",
                     static_cast<int>(resp.mResult),sess.attempt);
+                if(resp.mResult==ItemStackNetResult::Success) {
+                    // A server ACK with authoritative destination slot data
+                    // can be reconciled without any screen or additional request.
+                    // Never infer inventory changes from an ACK alone.
+                    for(auto const& updated:*resp.mContainers) {
+                        const auto name=updated.mFullContainerName->mName;
+                        if(name!=ContainerEnumName::CombinedHotbarAndInventoryContainer
+                            && name!=ContainerEnumName::HotbarContainer
+                            && name!=ContainerEnumName::InventoryContainer)continue;
+                        for(auto const& updatedSlot:*updated.mSlots) {
+                            const int requested=static_cast<int>(updatedSlot.mRequestedSlot);
+                            const int actual=static_cast<int>(updatedSlot.mSlot);
+                            const int count=static_cast<int>(updatedSlot.mAmount);
+                            LHolo::getInstance().getSelf().getLogger().info(
+                                "MATERIAL_GRAB_CLIENT_ONLY_ACK_SLOT container={} requested={} slot={} amount={} net={}",
+                                updated.mFullContainerName->toString(),requested,
+                                actual,count,updatedSlot.mItemStackNetId->mRawId);
+                            if(requested!=sess.destinationSlot && actual!=sess.destinationSlot)
+                                continue;
+                            if(count<1 || count>64 || count>sess.attempt)continue;
+                            if(updatedSlot.mItemStackNetId->mRawId<=0)continue;
+                            sess.acceptedDestinationAmount=count;
+                            sess.acceptedDestinationNetId=*updatedSlot.mItemStackNetId;
+                        }
+                    }
+                }
                 // ACK alone does not guarantee the native client inventory
                 // has applied the resulting slot update. Keep the authenticated
                 // session open until we observe that update on the game thread.
@@ -364,6 +401,10 @@ bool submitOne(LocalPlayer& player) {
         sess.phase=SilentSession::Phase::Waiting;
         sess.lastSent=GetTickCount64();
         sess.expectedItem=found.id;
+        sess.destinationSlot=targetSlot;
+        sess.sourceDescriptor=found.descriptor;
+        sess.acceptedDestinationAmount=0;
+        sess.acceptedDestinationNetId.reset();
         sess.beforeInventoryCount=prior;
         sess.attempt=amount;
     }
@@ -435,7 +476,44 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
             bool complete=true;
             auto items=structure::countInventoryItems(this->getInventory(),&complete);
             auto found=items.find(expected);
-            int const current=found==items.end()?0:found->second;
+            int current=found==items.end()?0:found->second;
+            if(complete && current==previous && now-last>=20) {
+                // The server approved this request, but the client inventory
+                // may not have a registered predictive screen to apply it.
+                // Only the response's authoritative destination slot is safe
+                // to reconcile, and only if it remains unoccupied.
+                int dest=-1,approvedCount=0;
+                std::optional<ItemStackNetId> approvedNetId;
+                std::shared_ptr<NetworkItemStackDescriptor> sourceDescriptor;
+                {
+                    std::lock_guard lock(mutex);
+                    if(sess.phase==SilentSession::Phase::AwaitingInventory) {
+                        dest=sess.destinationSlot;
+                        approvedCount=sess.acceptedDestinationAmount;
+                        approvedNetId=sess.acceptedDestinationNetId;
+                        sourceDescriptor=sess.sourceDescriptor;
+                    }
+                }
+                auto& inventory=this->getInventory();
+                if(sourceDescriptor && approvedNetId && approvedCount>0
+                    && approvedCount<=attempt && dest>=0
+                    && dest<inventory.getContainerSize()
+                    && inventory.getItem(dest).isNull()) {
+                    ItemStack received=ItemStack::fromDescriptor(
+                        *sourceDescriptor,this->getLevel().getBlockPalette(),true);
+                    if(!received.isNull() && received.getTypeName()==expected) {
+                        received.set(approvedCount);
+                        received.mNetIdVariant->mVariant=*approvedNetId;
+                        inventory.setItem(dest,received);
+                        LHolo::getInstance().getSelf().getLogger().info(
+                            "MATERIAL_GRAB_CLIENT_ONLY_AUTHORITATIVE_SLOT_APPLIED"
+                            " slot={} amount={} item={}",dest,approvedCount,expected);
+                        items=structure::countInventoryItems(inventory,&complete);
+                        auto updated=items.find(expected);
+                        current=updated==items.end()?0:updated->second;
+                    }
+                }
+            }
             if(complete && current>previous) {
                 {
                     std::lock_guard lock(mutex);
