@@ -1,6 +1,7 @@
 // One-shot, opt-in material grabbing for the native Bedrock container GUI.
 #include "structure/MaterialGrabber.h"
 #include "structure/MaterialGrabRules.h"
+#include "structure/ClientOnlyGrab.h"
 #include "structure/InvisibleContainerRenderContext.h"
 #include "structure/InventoryContents.h"
 #include "structure/StructureUiState.h"
@@ -306,9 +307,12 @@ bool installMaterialGrabberHook() {
         MaterialGrabOpenHook::unhook();MaterialGrabEarlyChestHook::unhook();return false;
     }
     available.store(true,std::memory_order_release);
+    if(!installClientOnlyGrabHooks()) LHolo::getInstance().getSelf().getLogger().warn(
+        "MATERIAL_GRAB_CLIENT_ONLY_HOOKS_UNAVAILABLE: native mode retained");
     return true;
 }
 bool uninstallMaterialGrabberHook() {
+    uninstallClientOnlyGrabHooks();
     available.store(false,std::memory_order_release);
     suppressedScreen.store(nullptr,std::memory_order_release);
     earlyArmedScreen.store(nullptr,std::memory_order_release);
