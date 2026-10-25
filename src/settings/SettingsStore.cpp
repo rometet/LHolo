@@ -114,6 +114,13 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     parsed.correctionSeeThrough = json.value("correctionSeeThrough", parsed.correctionSeeThrough);
     parsed.missingSeeThrough = json.value("missingSeeThrough", parsed.missingSeeThrough);
     parsed.experimentalConsent = json.value("experimentalConsent", parsed.experimentalConsent);
+    parsed.clientOnlyGrabEnabled = false;
+    parsed.clientOnlyGrabConfigured = false;
+    if (auto const value=json.find("clientOnlyGrabEnabled");
+        value!=json.end() && value->is_boolean()) {
+        parsed.clientOnlyGrabEnabled=value->get<bool>();
+        parsed.clientOnlyGrabConfigured=true;
+    }
     parsed.materialHudEnabled = json.value("materialHudEnabled", parsed.materialHudEnabled);
     parsed.materialHudPosition = json.value("materialHudPosition", parsed.materialHudPosition);
     // Malformed/missing lists fail closed without invalidating unrelated settings.
@@ -282,6 +289,7 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"correctionSeeThrough", settings.correctionSeeThrough},
         {"missingSeeThrough", settings.missingSeeThrough},
         {"experimentalConsent", settings.experimentalConsent},
+        {"clientOnlyGrabEnabled", settings.clientOnlyGrabEnabled},
         {"materialHudEnabled", settings.materialHudEnabled},
         {"materialHudPosition", settings.materialHudPosition},
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(

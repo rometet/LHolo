@@ -130,6 +130,8 @@
   "button.close": "關閉",
   "checkbox.manualPlace": "手動放置（右鍵放置·按住連續放置）",
   "checkbox.easyPlace": "輕鬆放置（準心對準投影方塊自動放置）",
+  "checkbox.clientOnlyGrab": "靜默取得材料（Alt + 右鍵箱子）",
+  "hint.clientOnlyGrab": "不需伺服器附加包；不開啟箱子介面，僅取得投影缺少的材料。實驗性功能，請先以不重要的物品測試。",
   "checkbox.rangePlace": "範圍放置（自動放置周圍投影缺塊）",
   "mode.manual": "手動放置",
   "mode.easy": "輕鬆放置",

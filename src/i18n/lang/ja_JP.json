@@ -130,6 +130,8 @@
   "button.close": "閉じる",
   "checkbox.manualPlace": "手動設置（右クリック、長押しで連続設置）",
   "checkbox.easyPlace": "簡単設置（照準を投影ブロックに合わせて設置）",
+  "checkbox.clientOnlyGrab": "チェストから不足素材を取得（Alt＋右クリック、UIを開かない）",
+  "hint.clientOnlyGrab": "サーバー側アドオン不要。設計図の不足素材だけを取得します。実験的機能のため、まず不要な素材でお試しください。",
   "checkbox.rangePlace": "範囲設置（周囲の未設置ブロックを自動設置）",
   "mode.manual": "手動設置",
   "mode.easy": "簡単設置",

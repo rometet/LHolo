@@ -458,7 +458,7 @@ bool renderExperimentalInfoButton(char const* label) {
 
 // The experimental-features consent modal. On "启用" it records consent and
 // enables the feature the user was trying to turn on (pendingFeature: 1 manual,
-// 2 easy, 3 range; -1 view-only, 0 none).
+// 2 easy, 3 range, 4 client-only grab; -1 view-only, 0 none).
 void renderExperimentalConsentModal(
     MenuModel& model, MenuActions const& actions, int& pendingFeature
 ) {
@@ -507,9 +507,13 @@ void renderExperimentalConsentModal(
         if (enable) {
             if (actions.giveExperimentalConsent) actions.giveExperimentalConsent();
             model.experimentalConsent = true;
-            model.manualPlace = pendingFeature == 1;
-            model.easyPlaceEnabled = pendingFeature == 2;
-            model.rangeEnabled = pendingFeature == 3;
+            if(pendingFeature==4) {
+                model.clientOnlyGrabEnabled=true;
+            } else if(pendingFeature>0) {
+                model.manualPlace = pendingFeature == 1;
+                model.easyPlaceEnabled = pendingFeature == 2;
+                model.rangeEnabled = pendingFeature == 3;
+            }
             pendingFeature = 0;
             ImGui::CloseCurrentPopup();
         }
@@ -592,6 +596,16 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
         } else {
             ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HintAssistedDisabled));
         }
+        ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.5f));
+        renderCheckboxRow(
+            "##ClientOnlyGrab",
+            i18n::tr(i18n::TextKey::CheckboxClientOnlyGrab),
+            model.clientOnlyGrabEnabled,
+            metrics
+        );
+        gate(model.clientOnlyGrabEnabled, 4);
+        ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintClientOnlyGrab));
+        ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.25f));
         renderSteppedInt(
             "PlacementRadius",
             i18n::tr(i18n::TextKey::LabelPlacementRadius),
