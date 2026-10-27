@@ -10,6 +10,7 @@
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/mesh/TransparentQuadSort.h"
 #include "projection/mesh/ProjectionAnimatedBubblePass.h"
 #include "projection/core/ProjectedPistonAppearance.h"
@@ -1498,18 +1499,19 @@ void submitProjectionMeshPass(
     // Textured liquid hulls travel the proven glass path: blend-block material
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
-        std::vector<std::size_t> liquidSections;
-        auto const liquidProxySectionCount = std::min({
+        // Keep fallback liquid proxies on the same conservative visibility
+        // path as native liquids and ordinary section meshes. Off-screen GPU
+        // meshes remain cached and are drawn again when the camera returns.
+        auto liquidSections = collectVisibleLiquidProxySections(
             state.sections.size(),
             state.liquidProxySectionMeshes.size(),
-            state.liquidProxySectionCellCounts.size()
-        });
-        for (std::size_t liquidSection = 0;
-             liquidSection < liquidProxySectionCount;
-             ++liquidSection) {
-            auto const& mesh = state.liquidProxySectionMeshes[liquidSection];
-            if (mesh && mesh->isValid()) liquidSections.push_back(liquidSection);
-        }
+            state.liquidProxySectionCellCounts.size(),
+            [&](std::size_t section) { return state.sections[section].renderVisible; },
+            [&](std::size_t section) {
+                auto const& mesh = state.liquidProxySectionMeshes[section];
+                return mesh && mesh->isValid();
+            }
+        );
         std::sort(
             liquidSections.begin(),
             liquidSections.end(),
