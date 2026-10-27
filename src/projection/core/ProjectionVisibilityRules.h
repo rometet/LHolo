@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <tuple>
+#include <vector>
 
 namespace lholo::structure {
 struct LoadedStructure;
@@ -55,6 +56,26 @@ inline bool projectionBoundsVisible(ProjectionFrustum const &frustum, Projection
                                  bounds.minimum.z + origin.z - padding},
                                 {bounds.maximum.x + origin.x + padding, bounds.maximum.y + origin.y + padding,
                                  bounds.maximum.z + origin.z + padding});
+}
+
+// Shared selection for compatibility liquid proxy draw calls. Bound all
+// parallel section arrays before reading their elements; visibility is derived
+// from the same fail-open frustum classification as regular block meshes.
+// Retain the GPU resources for off-screen sections; this filters draws only.
+template <class IsVisible, class IsValid>
+std::vector<std::size_t> collectVisibleLiquidProxySections(
+    std::size_t sectionCount,
+    std::size_t meshCount,
+    std::size_t cellCount,
+    IsVisible&& isVisible,
+    IsValid&& isValid
+) {
+    auto const count = (std::min)({sectionCount, meshCount, cellCount});
+    std::vector<std::size_t> shown;
+    for (std::size_t section = 0; section < count; ++section) {
+        if (isVisible(section) && isValid(section)) shown.push_back(section);
+    }
+    return shown;
 }
 
 // Hidden edits must not starve initial geometry currently in view.
