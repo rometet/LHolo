@@ -1,137 +1,103 @@
-# LHolo v26.51.2-ja.12-rc.1 — Experimental Material Grab UI
-
-The Experimental tab has a persistent Silent material grab switch. Turn it ON to take missing schematic materials with Alt + right-click on a chest, without a server-side add-on, chest GUI, or manual marker file. Turn it OFF for ordinary chest operation.
-
-New installs start OFF until consent and user opt-in. Existing legacy marker files are imported on first launch if no explicit JSON setting exists. See docs/RELEASE_JA12_MATERIAL_GRAB_UI_20261026.md.
-
----
-
-# LHolo v26.51.2-ja.11-rc.1 — Rendering Performance, Bubble & Outline Update
-
-**Prerelease** for Minecraft Bedrock Windows **1.26.51.01**, LeviLamina Client **26.51.5** (Windows x64).
-
-Changes: upstream-derived frustum-aware section rendering, draw-list caching, stable schematic load origin, native bubble-column geometry fallback, and shared selection/correction outline handling. Client-only Alt + right-click material grab remains available with its opt-in flag.
-
-See [ja.11 release details](docs/RELEASE_JA11_RENDER_20261026.md) and [GitHub Releases](https://github.com/rometet/LHolo/releases).
-
----
-# LHolo v26.51.2-ja.10-rc.1 — Client-only Material Grab
-
-**Prerelease** for Minecraft Bedrock Windows **1.26.51.01** + LeviLamina Client **26.51.5** (x64).
-
-- **Schematic material grab:** Hold **Alt + right-click** on a chest while a schematic has missing materials. LHolo requests only needed items without a **server-side add-on**.
-- The silent container path keeps the world HUD visible during the grab. The user confirmed this in a local world and an external server on 2026-10-26.
-- Other changes include Easy Place rotation and responsiveness, material/verifier HUD consistency, and bubble/waterlogged projection improvements.
-- The client-only grab path is **opt-in**: create the empty file `mods/LHolo/config/client_only_grab.enabled` under your LeviLauncher instance and restart Minecraft. Without it, the previous hidden-UI grab path remains active.
-- This is a prerelease. Test first with disposable inventory. Not all containers, world types and servers have been tested.
-- See [release details](docs/RELEASE_JA10_CLIENT_ONLY_20261026.md).
-
----
-
-# LHolo Glass R5 + Praxis Resource ABI v4
-
-Experimental prerelease, designed for PraxisCompanion v0.1.3-rc.1 (R33).
-
-Includes the genuine native LHolo resource_reload_v4 participant with
-GPU/owner lifetime checks, plus Glass R5 projection rendering fixes.
-
-2026-10-21: user-confirmed that RP OFF in a disposable offline cloned world
-left the third-person avatar visible with Praxis R33. Both participants
-resumed the new resource epoch. This is not tested for multiplayer, servers
-or general production worlds. The current Praxis gate admits only one
-ordinary local texture pack in the exact disposable clone.
-
-LHolo settings-save Access is denied and hook teardown warnings remain.
-See docs/R5_V4_RESOURCE_RELOAD_RELEASE.md.
-
----
-
 # LHolo
 
-[日本語](docs/README_JA.md) | [English](docs/README_EN.md)
+**Minecraft Bedrock Edition 向けの設計図投影・建築支援 Mod**
 
-> 此分支为日语/Praxis 风格界面分支。默认语言为日语，默认菜单键为 `Insert`。
+`.mcstructure` と `.litematic` をゲーム内に投影し、建築の進捗確認、ブロックの検証、材料の管理を支援します。Windows 版 Minecraft と **LeviLamina Client** で動作するクライアント Mod です。
 
-`LHolo` 是一个 [LeviLamina](https://github.com/LiteLDev/LeviLamina) 客户端投影模组
+[![Release](https://img.shields.io/github/v/release/rometet/LHolo?include_prereleases&label=Release&style=flat-square)](https://github.com/rometet/LHolo/releases)
+![Minecraft](https://img.shields.io/badge/Minecraft-1.26.51.01-555?style=flat-square)
+![Platform](https://img.shields.io/badge/Windows-x64-555?style=flat-square)
+[![License](https://img.shields.io/github/license/rometet/LHolo?style=flat-square)](LICENSE)
 
-## 版本号说明
+[**ダウンロード**](https://github.com/rometet/LHolo/releases) · [**導入方法**](#導入方法) · [**基本操作**](#基本操作) · [English](docs/README_EN.md) · [简体中文](docs/README_ZH_CN.md)
 
-示例版本：`v26.51.2`
+> [!IMPORTANT]
+> 公開中の最新プレリリースは **`v26.51.2-ja.12-rc.1`** です。対応環境は **Minecraft Bedrock 1.26.51.01 / LeviLamina Client 26.51.5 / Windows x64**。この公開ビルドは Minecraft 26.60 向けではありません。
 
-- `26.51`：对应的 Minecraft 游戏版本
-- `.2`：模组在该游戏版本下的第 2 个版本
+## 主な機能
 
-## 快速上手
+| 機能 | できること |
+| --- | --- |
+| **設計図の投影** | Bedrock の `.mcstructure` と Java Litematica の `.litematic` を表示 |
+| **配置・変形** | 投影の移動、回転、反転、レイヤー表示、複数の配置管理 |
+| **建築の検証** | 未設置・ブロック違い・向き／状態違い・余分なブロックを確認 |
+| **材料管理** | 必要な材料、設置済み・不足数、材料 HUD の表示 |
+| **表示の調整** | 投影の透明度、比較表示、境界線、各種 HUD |
+| **建築支援（実験的）** | 手動設置、Easy Place、範囲設置などの補助機能 |
+| **構造の書き出し** | 指定範囲を `.mcstructure` として保存 |
 
-[安装教程](https://www.bilibili.com/opus/1239631121935761412)
+### 比較表示の色
 
-1. 安装本模组以后,聊天栏输入 `LHolo`,或按 `Insert` 打开模组菜单
-2. 本模组交互为GUI与快捷键(具体快捷键直接看模组菜单)
-3. 使用本模组时,请关闭灵动视效
+| 色 | 意味 |
+| --- | --- |
+| 🔵 青 | まだ設置していないブロック |
+| 🔴 赤 | ブロックの種類が違う |
+| 🟡 黄 | 向き・ブロック状態が違う |
+| 🟣 紫 | 設計図にない余分なブロック |
 
-## 主要功能
+## 導入方法
 
-**文件支持**
+1. 対応する **Minecraft Bedrock（Windows）** と **LeviLamina Client** を用意します。
+2. [Releases](https://github.com/rometet/LHolo/releases) から、使用するバージョンに対応した **Windows x64 クライアント用 ZIP** をダウンロードします。
+3. Minecraft を終了し、既存の `mods/LHolo` があればバックアップします。ZIP 内の `LHolo` フォルダーを、対象の Minecraft インスタンスの `mods/` に配置します。
+4. Minecraft を起動してワールドに入り、**`Insert`** で LHolo メニューを開きます。
 
-- 支持 `.mcstructure` 和 `.litematic`(Java 版 Litematica 蓝图)两种文件
+```text
+<使用する Minecraft インスタンス>/
+└── mods/
+    └── LHolo/
+        └── LHolo.dll
+```
 
-**纠错**
+> [!NOTE]
+> 設計図の投影はクライアント側の表示機能で、サーバーへの Mod 導入は不要です。ただし、実際のブロック設置やアイテム移動はワールド／サーバー側の制限を受けます。
 
-- 蓝色 = 未放置投影方块
-- 红色 = 方块放置错误
-- 黄色 = 朝向或状态错误
-- 品红色 = 多余方块
+## 基本操作
 
-**分层建造**
+1. ワールド内で **`Insert`** を押す（またはチャット欄に `LHolo` と入力）。
+2. メニューの **「ファイル」** から `参照` で設計図を選び、読み込みます。
+3. **「配置」・「変形」** で投影位置、回転、反転を調整します。
+4. **「検証」・「材料」** で建築の進捗や不足ブロックを確認します。
 
-- X或Y轴分层显示
-- 材料分层显示
+| 操作 | 初期設定 |
+| --- | --- |
+| メニューを開閉 | `Insert` |
+| 水平移動 | `Ctrl + 矢印キー` |
+| 上下移動 | `Shift + ↑ / ↓` |
+| 表示レイヤー切り替え | `Alt + ↑ / ↓` |
+| 視線方向へ投影を移動 | `Alt + マウスホイール` |
 
-**结构变换**
+キー割り当てはメニューから変更できます。保存済みの設定がある場合は、現在のゲーム内設定が優先されます。
 
-- 移动
-- 旋转 
-- 镜像
+**詳しい操作方法:** [日本語ガイド](docs/README_JA.md) · [Praxis / LHolo 操作ガイド](docs/OPERATION_GUIDE_JA.md)
 
-**HUD 信息显示**
+## 実験的機能について
 
-- 屏幕角落可显示:蓝图文件名、当前显示的层、建造进度(已放/总数)、各类错误数量、当前辅助放置模式等。
-- 位置可放在屏幕四角,每一项都能单独开关。
+設置支援などの実験的機能は、内容を確認してから有効にしてください。サーバーのルールや保護機能に抵触する場合があります。
 
-**多语言支持**
+**サイレント材料取得（ja.12 以降）**
 
-- 日本語（此分支默认）
-- 简体中文
-- 繁體中文
-- English
-- Русский
+- メニューの **「実験的機能」** からサイレント材料取得を ON にします。新規導入時は OFF です。
+- 設計図の不足材料がある状態で、対象の材料を入れたチェストを **`Alt + 右クリック`** すると、必要なアイテムの取得を試みます。
+- チェストの通常操作に戻すときは OFF にしてください。サーバー側アドオンや設定用マーカーファイルは不要です。
+- 一部のチェストやサーバーは未検証のため、最初は失っても困らないアイテムで試してください。
 
-## 模组演示
+詳細: [ja.12 リリースノート](docs/RELEASE_JA12_MATERIAL_GRAB_UI_20261026.md)
 
-以下截图来自旧版界面；本分支使用日语默认语言和中央 Praxis 风格菜单。
+## 注意事項・互換性
 
-**模组菜单页面**
+- **Vibrant Visuals（鮮やかなビジュアル）** は投影描画と競合する場合があるため、使用中は OFF を推奨します。
+- このフォークは日本語を初期言語とし、中央パネル形式の UI を採用しています。他の言語への切り替えも可能です。
+- プレリリースには動作未確認の組み合わせや既知の制約があります。重要なワールドやインベントリはバックアップしてから試してください。
+- 旧バージョンのスクリーンショットや技術検証の記録は、現行 UI・現行バージョンでの動作保証ではありません。
 
-![image-20260918202008186](docs/images/image-20260918202008186.png)
+## ドキュメント
 
-**加载结构**
+- [更新履歴](CHANGELOG.md) / [リリース一覧](https://github.com/rometet/LHolo/releases)
+- [日本語の操作ガイド](docs/README_JA.md)
+- [ビルド・ソース情報](SOURCE_BUILD.md) / [開発者向けドキュメント](DEVELOPMENT.md)
+- [ライセンス](LICENSE) / [サードパーティの通知](THIRD_PARTY_NOTICES.md)
 
-![image-20260918200440220](docs/images/image-20260918200440220.png)
+## クレジット
 
-**纠错**
-
-![image-20260918201002570](docs/images/image-20260918201002570.png)
-
-**材料清单**
-
-![image-20260918201318315](docs/images/image-20260918201318315.png)
-
-**语言设置**
-
-入口：打开模组主菜单 -> 界面设置 -> 语言
-
-![image-20260918202312106](docs/images/image-20260918202312106.png)
-
-
-
-****
+LHolo は [MarmieQi/LHolo](https://github.com/MarmieQi/LHolo) をベースとするフォークです。元のプロジェクトと各依存ライブラリの貢献者に感謝します。ライセンスと第三者著作物の条件は、上記のライセンス関連ファイルをご確認ください。
