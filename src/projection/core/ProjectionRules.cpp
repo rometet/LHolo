@@ -9,6 +9,7 @@
 #include "projection/core/ProjectionRules.h"
 #include "structure/NativeBlockTransform.h"
 
+#include <array>
 #include <string>
 #include <type_traits>
 
@@ -23,6 +24,7 @@
 #include "mc/world/level/block/BlockType.h"
 #include "mc/world/level/block/NeighborDirection.h"
 #include "mc/world/level/block/VanillaStates.h"
+#include "mc/world/level/block/actor/BlockActorType.h"
 #include "mc/world/level/block/states/VanillaBlockStateTransformUtils.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
 
@@ -125,6 +127,27 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
     if (expected == actual) return true;
     auto const& typeName = expected.getTypeName();
     if (typeName != actual.getTypeName()) return false;
+
+    // Daylight sensors update their output as lighting changes. Treat only
+    // the native detector's RedstoneSignal as environmental; other states
+    // and the normal/inverted block identity remain strict.
+    if (expected.getBlockType().getBlockEntityType() == BlockActorType::DaylightDetector) {
+        auto const signal = actual.getState<int>(VanillaStates::RedstoneSignal());
+        if (!signal) return false;
+        auto const normalized = expected.setState(VanillaStates::RedstoneSignal(), *signal);
+        return normalized && *normalized == actual;
+    }
+
+    // Java's scaffolding bottom flag is converted to Bedrock's native
+    // stability-check marker. This isn't a player-controlled orientation.
+    // Keep stability distance and all remaining states strictly compared.
+    if (typeName == "minecraft:scaffolding") {
+        auto const checked = actual.getState<bool>(VanillaStates::StabilityCheckBit());
+        if (!checked) return false;
+        auto const normalized = expected.setState(VanillaStates::StabilityCheckBit(), *checked);
+        return normalized && *normalized == actual;
+    }
+
     // Bamboo's age/leaves/thickness are dynamic growth states controlled by
     // the engine rather than by player placement. Matching type is sufficient.
     if (typeName == "minecraft:bamboo") return true;
@@ -133,6 +156,21 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
     // other present or future sapling state remains part of correction.
     if (isVanillaSaplingType(typeName)) {
         return serializedStatesMatchExcept(expected, actual, "age_bit");
+    }
+
+    // Ignore only the dynamic native leaf decay bookkeeping flags. Species,
+    // all other block states, and the independent liquid layer remain strict.
+    if (typeName.starts_with("minecraft:") && expected.hasProperty(BlockProperty::Leaves)) {
+        std::array const decayStates{&VanillaStates::PersistentBit(), &VanillaStates::UpdateBit()};
+        auto const* normalized = &expected;
+        for (auto const* state : decayStates) {
+            auto const value = actual.getState<bool>(*state);
+            if (!value) continue;
+            auto const next = normalized->setState(*state, *value);
+            if (!next) return false;
+            normalized = next.as_ptr();
+        }
+        return *normalized == actual;
     }
 
     auto stateMatches = [&](auto const& state) {
@@ -145,11 +183,10 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
     // A real door stores its placement state across two blocks: the lower half
     // owns direction/open, the upper half owns hinge. Bedrock may normalize the
     // duplicated fields differently after a structure load, so the complete
-    // serialization hash can differ even for a correctly placed door. Only real
-    // doors carry upper_block_bit; trapdoor names also end with "door", so the
-    // presence of that state is the reliable discriminator.
+    // serialization hash can differ even for a correctly placed door. Check
+    // the native Door property too, since tall plants also have upper_block_bit.
     auto const expectedUpper = expected.getState<bool>(VanillaStates::UpperBlockBit());
-    if (expectedUpper) {
+    if (expected.hasProperty(BlockProperty::Door) && expectedUpper) {
         auto const actualUpper = actual.getState<bool>(VanillaStates::UpperBlockBit());
         if (!actualUpper || *actualUpper != *expectedUpper) return false;
         return *expectedUpper
@@ -161,7 +198,7 @@ bool projectionStatesMatch(Block const& expected, Block const& actual) {
     // Trapdoors are single blocks: compare their own placement states instead
     // of treating them like a two-block door.
     auto const expectedOpen = expected.getState<bool>(VanillaStates::OpenBit());
-    if (expectedOpen) {
+    if (expected.hasProperty(BlockProperty::Trapdoor) && expectedOpen) {
         auto const actualOpen = actual.getState<bool>(VanillaStates::OpenBit());
         return actualOpen && *actualOpen == *expectedOpen
             && stateMatches(VanillaStates::Direction())
