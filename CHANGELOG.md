@@ -42,8 +42,6 @@
 - 700 resource checks, 606 translucency checks, 5,891 water replay checks PASS.
 - LHolo config save and shutdown teardown warnings remain unresolved.
 
-# Changelog
-
 ## [26.51.2] - 2026-09-23
 
 ### Fixed
