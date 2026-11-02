@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — upstream verifier state fixes (2026-11-02)
+
+- Port four narrowly scoped upstream comparison fixes for scaffolding stability markers, daylight detector output, leaf persistence/update bits, and native door/trapdoor property gating.
+- Preserve the fork's existing door-direction comparison, independent waterlogged checks, and all render/placement paths. No upstream UI or performance scheduler changes.
+- Backports: MarmieQi/LHolo `f43114f`, `aa92e8b`, `89e9d2d` (leaves only), `b0e41e5` (door/trapdoor guards only).
+
 ## v26.51.2-ja.12-rc.1 — 2026-10-26
 
 - Moved client-only silent schematic material grabbing into the Experimental menu with a translated ON/OFF switch and the existing experimental-consent gate.
