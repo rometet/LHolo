@@ -34,6 +34,22 @@ private:
     NativeLiquidTelemetry*       mPreviousTelemetry{};
 };
 
+// During a diode's native tessellation, unoccupied schematic neighbors are
+// air, not whatever blocks happen to be in the player's real world.
+// Scope is thread-local and restricted to a five-block neighborhood.
+class ScopedDiodeAirNeighborhood {
+public:
+    ScopedDiodeAirNeighborhood(BlockPos const& center, Block const* air) noexcept;
+    ~ScopedDiodeAirNeighborhood() noexcept;
+    ScopedDiodeAirNeighborhood(ScopedDiodeAirNeighborhood const&) = delete;
+    ScopedDiodeAirNeighborhood& operator=(ScopedDiodeAirNeighborhood const&) = delete;
+private:
+    Block const* mPreviousAir{};
+    int mPreviousX{}, mPreviousY{}, mPreviousZ{};
+};
+
+[[nodiscard]] bool isDiodeVirtualAirPosition(BlockPos const& position) noexcept;
+
 // Vanilla BlockType::connectionUpdate recomputes a block's flattened
 // connection states correctly for every family (fences, glass panes, iron
 // bars) but also applies its result to the region it is given. Scope the

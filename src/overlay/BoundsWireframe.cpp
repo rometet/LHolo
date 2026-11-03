@@ -44,10 +44,13 @@ OffscreenCaptureDescription const& emptyOffscreenCaptureDescription() {
 
 BoundsWireframe::~BoundsWireframe() = default;
 
-void BoundsWireframe::setBounds(BlockPos const& min, BlockPos const& max, std::uint32_t color) {
+void BoundsWireframe::setBounds(BlockPos const& min, BlockPos const& max,
+    std::uint32_t color, std::uint16_t edgeMask) {
     // Uniform-color materials permit color edits without rebuilding the GPU mesh.
     mColor = color;
-    if (mHasBounds && mMin == min && mMax == max) return;
+    edgeMask &= 0x0FFFu;
+    if (mHasBounds && mMin == min && mMax == max && mEdgeMask == edgeMask) return;
+    mEdgeMask = edgeMask;
     mMin = min;
     mMax = max;
     mHasBounds = true;
@@ -62,6 +65,7 @@ void BoundsWireframe::clear() {
 void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderAlphaLayer) {
     if (!mHasBounds) return;
 
+    if (!mEdgeMask) return; // No internal edge survives outer-outline clipping.
     if (!renderAlphaLayer && !mMesh) {
         // Inclusive block positions map to exact grid-cell boundaries.
         float const x1 = static_cast<float>(
@@ -73,7 +77,7 @@ void BoundsWireframe::render(BaseActorRenderContext& renderContext, bool renderA
         resourcepacks::state().submitted(resourcepacks::Domain::Projection);
         mMesh=render::buildBoxWireframeMesh(
             renderContext.mScreenContext.tessellator,
-            {0,0,0},{x1,y1,z1},"LHoloSelectionBounds");
+            {0,0,0},{x1,y1,z1},"LHoloSelectionBounds",mEdgeMask);
         return;
     }
 

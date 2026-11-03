@@ -4,6 +4,7 @@
 #include "projection/core/ProjectionVisibilityRules.h"
 
 #include <bit>
+#include <array>
 #include <cstdio>
 #include <limits>
 
@@ -68,6 +69,44 @@ void testFrustum() {
     prefetch.include({6, 1, 1});
     CULL_CHECK(!projectionBoundsVisible(identity, prefetch, {}));
     CULL_CHECK(projectionBoundsVisible(identity, prefetch, {}, 16));
+}
+
+void testLiquidProxyDrawSelection() {
+    // The fallback proxy is deliberately different from its cached GPU
+    // ownership: hidden sections must not submit draws or lose their meshes.
+    std::array<bool, 6> visible{true, false, true, true, true, true};
+    std::array<bool, 6> valid{true, true, false, true, true, true};
+    std::size_t validChecks{};
+    auto const select = [&](std::size_t sections, std::size_t meshes, std::size_t cells) {
+        return collectVisibleLiquidProxySections(
+            sections, meshes, cells,
+            [&](std::size_t i) { return visible.at(i); },
+            [&](std::size_t i) { ++validChecks; return valid.at(i); }
+        );
+    };
+    auto const shown = select(6, 5, 4);
+    CULL_CHECK(shown.size() == 2);
+    CULL_CHECK(shown[0] == 0 && shown[1] == 3);
+    CULL_CHECK(validChecks == 3); // hidden section never checks its GPU mesh
+    CULL_CHECK(select(0, 5, 4).empty());
+    CULL_CHECK(select(6, 0, 4).empty());
+    CULL_CHECK(select(6, 5, 0).empty());
+
+    // An invalid/missing camera must fail open through the existing frustum
+    // classifier; no proxy can disappear solely because matrices are absent.
+    ProjectionBounds region;
+    region.include({20, 1, 1});
+    region.include({24, 5, 5});
+    auto const invalid = ProjectionFrustum{};
+    auto const identity = ProjectionFrustum::fromViewProjection(glm::mat4{1});
+    CULL_CHECK(projectionBoundsVisible(invalid, region, {}));
+    CULL_CHECK(!projectionBoundsVisible(identity, region, {}));
+    auto const failOpen = collectVisibleLiquidProxySections(
+        2, 2, 2,
+        [&](std::size_t) { return projectionBoundsVisible(invalid, region, {}); },
+        [&](std::size_t) { return true; }
+    );
+    CULL_CHECK(failOpen.size() == 2);
 }
 
 void testTransformedBounds() {
@@ -185,6 +224,7 @@ void testShell() {
 
 int runProjectionCullingTests() {
     testFrustum();
+    testLiquidProxyDrawSelection();
     testTransformedBounds();
     testBuildSelection();
     testShell();

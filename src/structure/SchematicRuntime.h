@@ -9,6 +9,7 @@
 #include <optional>
 
 class LocalPlayer;
+namespace lholo::structure {struct LoadedStructure;}
 namespace lholo::structure::schematic {
 struct MaterialRow {
     std::string item;
@@ -36,6 +37,10 @@ struct Snapshot {
     MistakeFilter filter{MistakeFilter::Mistakes};
     VerificationPhase phase{VerificationPhase::NotVerified};
     bool activeProjectionAvailable{};
+    // Present only for the current selected mcstructure whose file has an
+    // explicit, valid structure_world_origin tag.
+    std::optional<Cell> sourceWorldOrigin;
+    std::string selectedRegion; // transient UI selection, independent of visibility
 };
 Snapshot snapshot();
 // A completed manual verifier report, validated against the SAME active
@@ -48,7 +53,17 @@ bool importSavedProjection();
 bool select(std::uint64_t id);
 bool erase(std::uint64_t id);
 bool edit(SavedPlacement const& placement, std::uint64_t revision);
+// Selecting a region never changes its visible state or requests a mesh rebuild.
+bool chooseRegion(std::uint64_t placementId, std::string const& name);
+struct RegionHighlight { Cell min, max; };
+std::optional<RegionHighlight> highlightRegion(
+    std::uint64_t worldEpoch, int dimension, std::uint64_t loadedGeneration,
+    LoadedStructure const& loaded) noexcept;
+// Pre-publication, main-thread filtering shared by rendering, EasyPlace,
+// the manual verifier and material HUD. No engine/UI pointers are retained.
+void filterRegionsForActivation(LoadedStructure& loaded,ProjectionRequestStamp const& request);
 bool moveToFeet(std::uint64_t id);
+bool moveToSourceOrigin(std::uint64_t id);
 void verify();
 void cancelVerification();
 // Discard only the scan result/selection. Does not alter placement or projection.

@@ -68,6 +68,21 @@ public:
             [](Entry const& entry, std::size_t key) { return entry.index < key; });
         return found != mEntries.end() && found->index == index ? &found->value : nullptr;
     }
+    // Iteration stays entirely inside a task-owned immutable snapshot.
+    // No global correction-state reads are needed by the mesh worker.
+    template<class Visitor>
+    void forEach(Visitor&& visitor) const {
+        if (!mRanges.empty()) {
+            for (auto const& range : mRanges) {
+                auto const length = range.last - range.first + 1;
+                for (std::size_t offset = 0; offset < length; ++offset) {
+                    visitor(range.first + offset, mValues[range.offset + offset]);
+                }
+            }
+        } else {
+            for (auto const& entry : mEntries) visitor(entry.index, entry.value);
+        }
+    }
     std::size_t bytes() const noexcept {
         return mEntries.size() * sizeof(Entry) + mRanges.size() * sizeof(Range) + mValues.size() * sizeof(Value);
     }

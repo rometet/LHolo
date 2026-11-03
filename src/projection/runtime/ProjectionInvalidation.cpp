@@ -76,16 +76,11 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         || opacityChanged || correctionStyleChanged) {
         state.meshPreflightDone = false;
     }
-    if (result.geometryTransformChanged || opacityChanged || correctionStyleChanged) {
+    // A placement/layer/rotation change marks sections below, after its
+    // correction/progress invalidation. Do not issue two revision bumps in the
+    // same reconcile call; an XYZ move still requires fresh world corrections.
+    if (!result.placementViewChanged() && (opacityChanged || correctionStyleChanged)) {
         markAllSectionsDirty(state, false);
-    }
-    if (result.placementMoved && !result.geometryTransformChanged) {
-        // Local geometry survives an XYZ move, but a task already sampling the
-        // previous world position must not be accepted.
-        for (auto& sectionState : state.sections) {
-            ++sectionState.requestedRevision;
-            if (sectionState.buildInFlight) sectionState.dirty = true;
-        }
     }
 
     auto const layerIsVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
@@ -173,6 +168,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         }
         for (auto& mesh : state.warningFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.correctionOutlineSectionMeshes) mesh.reset();
+        state.correctionDrawBatches.clear();
         for (auto& mesh : state.wrongFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.wrongOutlineSectionMeshes) mesh.reset();
         for (auto& mesh : state.nativeLiquidSectionMeshes) mesh.reset();

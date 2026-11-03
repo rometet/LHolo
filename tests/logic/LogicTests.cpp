@@ -31,6 +31,8 @@
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
 #include "ProjectedPistonChecks.h"
+#include "ProjectedMeshSortChecks.h"
+#include "ProjectionCorrectionBatchPolicyChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
@@ -47,7 +49,17 @@
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/mesh/SectionBlockTransformCache.h"
+#include "projection/mesh/RedstoneNativeRenderPass.h"
+#include "projection/mesh/RedstoneCurrentShapeIsolation.h"
+#include "projection/world/ProjectionVirtualAirPolicy.h"
 #include "SectionSnapshotChecks.h"
+#include "SectionBlockTransformCacheChecks.h"
+#include "LocalCorrectionPriorityGridChecks.h"
+#include "OpaqueOutlineEdgeGridChecks.h"
+#include "CorrectionFaceMaskChecks.h"
+#include "CorrectionFillRunChecks.h"
+#include "PresentFrameStatsChecks.h"
 #include "projection/mesh/TransparentQuadSort.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
@@ -115,6 +127,15 @@ void testTransparentQuadSort() {
     LHOLO_CHECK(order && order->size() == 3);
     LHOLO_CHECK(order && (*order)[0] == 1 && (*order)[1] == 2 && (*order)[2] == 0);
     LHOLO_CHECK(order && transparentQuadOrderChanged(*order));
+    // GPU-sort reuse: identity starts with no retained order, exact equality
+    // keeps the uploaded buffer, and even one changed primitive requires it.
+    std::vector<std::size_t> identity{0, 1, 2};
+    LHOLO_CHECK(transparentSortOrderMatchesGpu(std::span<std::size_t const>{}, identity));
+    LHOLO_CHECK(order && !transparentSortOrderMatchesGpu(std::span<std::size_t const>{}, *order));
+    LHOLO_CHECK(order && transparentSortOrderMatchesGpu(*order, *order));
+    LHOLO_CHECK(order && !transparentSortOrderMatchesGpu(identity, *order));
+    LHOLO_CHECK(!transparentSortOrderMatchesGpu(
+        std::vector<std::size_t>{1, 2}, std::vector<std::size_t>{1, 2, 0}));
 
     std::vector<int> values{0,1,2,3, 10,11,12,13, 20,21,22,23};
     LHOLO_CHECK(order && reorderQuadVertexField(values, *order));
@@ -1317,6 +1338,7 @@ void testSettingsStore() {
     settings.materialHudPosition = 3;
     settings.altWheelOffsetEnabled = false;
     settings.clientOnlyGrabEnabled = true;
+    settings.clientOnlyGrabModifiers = 5;
     settings.moveHotkeys[4] = 0x57; // W
     settings.hasSavedProjection = true;
     settings.savedAnchorX = 12;
@@ -1361,6 +1383,7 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.materialHudPosition == 3);
     LHOLO_CHECK(!loaded.altWheelOffsetEnabled);
     LHOLO_CHECK(loaded.clientOnlyGrabEnabled && loaded.clientOnlyGrabConfigured);
+    LHOLO_CHECK(loaded.clientOnlyGrabModifiers == 5);
     LHOLO_CHECK(loaded.moveHotkeys[4] == 0x57);
     LHOLO_CHECK(loaded.hasSavedProjection);
     LHOLO_CHECK(loaded.savedAnchorX == 12);
@@ -2450,8 +2473,79 @@ int runProjectionCullingTests();
 int runProjectionDrawCacheTests();
 int runOverlayRenderingTests();
 
+void testDiodeVirtualAirNeighborhood() {
+    using lholo::projection::detail::inVirtualAirNeighborhood;
+    // Three equal west-facing repeater states in rocketcrafter.mcstructure
+    // at [2,1,10], [2,1,12], [2,1,14]. All must sample empty cells as
+    // projected air, not the actual world behind the hologram.
+    for (int z : {10, 12, 14}) {
+        LHOLO_CHECK(inVirtualAirNeighborhood(2, 1, z, 2, 1, z));
+        LHOLO_CHECK(inVirtualAirNeighborhood(4, 3, z + 2, 2, 1, z));
+        LHOLO_CHECK(inVirtualAirNeighborhood(0, -1, z - 2, 2, 1, z));
+        LHOLO_CHECK(!inVirtualAirNeighborhood(5, 1, z, 2, 1, z));
+        LHOLO_CHECK(!inVirtualAirNeighborhood(2, 1, z + 3, 2, 1, z));
+    }
+    LHOLO_CHECK(inVirtualAirNeighborhood(-1000000, 3, -1000000,
+                                         -1000000, 3, -1000000));
+    LHOLO_CHECK(!inVirtualAirNeighborhood(-999997, 3, -1000000,
+                                          -1000000, 3, -1000000));
+    LHOLO_CHECK(!inVirtualAirNeighborhood(0, 0, 0, 0, 0, 0, -1));
+}
+
+void testDiodeCurrentShapeIsolation() {
+    struct FakeNativeTessellator {
+        bool mCurrentShapeSet{true};
+        void const* mCurrentShapeBlock{reinterpret_cast<void const*>(0x1)};
+    } renderer;
+    using lholo::projection::detail::ScopedDiodeCurrentShape;
+    {
+        ScopedDiodeCurrentShape noChange{renderer, false};
+        LHOLO_CHECK(renderer.mCurrentShapeSet);
+        LHOLO_CHECK(renderer.mCurrentShapeBlock != nullptr);
+    }
+    LHOLO_CHECK(renderer.mCurrentShapeSet);
+    {
+        ScopedDiodeCurrentShape reset{renderer, true};
+        LHOLO_CHECK(!renderer.mCurrentShapeSet);
+        LHOLO_CHECK(renderer.mCurrentShapeBlock == nullptr);
+        // Simulate native shape calculation retaining a different full
+        // block on exit. Next diode must not inherit these values.
+        renderer.mCurrentShapeSet = true;
+        renderer.mCurrentShapeBlock = reinterpret_cast<void const*>(0x1);
+    }
+    LHOLO_CHECK(!renderer.mCurrentShapeSet);
+    LHOLO_CHECK(renderer.mCurrentShapeBlock == nullptr);
+}
+
+void testRedstoneNativeRenderPass() {
+    using lholo::projection::detail::isRedstoneDiodeNativeModel;
+    using lholo::projection::detail::diodeNeedsNativeExtraFlag;
+    using lholo::projection::detail::diodeNeedsDoubleSidedGhostMaterial;
+    using lholo::projection::detail::useNativeBlockCalculationCache;
+    for (auto name : {"minecraft:powered_repeater", "minecraft:unpowered_repeater",
+                      "minecraft:powered_comparator", "minecraft:unpowered_comparator"}) {
+        LHOLO_CHECK(isRedstoneDiodeNativeModel(name));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, false));
+        LHOLO_CHECK(diodeNeedsNativeExtraFlag(name, true));
+        LHOLO_CHECK(!useNativeBlockCalculationCache(name));
+        LHOLO_CHECK(diodeNeedsDoubleSidedGhostMaterial(name, true));
+        LHOLO_CHECK(!diodeNeedsDoubleSidedGhostMaterial(name, false));
+    }
+    for (auto name : {"minecraft:observer", "minecraft:piston",
+                      "minecraft:redstone_wire", "minecraft:stone", "custom:repeater"}) {
+        LHOLO_CHECK(!isRedstoneDiodeNativeModel(name));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, false));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, true));
+        LHOLO_CHECK(useNativeBlockCalculationCache(name));
+        LHOLO_CHECK(!diodeNeedsDoubleSidedGhostMaterial(name, true));
+    }
+}
+
 int main() {
     try {
+    testRedstoneNativeRenderPass();
+    testDiodeCurrentShapeIsolation();
+    testDiodeVirtualAirNeighborhood();
     testLoadOriginSnapshot();
     LHOLO_CHECK(runProjectionCullingTests()==0);
     LHOLO_CHECK(runProjectionDrawCacheTests()==0);
@@ -2459,6 +2553,8 @@ int main() {
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
+    lholo::tests::runProjectedMeshSortChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionBatchPolicyChecks([](bool ok) { LHOLO_CHECK(ok); });
     testLiquidReplayRules();
     testProjectionCoordinateBounds();
     testLoadIntent();
@@ -2480,6 +2576,12 @@ int main() {
     testSingleTaskWorker();
     testSectionBlockSnapshot();
     lholo::tests::runSectionSnapshotChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runSectionBlockTransformCacheChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runLocalCorrectionPriorityGridChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runOpaqueOutlineEdgeGridChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionFaceMaskChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionFillRunChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runPresentFrameStatsChecks([](bool ok) { LHOLO_CHECK(ok); });
     testMeshDiagnosticGate();
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });

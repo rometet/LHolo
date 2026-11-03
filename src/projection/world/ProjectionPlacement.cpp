@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <chrono>
 #include <memory>
 #include <tuple>
 #include <utility>
@@ -91,7 +92,9 @@ bool rebuildProjectionPlacement(
     ProjectionPlacementSettings const& settings,
     bool                               restart
 ) {
-    constexpr std::size_t kPlacementCellsPerFrame = 4096;
+    constexpr std::size_t kMinimumPlacementCellsPerFrame = 4096;
+    constexpr std::size_t kMaximumPlacementCellsPerFrame = 16384;
+    constexpr auto kPlacementWorkBudget = std::chrono::milliseconds(3);
 
     if (!state.structure || !state.level || !state.blockTessellator
         || !state.expectedWorldBlocks || !state.expectedWorldLiquids
@@ -162,9 +165,17 @@ bool rebuildProjectionPlacement(
 
     auto const total = state.structure->renderBlocks.size();
     auto const begin = state.placementBuildCursor;
-    auto const end = std::min(total, begin + kPlacementCellsPerFrame);
+    auto const hardEnd = std::min(total, begin + kMaximumPlacementCellsPerFrame);
+    auto const frameStarted = std::chrono::steady_clock::now();
 
-    for (std::size_t index = begin; index < end; ++index) {
+    for (std::size_t index = begin; index < hardEnd; ++index) {
+        // Give fast machines up to 4x the old per-frame progress, but cap the
+        // time spent on a single render callback once the old minimum is met.
+        if (index - begin >= kMinimumPlacementCellsPerFrame
+            && (index - begin) % 256 == 0
+            && std::chrono::steady_clock::now() - frameStarted >= kPlacementWorkBudget) {
+            break;
+        }
         auto const& entry = state.structure->renderBlocks[index];
         if (!isLayerVisible(
                 projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
@@ -218,8 +229,11 @@ bool rebuildProjectionPlacement(
                             if (rendererIndex
                                     < static_cast<unsigned int>(BlockActorRendererId::Count)
                                 && dispatcher.mRenderers.get()[rendererId]) {
+                                auto const& typeName = transformedBlock->getTypeName();
+                                bool const pistonCandidate = typeName == "minecraft:piston"
+                                    || typeName == "minecraft:sticky_piston";
                                 state.projectedBlockActors.push_back({
-                                    worldPosition, transformedBlock, actor, index
+                                    worldPosition, transformedBlock, actor, index, pistonCandidate
                                 });
                                 state.blockActorRendererAvailable[index] = 1;
                             }
@@ -261,8 +275,7 @@ bool rebuildProjectionPlacement(
         state.placementBuildCursor = index + 1;
     }
 
-    state.placementBuildCursor = end;
-    if (end < total) return false;
+    if (state.placementBuildCursor < total) return false;
 
     pairProjectedChests(region, state);
     for (std::size_t section = 0; section < state.sections.size(); ++section) {

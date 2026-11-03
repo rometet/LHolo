@@ -87,11 +87,6 @@ void processProjectionOpaqueFrame(
     // the render owner. This marker is not a private GPU completion receipt.
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     uploadCompletedProjectionMeshes(state, tessellator);
-    if (state.asyncMeshBuildingEnabled) {
-        // Bounds use the same exact extent/white UVs as synchronous fallback.
-        // Generate their 24 vertices once on the GPU owner, before CPU tasks.
-        buildStructureBoundsMesh(state, tessellator, Tessellator::UploadMode::Buffered, buildSettings);
-    }
     scheduleProjectionMeshBuild(
         state, tessellator, region, cameraPosition, buildSettings
     );

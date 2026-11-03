@@ -185,7 +185,22 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             auto p=*selected;
             if(ImGui::Button(tr(i18n::TextKey::SchematicMove)) && actions.movePlacementToFeet)actions.movePlacementToFeet(p.id);
             if(!metrics.compact)ImGui::SameLine();
+            ImGui::BeginDisabled(!snap.sourceWorldOrigin);
+            if(ImGui::Button("元の座標に配置") && actions.movePlacementToSourceOrigin)
+                actions.movePlacementToSourceOrigin(p.id);
+            ImGui::EndDisabled();
+            if(!metrics.compact)ImGui::SameLine();
             if(ImGui::Button(tr(i18n::TextKey::SchematicDelete)) && actions.deletePlacement)actions.deletePlacement(p.id);
+            if(snap.sourceWorldOrigin){
+                auto const& v=*snap.sourceWorldOrigin;
+                ImGui::TextDisabled("mcstructure origin: X %lld / Y %lld / Z %lld",
+                    static_cast<long long>(v.x),static_cast<long long>(v.y),
+                    static_cast<long long>(v.z));
+                if(v.x==0 && v.y==0 && v.z==0)
+                    ImGui::TextDisabled("注意: (0,0,0) はエクスポート時の初期値の場合があります");
+            }else{
+                ImGui::TextDisabled("元座標のないファイル、または未読み込みの配置では使用できません");
+            }
             char name[129]{};std::snprintf(name,sizeof(name),"%s",p.name.c_str());
             renderValueRow(tr(i18n::TextKey::LabelPlacementName),metrics,[&]{if(ImGui::InputText("##PlacementName",name,sizeof(name)))p.name=name;});
             auto coordinate = [&](char const* label,char const* id,std::int64_t& value){
@@ -205,6 +220,161 @@ void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetric
             auto const size=PlacementTransform{{model.sizeX,model.sizeY,model.sizeZ},{},p.rotation,p.mirror}.placedSize();
             int const max=p.layerAxis==LayerAxis::Material?std::max(0,model.materialCount-1):std::max(0,(p.layerAxis==LayerAxis::X?model.sizeX:layerCount(size,p.layerAxis))-1);
             renderSteppedInt("PlacementLayer",tr(i18n::TextKey::LabelCurrentLayer),p.layer,0,max,metrics);
+            ImGui::Separator();
+            ImGui::TextUnformatted("リージョン管理");
+            if(model.regionRows.empty()){
+                ImGui::TextDisabled("設計図の読み込み後にリージョンを管理できます");
+            } else {
+                // Each checkbox stores an override of the source's enabled-by-
+                // default behavior. Multiple checked regions render together.
+                auto setRegion=[&](std::string const& name,bool enabled){
+                    auto it=std::find_if(p.regions.begin(),p.regions.end(),
+                        [&](auto const& setting){return setting.name==name;});
+                    if(it!=p.regions.end() && it->area)it->enabled=enabled;
+                    else if(enabled){
+                        if(it!=p.regions.end())p.regions.erase(it);
+                    }else if(it!=p.regions.end())it->enabled=false;
+                    else p.regions.push_back({name,false});
+                };
+                auto const& selectedRegionName=snap.selectedRegion;
+                if(ImGui::SmallButton("全ON")) {
+                    for(auto const& r:model.regionRows)setRegion(r.name,true);
+                }
+                ImGui::SameLine();
+                if(ImGui::SmallButton("全OFF")) {
+                    for(auto const& r:model.regionRows)setRegion(r.name,false);
+                }
+                ImGui::SameLine();
+                if(ImGui::SmallButton("選択のみ") && !selectedRegionName.empty()) {
+                    for(auto const& r:model.regionRows)setRegion(r.name,r.name==selectedRegionName);
+                }
+                if(ImGui::BeginChild("##RegionList",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*std::min<std::size_t>(8,model.regionRows.size())+8),ImGuiChildFlags_Borders)){
+                    for(auto const& r:model.regionRows){
+                        ImGui::PushID(r.name.c_str());
+                        auto const it=std::find_if(p.regions.begin(),p.regions.end(),
+                            [&](auto const& setting){return setting.name==r.name;});
+                        bool enabled=it==p.regions.end() || it->enabled;
+                        if(ImGui::Checkbox("##Enabled",&enabled))setRegion(r.name,enabled);
+                        ImGui::SameLine();
+                        // The full remaining row is the region selector. The former
+                        // trailing SmallButton fell outside narrow menu columns,
+                        // making it appear as though region selection did nothing.
+                        auto const regionLabel = r.name + "  (" +
+                            std::to_string(r.sizeX) + " x " +
+                            std::to_string(r.sizeY) + " x " +
+                            std::to_string(r.sizeZ) + ")";
+                        if(ImGui::Selectable(regionLabel.c_str(),selectedRegionName==r.name)
+                            && actions.selectRegion)
+                            actions.selectRegion(p.id,r.name);
+                        if(r.custom){
+                            auto it=std::find_if(p.regions.begin(),p.regions.end(),
+                                [&](auto const& entry){return entry.name==r.name;});
+                            if(it!=p.regions.end() && it->area) {
+                                auto& b=*it->area;
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("X",&b.x,0);
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("Y",&b.y,0);
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("Z",&b.z,0);
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("幅",&b.sizeX,0);
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("高さ",&b.sizeY,0);
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(65);
+                                ImGui::InputInt("奥行",&b.sizeZ,0);
+                                // Region bounds are source-local and cannot
+                                // cross the source structure's dimensions.
+                                b.x=std::clamp(b.x,0,std::max(0,model.sizeX-1));
+                                b.y=std::clamp(b.y,0,std::max(0,model.sizeY-1));
+                                b.z=std::clamp(b.z,0,std::max(0,model.sizeZ-1));
+                                b.sizeX=std::clamp(b.sizeX,1,std::max(1,model.sizeX-b.x));
+                                b.sizeY=std::clamp(b.sizeY,1,std::max(1,model.sizeY-b.y));
+                                b.sizeZ=std::clamp(b.sizeZ,1,std::max(1,model.sizeZ-b.z));
+                                if(ImGui::SmallButton("削除")){
+                                    p.regions.erase(it);
+                                    if(selectedRegionName==r.name && actions.selectRegion)actions.selectRegion(p.id,r.name);
+                                }
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::EndChild();
+                if(!selectedRegionName.empty()) {
+                    auto const region=std::find_if(model.regionRows.begin(),
+                        model.regionRows.end(),[&](auto const& r) {
+                            return r.name==selectedRegionName;
+                        });
+                    if(region!=model.regionRows.end()) {
+                        PlacementTransform transform{
+                            {model.sizeX,model.sizeY,model.sizeZ},
+                            p.origin,p.rotation,p.mirror};
+                        auto const start=transform.toWorld(
+                            {region->x,region->y,region->z});
+                        auto const finish=transform.toWorld({
+                            static_cast<std::int64_t>(region->x)+region->sizeX-1,
+                            static_cast<std::int64_t>(region->y)+region->sizeY-1,
+                            static_cast<std::int64_t>(region->z)+region->sizeZ-1});
+                        ImGui::TextWrapped("選択中: %s",selectedRegionName.c_str());
+                        ImGui::TextWrapped("ワールド座標: X %lld～%lld / Y %lld～%lld / Z %lld～%lld",
+                            static_cast<long long>(std::min(start.x,finish.x)),
+                            static_cast<long long>(std::max(start.x,finish.x)),
+                            static_cast<long long>(std::min(start.y,finish.y)),
+                            static_cast<long long>(std::max(start.y,finish.y)),
+                            static_cast<long long>(std::min(start.z,finish.z)),
+                            static_cast<long long>(std::max(start.z,finish.z)));
+                    }
+                }
+                if(model.regionSupportsCustom) {
+                    auto const count=std::count_if(p.regions.begin(),p.regions.end(),
+                        [](auto const& r){return r.area.has_value();});
+                    ImGui::BeginDisabled(count>=4);
+                    if(ImGui::SmallButton("領域を追加（最大4個）")) {
+                        std::string name;
+                        for(int n=1;n<=100;++n){
+                            auto candidate="region-"+std::to_string(n);
+                            if(std::none_of(p.regions.begin(),p.regions.end(),
+                                [&](auto const& r){return r.name==candidate;})){
+                                name=std::move(candidate);break;
+                            }
+                        }
+                        if(!name.empty()) {
+                            RegionArea area{0,0,0,std::min(8,model.sizeX),
+                                std::min(8,model.sizeY),std::min(8,model.sizeZ)};
+                            // Reuse the existing two-point capture tool.
+                            // World AABB is transformed back into source-local
+                            // coordinates before constructing the region.
+                            if(model.capture.first.set && model.capture.second.set){
+                                PlacementTransform transform{
+                                    {model.sizeX,model.sizeY,model.sizeZ},
+                                    p.origin,p.rotation,p.mirror};
+                                auto a=transform.toLocal({
+                                    model.capture.first.x,model.capture.first.y,model.capture.first.z});
+                                auto b=transform.toLocal({
+                                    model.capture.second.x,model.capture.second.y,model.capture.second.z});
+                                auto x0=std::min(a.x,b.x),y0=std::min(a.y,b.y),z0=std::min(a.z,b.z);
+                                auto x1=std::max(a.x,b.x),y1=std::max(a.y,b.y),z1=std::max(a.z,b.z);
+                                if(x0>=0 && y0>=0 && z0>=0 &&
+                                    x1<model.sizeX && y1<model.sizeY && z1<model.sizeZ){
+                                    area={static_cast<int>(x0),static_cast<int>(y0),
+                                        static_cast<int>(z0),static_cast<int>(x1-x0+1),
+                                        static_cast<int>(y1-y0+1),static_cast<int>(z1-z0+1)};
+                                }
+                            }
+                            p.regions.push_back({name,true,area});
+                            if(actions.selectRegion)actions.selectRegion(p.id,name);
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::TextDisabled("範囲は設計図内座標。作成前に2点選択しておくと、その範囲から作成します。");
+                }
+                ImGui::TextDisabled("ONの複数領域を同時表示・設置・検証対象にします");
+            }
             if(p!=*selected && actions.editPlacement)actions.editPlacement(p,snap.session.revision);
         }
         ImGui::EndDisabled();
@@ -243,6 +413,13 @@ void renderProjectionPage(MenuModel& model, MenuActions const& actions, UiMetric
         if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonLoad)) && actions.loadStructure) {
             actions.loadStructure(model.pathBuffer ? model.pathBuffer : "");
         }
+        ImGui::SameLine();
+        if (ImGui::Button("元の座標で読み込む") && actions.loadStructureAtSourceOrigin) {
+            actions.loadStructureAtSourceOrigin(model.pathBuffer ? model.pathBuffer : "");
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("structure_world_origin を使用して最初から投影します。\n"
+                "元座標が記録されていない設計図は読み込みません。");
         if (!metrics.compact) ImGui::SameLine();
         if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonCloseProjection)) && actions.closeProjection) {
             actions.closeProjection();
@@ -666,6 +843,14 @@ void renderRenderPage(MenuModel& model, MenuActions const& actions, UiMetrics co
             model.structureBoundsEnabled,
             metrics
         );
+        ImGui::BeginDisabled(!model.structureBoundsEnabled);
+        renderCheckboxRow(
+            "##RegionBorders",
+            "リージョンごとの境界線を表示（黄）",
+            model.regionBoundsEnabled,
+            metrics
+        );
+        ImGui::EndDisabled();
     });
 
     renderSection(
@@ -872,6 +1057,26 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
         }
         ImGui::PopStyleVar();
         if(!model.directMenuRoutesReady)ImGui::TextWrapped("%s",i18n::tr(i18n::TextKey::HotkeyRouteUnavailable));
+        ImGui::Separator();
+        ImGui::TextUnformatted("材料取得（チェスト・シュルカー）");
+        static constexpr char const* grabLabels[]{
+            "Ctrl + Right Click",
+            "Alt + Right Click",
+            "Ctrl + Alt + Right Click",
+            "Shift + Right Click",
+            "Ctrl + Shift + Right Click",
+            "Alt + Shift + Right Click",
+            "Ctrl + Alt + Shift + Right Click"
+        };
+        static constexpr int grabMasks[]{1,2,3,4,5,6,7};
+        int selected=1;
+        for(int i=0;i<7;++i)if(model.clientOnlyGrabModifiers==grabMasks[i])selected=i;
+        ImGui::SetNextItemWidth(std::min(ImGui::GetContentRegionAvail().x,
+                                        ImGui::GetFontSize()*21.0f));
+        if(ImGui::Combo("##GrabMaterialsMouseGesture",&selected,grabLabels,7))
+            model.clientOnlyGrabModifiers=grabMasks[selected];
+        ImGui::TextDisabled("右クリックと同時に押す修飾キーを選択");
+        ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
         // The fixed Alt+wheel gesture has no rebindable slot of its own, so it
         // sits between the binding rows and the page-wide reset that also
         // restores it.
@@ -884,6 +1089,7 @@ void renderHotkeysPage(MenuModel& model, MenuActions const& actions, UiMetrics c
         ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.35f));
         if (ImGui::Button(i18n::tr(i18n::TextKey::ButtonResetAllHotkeys)) && actions.resetHotkeys) {
             actions.resetHotkeys();
+            model.clientOnlyGrabModifiers=2;
         }
         ImGui::TextDisabled("%s", i18n::tr(i18n::TextKey::HintChatCommand));
     });

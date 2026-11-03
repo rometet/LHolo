@@ -10,6 +10,7 @@
 #include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/core/ProjectionDrawCache.h"
+#include "projection/mesh/ProjectionCorrectionBatchCache.h"
 #include "projection/ProjectionTypes.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
 #include "projection/mesh/SectionMissingLayerSnapshot.h"
@@ -67,6 +68,9 @@ struct SectionState {
     std::array<std::int64_t, 3> blendSortKey{};
     bool                        blendSortKeyValid{};
     bool                        blendSortUnsupported{};
+    // Last successfully uploaded primitive ordering, not a second MeshData.
+    // Allows camera movement without GPU re-upload if order did not change.
+    std::vector<std::size_t>    blendSortOrder;
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)> meshes;
     // Immutable pre-upload source for the Blend bucket. The engine consumes
     // Mesh::mMeshData while creating GPU buffers, so the renderer must never
@@ -80,7 +84,32 @@ struct ProjectionAnimatedBubbleCell {
     bool dragDown{};
 };
 
+// Temporary (one activation only) GPU owner transfer for unchanged sections.
+// This never crosses world/dimension, projection pose or resource-pack reload.
+struct RegionMeshRetention {
+    std::shared_ptr<structure::LoadedStructure const> source;
+    std::map<SubChunkKey,std::size_t> sectionMap;
+    std::vector<std::vector<std::size_t>> sectionBlockIndices;
+    std::vector<std::set<SubChunkKey>> sectionExtraBlocks;
+    std::vector<SectionState> sections;
+    std::vector<CorrectionState> corrections;
+    std::vector<std::uint8_t> missingLayers;
+    std::vector<std::uint8_t> actorRendererAvailable;
+    std::vector<std::unique_ptr<mce::Mesh>> warningFill, correctionOutline,
+        wrongFill, wrongOutline, nativeLiquid, liquidProxy, blockEntityPlaceholder;
+    std::vector<std::unique_ptr<PraxisCompatLiquidSectionData>> praxisLiquid;
+    std::vector<std::size_t> nativeLiquidCounts, liquidProxyCounts;
+    BlockPos anchor{};
+    int rotation{},mirror{}, offsetX{},offsetY{},offsetZ{};
+    bool countExtras{};
+    std::optional<structure::LayerDisplayMode> layerMode;
+    std::optional<structure::LayerAxis> layerAxis;
+    int displayLayer{};
+    float opacity{}, fillOpacity{}, outlineOpacity{},comparisonStrength{},outlineWidth{};
+};
+
 struct ProjectionState {
+    std::unique_ptr<RegionMeshRetention> pendingRegionReuse;
     // R11 animated schematic particles. Only the render callback reads/writes
     // this bounded cache, never the async section-build worker. All positions
     // stay projection-local; no real-world particle engine is touched.
@@ -91,6 +120,21 @@ struct ProjectionState {
     int animatedBubbleMirror{-1};
     int animatedBubbleRotation{-1};
     std::size_t                     blendSortCursor{};
+    // CPU mesh-source diagnostic totals are invariant between mesh uploads.
+    // Do not rescan every section on every transparent render pass.
+    std::uint64_t                   blendSourceScanActivation{};
+    std::uint64_t                   blendSourceScanMeshRevision{};
+    std::size_t                     blendSourceScanSectionCount{};
+    std::size_t                     blendSourceCount{};
+    std::size_t                     blendSourceVertices{};
+    bool                            blendSourceScanValid{};
+    // CPU-only list of sections with native liquid GPU resources or Exact
+    // Replay streams. Rebuilt on mesh/activation change, not per frame.
+    std::vector<std::size_t>        nativeLiquidCandidateSections;
+    std::uint64_t                   nativeLiquidCandidateActivation{};
+    std::uint64_t                   nativeLiquidCandidateMeshRevision{};
+    std::size_t                     nativeLiquidCandidateSectionCount{};
+    bool                            nativeLiquidCandidateCacheValid{};
     // From MarmieQi 26.51.4: cache draw slots independently of heavy per-frame
     // geometry and use view-prioritized, starvation-free section scheduling.
     ProjectionDrawCache drawCache;
@@ -212,6 +256,7 @@ struct ProjectionState {
     // wrongFill/wrongOutline hold WrongType + WrongState.
     std::vector<std::unique_ptr<mce::Mesh>> warningFillSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> correctionOutlineSectionMeshes;
+    ProjectionCorrectionBatchCache           correctionDrawBatches;
     std::vector<std::unique_ptr<mce::Mesh>> wrongFillSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> wrongOutlineSectionMeshes;
     std::vector<std::unique_ptr<mce::Mesh>> nativeLiquidSectionMeshes;
@@ -227,6 +272,11 @@ struct ProjectionState {
     std::unique_ptr<mce::Mesh>              structureBoundsMesh;
     // Released together with dimension/world meshes by the existing owner.
     std::unique_ptr<overlay::BoundsWireframe> verifierTargetBounds;
+    std::unique_ptr<overlay::BoundsWireframe> overallPlacementBounds;
+    std::unique_ptr<overlay::BoundsWireframe> regionSelectionBounds;
+    // Reuse one tiny GPU wireframe per native source subregion. Only bounds
+    // changes recreate meshes; toggling visible blocks does not rebuild them.
+    std::vector<std::unique_ptr<overlay::BoundsWireframe>> nativeRegionBounds;
     std::vector<SectionState>               sections;
     std::vector<std::size_t>                blockToSection;
     std::size_t                             dirtySectionCursor{};
@@ -243,6 +293,38 @@ struct ProjectionState {
     std::uint64_t                           meshWorkerPeakSnapshotDataMicros{};
     std::uint64_t                           meshWorkerPeakChunkViewMicros{};
     std::uint64_t                           meshWorkerPeakBuildMicros{};
+    // Per-worker component timings survive only in an immutable worker result.
+    std::uint64_t                           meshBodyClassifyMicros{};
+    std::uint64_t                           meshBodyTessellateMicros{};
+    std::uint64_t                           meshLiquidMicros{};
+    std::uint64_t                           meshAuxMicros{};
+    std::uint64_t                           meshPlaceholderMicros{};
+    std::uint64_t                           meshCorrectionSetupMicros{};
+    std::uint64_t                           meshCorrectionOutlineMicros{};
+    std::uint64_t                           meshCorrectionFillMicros{};
+    std::uint64_t                           meshOutlineAttemptedEdges{};
+    std::uint64_t                           meshOutlineEmittedEdges{};
+    std::uint64_t                           meshOutlineGridBytes{};
+    std::uint64_t                           meshFillCandidateFaces{};
+    std::uint64_t                           meshFillEmittedFaces{};
+    std::uint64_t                           meshFillRunOriginalFaces{};
+    std::uint64_t                           meshFillRunQuads{};
+    // Accumulated on render thread for the existing 64-section perf summary.
+    std::uint64_t                           meshWorkerClassifyTotalMicros{};
+    std::uint64_t                           meshWorkerTessellateTotalMicros{};
+    std::uint64_t                           meshWorkerLiquidTotalMicros{};
+    std::uint64_t                           meshWorkerAuxTotalMicros{};
+    std::uint64_t                           meshWorkerPlaceholderTotalMicros{};
+    std::uint64_t                           meshWorkerCorrectionSetupTotalMicros{};
+    std::uint64_t                           meshWorkerCorrectionOutlineTotalMicros{};
+    std::uint64_t                           meshWorkerCorrectionFillTotalMicros{};
+    std::uint64_t                           meshWorkerOutlineAttemptedEdges{};
+    std::uint64_t                           meshWorkerOutlineEmittedEdges{};
+    std::uint64_t                           meshWorkerOutlineGridBytes{};
+    std::uint64_t                           meshWorkerFillCandidateFaces{};
+    std::uint64_t                           meshWorkerFillEmittedFaces{};
+    std::uint64_t                           meshWorkerFillRunOriginalFaces{};
+    std::uint64_t                           meshWorkerFillRunQuads{};
     std::uint64_t                           meshWorkerPeakUploadMicros{};
     std::shared_ptr<ExpectedBlockMap>        expectedWorldBlocks{std::make_shared<ExpectedBlockMap>()};
     // Bedrock stores the solid/body layer and liquid layer independently.

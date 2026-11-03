@@ -20,8 +20,10 @@
 #include "input/MenuRoute.h"
 #include "structure/LayerDisplayTypes.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,9 +44,12 @@ struct LoadedStructure {
         int sizeX{};
         int sizeY{};
         int sizeZ{};
+        std::string name; // stable source key, never the editable display name
     };
-
     std::filesystem::path                 sourcePath;
+    // Bedrock root NBT structure_world_origin: original capture corner in
+    // world coordinates. Not inferred when absent or malformed.
+    std::optional<std::array<int,3>>     sourceWorldOrigin;
     int                                  sizeX{};
     int                                  sizeY{};
     int                                  sizeZ{};
@@ -69,6 +74,17 @@ struct LoadedStructure {
         int          liquidMaterialIndex{-1};
     };
     std::vector<RenderBlock>              renderBlocks;
+    // Source-side definitions survive enable/disable and filtered world views.
+    std::vector<RegionBox>                sourceRegions;
+    // Original per-region non-air cells preserve overlap ownership and permit
+    // revealing an older region after a later region is switched off.
+    std::vector<std::vector<RenderBlock>>  regionRenderBlocks;
+    // Disjoint composite fast path. One owner byte per block in renderBlocks;
+    // when populated, source regionRenderBlocks may be released.
+    std::vector<std::uint8_t>             disjointSourceOwners;
+    // A filtered view may borrow immutable per-region source cells from the
+    // one-world cache. Never duplicate every native region's source storage.
+    std::shared_ptr<LoadedStructure const> sourceBacking;
 };
 
 void requestOpenGui();
@@ -139,7 +155,9 @@ void clear(bool preserveQueuedVerification=false);
 void shutdownPendingStructureLoad();
 // Queue a normal structure load. .mcstructure preparation runs off the render
 // thread; unsupported formats retain the existing synchronous path.
-void requestStructureFileLoad(std::string path);
+// Direct source-origin mode resolves the saved anchor BEFORE publishing
+// the structure; it never briefly projects at player feet.
+void requestStructureFileLoad(std::string path, bool useSourceWorldOrigin=false);
 // Reload the last saved projection at its saved anchor/transform. Standalone so
 // both the menu action and the load hotkey can trigger it.
 void restoreSavedProjection(std::uint64_t placementId=0);

@@ -111,10 +111,17 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     parsed.correctionOutlineWidth = projection::detail::normalizeCorrectionOutlineWidth(
         comparisonNumber(json, "correctionOutlineWidth", parsed.correctionOutlineWidth));
     parsed.structureBoundsEnabled = json.value("structureBoundsEnabled", parsed.structureBoundsEnabled);
+    parsed.regionBoundsEnabled = json.value("regionBoundsEnabled", parsed.regionBoundsEnabled);
     parsed.correctionSeeThrough = json.value("correctionSeeThrough", parsed.correctionSeeThrough);
     parsed.missingSeeThrough = json.value("missingSeeThrough", parsed.missingSeeThrough);
     parsed.experimentalConsent = json.value("experimentalConsent", parsed.experimentalConsent);
     parsed.clientOnlyGrabEnabled = false;
+    parsed.clientOnlyGrabModifiers=2;
+    if (auto found=json.find("clientOnlyGrabModifiers");
+        found!=json.end() && found->is_number_integer()) {
+        const int value=found->get<int>();
+        if(value>=1 && value<=7)parsed.clientOnlyGrabModifiers=value;
+    }
     parsed.clientOnlyGrabConfigured = false;
     if (auto const value=json.find("clientOnlyGrabEnabled");
         value!=json.end() && value->is_boolean()) {
@@ -286,10 +293,12 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"comparisonStrength", projection::detail::normalizeComparisonStrength(settings.comparisonStrength)},
         {"correctionOutlineWidth", projection::detail::normalizeCorrectionOutlineWidth(settings.correctionOutlineWidth)},
         {"structureBoundsEnabled", settings.structureBoundsEnabled},
+        {"regionBoundsEnabled", settings.regionBoundsEnabled},
         {"correctionSeeThrough", settings.correctionSeeThrough},
         {"missingSeeThrough", settings.missingSeeThrough},
         {"experimentalConsent", settings.experimentalConsent},
         {"clientOnlyGrabEnabled", settings.clientOnlyGrabEnabled},
+        {"clientOnlyGrabModifiers", settings.clientOnlyGrabModifiers},
         {"materialHudEnabled", settings.materialHudEnabled},
         {"materialHudPosition", settings.materialHudPosition},
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(

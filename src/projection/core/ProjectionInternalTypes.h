@@ -187,6 +187,7 @@ struct ProjectedBlockActor {
     Block const* block{};
     BlockActor*  actor{};
     std::size_t  structureIndex{};
+    bool         pistonCandidate{}; // classified once during placement
 };
 
 using ExpectedBlockMap = std::unordered_map<

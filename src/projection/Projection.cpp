@@ -107,6 +107,14 @@ void setStructureBoundsEnabled(bool enabled) {
     detail::ProjectionSession::getInstance().setStructureBoundsEnabled(enabled);
 }
 
+bool getRegionBoundsEnabled() {
+    return detail::ProjectionSession::getInstance().regionBoundsEnabled();
+}
+
+void setRegionBoundsEnabled(bool enabled) {
+    detail::ProjectionSession::getInstance().setRegionBoundsEnabled(enabled);
+}
+
 bool getCorrectionSeeThrough() {
     return detail::ProjectionSession::getInstance().correctionSeeThrough();
 }

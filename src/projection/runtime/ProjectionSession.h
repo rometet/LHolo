@@ -59,6 +59,8 @@ public:
     void setCorrectionOutlineWidth(float width);
     [[nodiscard]] bool structureBoundsEnabled() const;
     void setStructureBoundsEnabled(bool enabled);
+    [[nodiscard]] bool regionBoundsEnabled() const;
+    void setRegionBoundsEnabled(bool enabled);
     // Independent X-ray controls for wrong-state and missing-block markers.
     [[nodiscard]] bool correctionSeeThrough() const;
     void setCorrectionSeeThrough(bool enabled);
@@ -89,6 +91,7 @@ private:
     std::atomic<float> mCorrectionOutlineOpacity{1.0f};
     ComparisonPreferences mComparisonPreferences;
     std::atomic_bool   mStructureBoundsEnabled{true};
+    std::atomic_bool   mRegionBoundsEnabled{true};
     std::atomic_bool   mCorrectionSeeThrough{false};
     std::atomic_bool   mMissingSeeThrough{false};
     ProjectionActivationRequests mActivationRequests;

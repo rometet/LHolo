@@ -15,10 +15,12 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "structure/formats/StructureFormatLoaders.h"
+#include "structure/formats/RegionMergePlan.h"
 #include "structure/formats/JavaNbtReader.h"
 #include "structure/formats/LitematicFormatRules.h"
 #include "structure/formats/McstructureIndices.h"
 #include "structure/StructureLoader.h"
+#include "structure/PlacementSession.h"
 #include "block/BlockPlacementRules.h"
 #include "block/MaterialKeyCache.h"
 #include "structure/java_to_bedrock/JavaBlockEntityToBedrock.h"
@@ -37,6 +39,8 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <set>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -80,6 +84,14 @@ struct PreparedStructureLoad {
     std::vector<std::vector<std::int32_t>> blockIndexLayers;
     // Original bytes are retained only for the compatibility fallback.
     std::shared_ptr<std::string> fallbackOriginalBytes;
+    // Composite .lholo manifest: NBT parsing of every referenced mcstructure
+    // happens on the background preparation thread, never on Present.
+    struct Component {
+        std::string name;
+        std::shared_ptr<PreparedStructureLoad> prepared;
+    };
+    std::vector<Component> components;
+    bool composite{};
 };
 
 namespace {
@@ -197,6 +209,14 @@ bool readThreeInts(ListTag const& list, int& x, int& y, int& z) {
         return true;
     };
     return read(0, x) && read(1, y) && read(2, z);
+}
+
+std::optional<std::array<int,3>> readMcstructureWorldOrigin(CompoundTag const& root) {
+    auto const* origin=findList(root,"structure_world_origin");
+    std::array<int,3> coords{};
+    if(!origin || !readThreeInts(*origin,coords[0],coords[1],coords[2]))
+        return std::nullopt;
+    return coords;
 }
 
 bool checkedVolume3(
@@ -619,6 +639,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
     }
 
     auto loaded = std::make_shared<LoadedStructure>();
+    loaded->sourceWorldOrigin=readMcstructureWorldOrigin(*prepared->root);
     loaded->sizeX = prepared->sizeX;
     loaded->sizeY = prepared->sizeY;
     loaded->sizeZ = prepared->sizeZ;
@@ -626,7 +647,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
     loaded->primaryBlocks = prepared->primaryBlocks;
     loaded->secondaryBlocks = prepared->secondaryBlocks;
     loaded->paletteEntries = prepared->paletteEntries;
-    loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ});
+    loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ, "main"});
 
     auto const* structure = findCompound(*prepared->root, "structure");
     auto const* palette = structure ? findCompound(*structure, "palette") : nullptr;
@@ -929,6 +950,7 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
     }
 
     auto loaded = std::make_shared<LoadedStructure>();
+    loaded->sourceWorldOrigin=readMcstructureWorldOrigin(*root);
     if (!readThreeInts(*size, loaded->sizeX, loaded->sizeY, loaded->sizeZ)
         || loaded->sizeX <= 0 || loaded->sizeY <= 0 || loaded->sizeZ <= 0) {
         error = "结构尺寸无效";
@@ -943,7 +965,7 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         error = "Structure volume overflow";
         return nullptr;
     }
-    loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ});
+    loaded->regions.push_back({0, 0, 0, loaded->sizeX, loaded->sizeY, loaded->sizeZ, "main"});
 
     auto const* palette = findCompound(*structure, "palette");
     auto const* defaultPalette = palette ? findCompound(*palette, "default") : nullptr;
@@ -1133,6 +1155,7 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
         int posX{}, posY{}, posZ{};
         int signedX{}, signedY{}, signedZ{};
         int sizeX{}, sizeY{}, sizeZ{};
+        std::string name;
         std::vector<ResolvedJavaBlock> palette;
         JavaNbtTag::LongArray const* states{};
         std::unordered_map<std::uint64_t, JavaNbtTag::Compound const*> blockEntities;
@@ -1152,6 +1175,7 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
         auto const* compound = std::get_if<JavaNbtTag::Compound>(&regionTag.value);
         if (!compound) continue;
         Region region;
+        region.name=regionName;
         if (!readJavaVec3(*compound, "Position", region.posX, region.posY, region.posZ)
             || !readJavaVec3(*compound, "Size", region.signedX, region.signedY, region.signedZ)
             || region.signedX == 0 || region.signedY == 0 || region.signedZ == 0
@@ -1250,6 +1274,7 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
     }
     loaded->paletteEntries = paletteEntries;
     loaded->regions.reserve(parsedRegions.size());
+    loaded->regionRenderBlocks.reserve(parsedRegions.size());
     struct MergedJavaCell {
         ResolvedJavaBlock                 block;
         std::shared_ptr<CompoundTag const> blockEntityNbt;
@@ -1283,7 +1308,9 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
             region.sizeX,
             region.sizeY,
             region.sizeZ,
+            region.name
         });
+        loaded->regionRenderBlocks.emplace_back();
         auto const bits = std::max<unsigned>(
             2u,
             static_cast<unsigned>(std::bit_width(static_cast<unsigned>(region.palette.size() - 1)))
@@ -1339,6 +1366,10 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
                     }
                 }
             }
+            loaded->regionRenderBlocks.back().push_back({
+                static_cast<int>(x), static_cast<int>(y), static_cast<int>(z),
+                resolved.block, resolved.liquid, blockEntityNbt
+            });
             mergedBlocks.insert_or_assign(
                 mergedIndex, MergedJavaCell{resolved, std::move(blockEntityNbt)}
             );
@@ -1374,12 +1405,343 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
 
 } // namespace
 
+std::shared_ptr<LoadedStructure> makeCachedRegionView(
+    std::shared_ptr<LoadedStructure const> source) {
+    if(!source) return {};
+    auto view=std::make_shared<LoadedStructure>();
+    view->sourcePath=source->sourcePath;
+    view->sourceWorldOrigin=source->sourceWorldOrigin;
+    view->sizeX=source->sizeX;
+    view->sizeY=source->sizeY;
+    view->sizeZ=source->sizeZ;
+    view->volume=source->volume;
+    view->primaryBlocks=source->primaryBlocks;
+    view->secondaryBlocks=source->secondaryBlocks;
+    view->paletteEntries=source->paletteEntries;
+    view->materialCount=source->materialCount;
+    view->sourceRegions=source->sourceRegions.empty()?source->regions:source->sourceRegions;
+    view->regions=source->regions;
+    view->sourceBacking=std::move(source);
+    view->generation=gGeneration.fetch_add(1,std::memory_order_acq_rel)+1;
+    return view;
+}
+void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> const& settings) {
+    auto const& source=loaded.sourceBacking?*loaded.sourceBacking:loaded;
+    if(loaded.sourceRegions.empty())loaded.sourceRegions=source.regions;
+    if(settings.empty()){
+        if(loaded.sourceBacking)loaded.renderBlocks=source.renderBlocks;
+        return;
+    }
+    auto enabled=[&](std::string const& key){
+        auto it=std::find_if(settings.begin(),settings.end(),
+            [&](RegionSetting const& r){return r.name==key;});
+        return it==settings.end() || it->enabled;
+    };
+    // User-defined AABBs partition a single mcstructure into disjoint source
+    // tiles. When a custom region overlaps another, the newest wins. The
+    // remaining cells belong to the implicit "main" region.
+    bool const canSplit=loaded.sourceRegions.size()==1 &&
+        loaded.sourceRegions.front().name=="main" &&
+        loaded.regionRenderBlocks.empty();
+    std::vector<RegionSetting const*> custom;
+    if(canSplit)for(auto const& setting:settings){
+        if(!setting.area)continue;
+        if(custom.size()>=4)break;
+        auto const& b=*setting.area;
+        if(b.x<0 || b.y<0 || b.z<0 ||
+            b.sizeX<1 || b.sizeY<1 || b.sizeZ<1 ||
+            static_cast<std::int64_t>(b.x)+b.sizeX>loaded.sizeX ||
+            static_cast<std::int64_t>(b.y)+b.sizeY>loaded.sizeY ||
+            static_cast<std::int64_t>(b.z)+b.sizeZ>loaded.sizeZ)continue;
+        custom.push_back(&setting);
+    }
+    if(!custom.empty()) {
+        auto ownerAt=[&](int x,int y,int z)->std::string const& {
+            for(auto it=custom.rbegin();it!=custom.rend();++it){
+                auto const& r=**it;auto const& b=*r.area;
+                if(x>=b.x && x<b.x+b.sizeX && y>=b.y && y<b.y+b.sizeY
+                    && z>=b.z && z<b.z+b.sizeZ)return r.name;
+            }
+            return loaded.sourceRegions.front().name;
+        };
+        // Partition the complete source cuboid at all custom boundaries;
+        // unlike a bounding-box mask, each resulting box accurately models
+        // area coverage and 'extra block' verification excludes disabled parts.
+        std::vector<int> xCuts{0,loaded.sizeX},yCuts{0,loaded.sizeY},zCuts{0,loaded.sizeZ};
+        for(auto const* r:custom){
+            auto const& b=*r->area;
+            xCuts.push_back(b.x);xCuts.push_back(b.x+b.sizeX);
+            yCuts.push_back(b.y);yCuts.push_back(b.y+b.sizeY);
+            zCuts.push_back(b.z);zCuts.push_back(b.z+b.sizeZ);
+        }
+        auto order=[](std::vector<int>& v){
+            std::sort(v.begin(),v.end());
+            v.erase(std::unique(v.begin(),v.end()),v.end());
+        };
+        order(xCuts);order(yCuts);order(zCuts);
+        std::vector<LoadedStructure::RegionBox> tiles;
+        for(std::size_t yi=1;yi<yCuts.size();++yi)
+            for(std::size_t zi=1;zi<zCuts.size();++zi) {
+                // Join adjacent same-owner tiles along X to keep event
+                // interest/extra scans compact even for several regions.
+                std::size_t xi=1;
+                while(xi<xCuts.size()){
+                    int const x=xCuts[xi-1], y=yCuts[yi-1],z=zCuts[zi-1];
+                    auto const& name=ownerAt(x,y,z);
+                    std::size_t end=xi;
+                    while(end+1<xCuts.size() && ownerAt(xCuts[end],y,z)==name)++end;
+                    if(enabled(name))tiles.push_back({
+                        x,y,z,xCuts[end]-x,yCuts[yi]-y,zCuts[zi]-z,name
+                    });
+                    xi=end+1;
+                }
+            }
+        loaded.regions=std::move(tiles);
+        if(loaded.sourceBacking)loaded.renderBlocks=source.renderBlocks;
+        std::erase_if(loaded.renderBlocks,[&](LoadedStructure::RenderBlock const& b){
+            return !enabled(ownerAt(b.x,b.y,b.z));
+        });
+        loaded.primaryBlocks=loaded.renderBlocks.size();
+        assignMaterialIndices(loaded);
+        return;
+    }
+    // File-native subregions: preserve the original source order and original
+    // cell values. A disabled later region reveals earlier overlapping cells.
+    bool anyDisabled=false;
+    std::vector<LoadedStructure::RegionBox> active;
+    active.reserve(loaded.sourceRegions.size());
+    for(auto const& region:loaded.sourceRegions){
+        if(enabled(region.name))active.push_back(region);
+        else anyDisabled=true;
+    }
+    if(!anyDisabled){
+        if(loaded.sourceBacking)loaded.renderBlocks=source.renderBlocks;
+        return;
+    }
+    // Compact disjoint-source path: keep only a byte of owner metadata per
+    // original block, instead of a duplicate vector of native render blocks.
+    // The source is already globally sorted. Filtering preserves that order,
+    // removing both hash-map rebuilds and repeated full-vector sorts.
+    if(!source.disjointSourceOwners.empty() &&
+       source.disjointSourceOwners.size()==source.renderBlocks.size()) {
+        std::vector<bool> activeMask;
+        activeMask.reserve(loaded.sourceRegions.size());
+        for(auto const& r:loaded.sourceRegions)
+            activeMask.push_back(enabled(r.name));
+        auto const& owners=source.disjointSourceOwners;
+        std::size_t count{};
+        for(auto const owner:owners)
+            if(owner<activeMask.size() && activeMask[owner])++count;
+        loaded.regions=std::move(active);
+        loaded.renderBlocks.clear();
+        loaded.renderBlocks.reserve(count);
+        for(std::size_t i=0;i<owners.size();++i)
+            if(owners[i]<activeMask.size() && activeMask[owners[i]])
+                loaded.renderBlocks.push_back(source.renderBlocks[i]);
+        loaded.primaryBlocks=loaded.renderBlocks.size();
+        assignMaterialIndices(loaded);
+        return;
+    }
+    auto const& regionCells=source.regionRenderBlocks;
+    if(loaded.sourceRegions.size()!=regionCells.size()) {
+        if(loaded.sourceRegions.size()!=1)throw std::runtime_error(
+            "Missing region source ownership; refusing partial filter");
+        if(active.empty()){
+            loaded.renderBlocks.clear();loaded.primaryBlocks=0;
+            loaded.regions.clear();loaded.materialCount=0;
+        }
+        return;
+    }
+    // Most composite .lholo archives are physically disjoint tiles. AABB
+    // disjointness proves per-cell uniqueness; skip O(N) hash-node allocation
+    // and ownership reconstruction, reserving just the selected block count.
+    // Overlapping regions retain the original last-region-wins fallback.
+    std::size_t selectedCells{};
+    for(std::size_t i=0;i<loaded.sourceRegions.size();++i)
+        if(enabled(loaded.sourceRegions[i].name))
+            selectedCells+=regionCells[i].size();
+    bool const disjoint=disjointRegionBounds(active);
+    loaded.regions=std::move(active);
+    loaded.renderBlocks.clear();
+    loaded.renderBlocks.reserve(selectedCells);
+    if(disjoint) {
+        for(std::size_t i=0;i<loaded.sourceRegions.size();++i) {
+            if(!enabled(loaded.sourceRegions[i].name))continue;
+            loaded.renderBlocks.insert(loaded.renderBlocks.end(),
+                regionCells[i].begin(),regionCells[i].end());
+        }
+    }else {
+        std::unordered_map<std::uint64_t,LoadedStructure::RenderBlock> merged;
+        merged.reserve(selectedCells);
+        for(std::size_t i=0;i<loaded.sourceRegions.size();++i) {
+            if(!enabled(loaded.sourceRegions[i].name))continue;
+            for(auto const& cell:regionCells[i]) {
+                auto const key=(static_cast<std::uint64_t>(cell.x)*loaded.sizeY+
+                    static_cast<std::uint64_t>(cell.y))*loaded.sizeZ+
+                    static_cast<std::uint64_t>(cell.z);
+                merged.insert_or_assign(key,cell);
+            }
+        }
+        for(auto& [key,cell]:merged)
+            loaded.renderBlocks.push_back(std::move(cell));
+    }
+    std::sort(loaded.renderBlocks.begin(),loaded.renderBlocks.end(),[](auto const& a,auto const& b){
+        return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
+    });
+    loaded.primaryBlocks=loaded.renderBlocks.size();
+    assignMaterialIndices(loaded);
+}
+// Merge native Bedrock schematics using their saved world origins. Each part
+// retains its original blocks as a named region, so the per-region visibility
+// settings can rebuild the effective structure without Java block conversion.
+std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
+    std::shared_ptr<PreparedStructureLoad> const& prepared,std::string& error
+) {
+    if(!prepared || !prepared->composite || prepared->components.empty()) {
+        error="Invalid composite preparation";return nullptr;
+    }
+    std::array<std::int64_t,3> minimum{
+        std::numeric_limits<std::int64_t>::max(),
+        std::numeric_limits<std::int64_t>::max(),
+        std::numeric_limits<std::int64_t>::max()
+    }, maximum{
+        std::numeric_limits<std::int64_t>::min(),
+        std::numeric_limits<std::int64_t>::min(),
+        std::numeric_limits<std::int64_t>::min()
+    };
+    struct Bounds {
+        std::array<int,3> origin;
+        std::array<int,3> size;
+    };
+    std::vector<Bounds> bounds;
+    bounds.reserve(prepared->components.size());
+    // Calculate the union BEFORE native finalization, which avoids an extra
+    // pass and prevents a partially published merged schematic.
+    for(auto const& part:prepared->components) {
+        auto const origin=part.prepared && part.prepared->root
+            ? readMcstructureWorldOrigin(*part.prepared->root):std::nullopt;
+        if(!origin) {
+            error="Missing world origin in "+part.name;return nullptr;
+        }
+        auto const& source=*part.prepared;
+        std::array<int,3> dims{source.sizeX,source.sizeY,source.sizeZ};
+        for(int axis=0;axis<3;++axis) {
+            if(dims[axis]<=0){error="Invalid component size";return nullptr;}
+            auto const lo=static_cast<std::int64_t>((*origin)[axis]);
+            auto const hi=lo+static_cast<std::int64_t>(dims[axis]);
+            minimum[axis]=std::min(minimum[axis],lo);
+            maximum[axis]=std::max(maximum[axis],hi);
+        }
+        bounds.push_back({*origin,dims});
+    }
+    std::array<int,3> combined{};
+    for(int axis=0;axis<3;++axis) {
+        auto const length=maximum[axis]-minimum[axis];
+        // Fail closed on extreme/unreasonable manifests rather than allocating
+        // many gigabytes on the Minecraft render/main thread.
+        if(length<=0 || length>2048
+            || minimum[axis]<std::numeric_limits<int>::min()
+            || minimum[axis]>std::numeric_limits<int>::max()){
+            error="Composite schematic extent outside safe limits";
+            return nullptr;
+        }
+        combined[axis]=static_cast<int>(length);
+    }
+    std::uint64_t volume{};
+    if(!checkedVolume3(combined[0],combined[1],combined[2],volume)
+        || volume>16000000ULL) {
+        error="Composite schematic exceeds 16 million cells";
+        return nullptr;
+    }
+    auto result=std::make_shared<LoadedStructure>();
+    result->sizeX=combined[0];result->sizeY=combined[1];result->sizeZ=combined[2];
+    result->volume=volume;result->sourcePath=prepared->path;
+    result->sourceWorldOrigin=std::array<int,3>{
+        static_cast<int>(minimum[0]),static_cast<int>(minimum[1]),
+        static_cast<int>(minimum[2])
+    };
+    result->regions.reserve(bounds.size());
+    result->regionRenderBlocks.reserve(bounds.size());
+    std::size_t totalBlocks{};
+    for(std::size_t i=0;i<prepared->components.size();++i){
+        auto const& part=prepared->components[i];
+        std::string childError;
+        auto loaded=finalizeMcstructure(part.prepared,childError);
+        if(!loaded) {
+            error="Cannot resolve region "+part.name+": "+childError;
+            return nullptr;
+        }
+        std::array<int,3> offsets{};
+        for(int axis=0;axis<3;++axis)
+            offsets[axis]=static_cast<int>(
+                static_cast<std::int64_t>(bounds[i].origin[axis])-minimum[axis]);
+        result->regions.push_back({
+            offsets[0],offsets[1],offsets[2],
+            loaded->sizeX,loaded->sizeY,loaded->sizeZ,part.name
+        });
+        if(loaded->renderBlocks.size()>6000000-totalBlocks) {
+            error="Composite schematic exceeds six million blocks";
+            return nullptr;
+        }
+        totalBlocks+=loaded->renderBlocks.size();
+        result->paletteEntries+=loaded->paletteEntries;
+        result->secondaryBlocks+=loaded->secondaryBlocks;
+        auto& records=result->regionRenderBlocks.emplace_back(
+            std::move(loaded->renderBlocks));
+        for(auto& block:records){
+            block.x+=offsets[0];
+            block.y+=offsets[1];
+            block.z+=offsets[2];
+        }
+    }
+    result->sourceRegions=result->regions;
+    bool anyOverlap=false;
+    for(std::size_t i=0;i<result->regions.size() && !anyOverlap;++i)
+        for(std::size_t j=0;j<i;++j){
+            auto const& a=result->regions[i];
+            auto const& b=result->regions[j];
+            if(a.x < b.x+b.sizeX && b.x < a.x+a.sizeX
+                && a.y < b.y+b.sizeY && b.y < a.y+a.sizeY
+                && a.z < b.z+b.sizeZ && b.z < a.z+a.sizeZ){
+                anyOverlap=true;break;
+            }
+        }
+    if(!anyOverlap) {
+        result->renderBlocks.reserve(totalBlocks);
+        for(auto const& region:result->regionRenderBlocks)
+            result->renderBlocks.insert(
+                result->renderBlocks.end(),region.begin(),region.end());
+    }else{
+        // File order is authoritative when two region bounds overlap.
+        std::unordered_map<std::uint64_t,LoadedStructure::RenderBlock> latest;
+        latest.reserve(totalBlocks);
+        for(auto const& region:result->regionRenderBlocks)
+            for(auto const& block:region){
+                auto const key=(static_cast<std::uint64_t>(block.x)*result->sizeY
+                    +static_cast<std::uint64_t>(block.y))*result->sizeZ
+                    +static_cast<std::uint64_t>(block.z);
+                latest.insert_or_assign(key,block);
+            }
+        result->renderBlocks.reserve(latest.size());
+        for(auto& [key,value]:latest)
+            result->renderBlocks.push_back(std::move(value));
+    }
+    std::sort(result->renderBlocks.begin(),result->renderBlocks.end(),
+        [](auto const& a,auto const& b){
+            return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
+        });
+    result->primaryBlocks=result->renderBlocks.size();
+    assignMaterialIndices(*result);
+    result->generation=gGeneration.fetch_add(1,std::memory_order_acq_rel)+1;
+    return result;
+}
+
 bool supportsAsyncStructurePreparation(std::filesystem::path const& path) {
     auto extension = path.extension().wstring();
     std::transform(extension.begin(), extension.end(), extension.begin(), [](wchar_t value) {
         return static_cast<wchar_t>(std::towlower(value));
     });
-    return extension == L".mcstructure";
+    return extension == L".mcstructure" || extension == L".lholo";
 }
 
 std::shared_ptr<PreparedStructureLoad> prepareStructureFile(
@@ -1390,14 +1752,104 @@ std::shared_ptr<PreparedStructureLoad> prepareStructureFile(
         error = "该格式暂不支持异步预解析";
         return nullptr;
     }
-    return prepareMcstructure(path, error);
+    auto extension=path.extension().wstring();
+    std::transform(extension.begin(),extension.end(),extension.begin(),
+        [](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+    if(extension==L".mcstructure")return prepareMcstructure(path,error);
+    try {
+        std::error_code ec;
+        if(!std::filesystem::is_regular_file(path,ec)
+            || std::filesystem::file_size(path,ec)>262144 || ec){
+            error="Invalid LHolo region manifest file";
+            return nullptr;
+        }
+        std::ifstream in(path,std::ios::binary);
+        if(!in){error="Cannot open LHolo region manifest";return nullptr;}
+        auto manifest=nlohmann::json::parse(in);
+        if(!manifest.is_object() || manifest.value("format",std::string{})!="lholo-regions"
+            || manifest.value("version",0)!=1 || !manifest.contains("regions")
+            || !manifest["regions"].is_array() || manifest["regions"].empty()
+            || manifest["regions"].size()>64){
+            error="Invalid LHolo region manifest schema";
+            return nullptr;
+        }
+        auto prepared=std::make_shared<PreparedStructureLoad>();
+        prepared->path=path;
+        prepared->composite=true;
+        std::set<std::string> names;
+        std::set<std::filesystem::path> files;
+        for(auto const& part:manifest["regions"]) {
+            if(!part.is_object() || !part.contains("name") || !part["name"].is_string()
+                || !part.contains("file") || !part["file"].is_string()){
+                error="Invalid LHolo region entry";return nullptr;
+            }
+            auto name=part["name"].get<std::string>();
+            auto relative=part["file"].get<std::string>();
+            if(name.empty() || name.size()>128 || !names.insert(name).second
+                || !safeSchematicPath(relative) ){
+                error="Invalid/duplicate LHolo region name or file";return nullptr;
+            }
+            auto partPath=resolveSchematicPath(path.parent_path(),relative);
+            auto ext=partPath.extension().wstring();
+            std::transform(ext.begin(),ext.end(),ext.begin(),
+                [](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});
+            if(ext!=L".mcstructure" || !files.insert(partPath).second){
+                error="LHolo manifest requires unique mcstructure components";return nullptr;
+            }
+            std::string partError;
+            auto child=prepareMcstructure(partPath,partError);
+            if(!child) {
+                error="LHolo region "+name+": "+partError;
+                return nullptr;
+            }
+            auto actualOrigin=readMcstructureWorldOrigin(*child->root);
+            if(!actualOrigin) {
+                error="LHolo region "+name+" has no valid structure_world_origin";
+                return nullptr;
+            }
+            // Manifest captures the download's original coordinates. Fail
+            // when files were accidentally substituted after the manifest
+            // was generated, instead of silently producing a scrambled build.
+            if(part.contains("origin")) {
+                auto const& expected=part["origin"];
+                if(!expected.is_array() || expected.size()!=3
+                    || !std::all_of(expected.begin(),expected.end(),
+                        [](auto const& n){return n.is_number_integer();})
+                    || expected!=nlohmann::json::array({
+                        (*actualOrigin)[0],(*actualOrigin)[1],(*actualOrigin)[2]
+                    })) {
+                    error="LHolo region "+name+" origin does not match manifest";
+                    return nullptr;
+                }
+            }
+            if(part.contains("size")) {
+                auto const& expected=part["size"];
+                if(!expected.is_array() || expected.size()!=3
+                    || !std::all_of(expected.begin(),expected.end(),
+                        [](auto const& n){return n.is_number_integer();})
+                    || expected!=nlohmann::json::array({
+                        child->sizeX,child->sizeY,child->sizeZ
+                    })) {
+                    error="LHolo region "+name+" size does not match manifest";
+                    return nullptr;
+                }
+            }
+            prepared->components.push_back({std::move(name),std::move(child)});
+        }
+        return prepared;
+    }catch(std::exception const& e){
+        error=std::string("Invalid LHolo region manifest: ")+e.what();
+        return nullptr;
+    }
 }
 
 std::shared_ptr<LoadedStructure> finalizePreparedStructureFile(
     std::shared_ptr<PreparedStructureLoad> prepared,
     std::string&                          error
 ) try {
-    auto loaded = finalizeMcstructure(prepared, error);
+    auto loaded = prepared && prepared->composite
+        ? finalizeCompositeMcstructure(prepared,error)
+        : finalizeMcstructure(prepared, error);
     if (loaded && loaded->renderBlocks.empty()) {
         error = "结构中没有可投影方块";
         return nullptr;
@@ -1422,6 +1874,11 @@ std::shared_ptr<LoadedStructure> loadStructureFile(
     std::shared_ptr<LoadedStructure> loaded;
     if (extension == L".litematic") loaded = loadLitematic(path, error);
     else if (extension == L".mcstructure") loaded = loadMcstructure(path, error);
+    else if (extension == L".lholo") {
+        auto prepared=prepareStructureFile(path,error);
+        if(!prepared)return nullptr;
+        loaded=finalizePreparedStructureFile(std::move(prepared),error);
+    }
     else {
         error = "不支持的文件格式，请选择 .mcstructure 或 .litematic";
         return nullptr;

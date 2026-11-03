@@ -44,4 +44,40 @@ inline int grabAmountForSlot(MaterialGrabBudget const& budget,
     auto const cap=static_cast<std::uint64_t>(std::min(stackCount,maxStack));
     return static_cast<int>(std::min(cap,it->second));
 }
+
+// One bounded, server-authoritative batch: unique source and empty destination
+// slots; reduce the shared missing-material budget as each action is selected.
+struct GrabBatchSource {int slot{}; std::string itemId; int amount{};};
+struct GrabBatchMove {int sourceSlot{},destinationSlot{},amount{}; std::string itemId;};
+inline std::vector<GrabBatchMove> planGrabBatch(
+    MaterialGrabBudget remaining,
+    std::vector<GrabBatchSource> const& sources,
+    std::vector<int> const& emptyDestinations,
+    std::size_t maxActions=36
+) {
+    std::vector<GrabBatchMove> result;
+    maxActions=std::min<std::size_t>(maxActions,36);
+    bool usedSource[108]{};
+    bool usedDestination[36]{};
+    std::size_t cursor{};
+    for(auto const& source:sources) {
+        if(result.size()>=maxActions)break;
+        if(source.slot<0 || source.slot>=108 || usedSource[source.slot]
+            || source.amount<=0 || source.itemId.empty())continue;
+        const int amount=grabAmountForSlot(remaining,source.itemId,source.amount);
+        if(amount<=0)continue;
+        while(cursor<emptyDestinations.size()) {
+            const int dest=emptyDestinations[cursor++];
+            if(dest<0 || dest>=36 || usedDestination[dest])continue;
+            usedSource[source.slot]=true;
+            usedDestination[dest]=true;
+            result.push_back({source.slot,dest,amount,source.itemId});
+            auto budget=remaining.find(source.itemId);
+            if(budget!=remaining.end())budget->second-=static_cast<std::uint64_t>(amount);
+            break;
+        }
+        if(cursor>=emptyDestinations.size())break;
+    }
+    return result;
 }
+} // namespace lholo::structure::detail

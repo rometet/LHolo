@@ -4,6 +4,7 @@
 #include "structure/TransientPlacementCache.h"
 #include "structure/StructureLoader.h"
 #include "structure/StructureSession.h"
+#include "structure/formats/StructureFormatLoaders.h"
 #include "structure/StructurePaths.h"
 #include "structure/capture/StructureCapture.h"
 #include "projection/core/ProjectionRules.h"
@@ -41,9 +42,14 @@ std::string gWorldKey, gStatus;
 int gDimension{};
 Cell gFeet;
 bool gAvailable{}, gActivate{}, gApply{};
+// Region-only edits keep the old projection resident until its replacement
+// is committed; all other activation requests use the existing clear path.
+bool gRegionOnlyActivation{};
 ManualVerificationControl gVerification;
 std::uint64_t gWorldEpoch{};
 std::uint64_t gActiveId{};
+std::uint64_t gRegionSelectionPlacement{};
+std::string gRegionSelectionName;
 std::shared_ptr<Report const> gReport;
 MistakeSelection gSelection;
 std::uint64_t gReportRevision{};
@@ -396,9 +402,19 @@ Snapshot snapshot() {
     if(!s.worldAvailable){s.report.reset();s.session.writable=false;}
     if(s.worldAvailable && gReport)if(auto target=gSelection.target(gReport->stamp))s.target=std::move(target->mismatch);
     s.phase=s.worldAvailable?gVerification.phase():VerificationPhase::NotVerified;
-    if(auto p=selectedPlacement(s.session.document))s.activeProjectionAvailable=!gActivate && !gApply
-        && activeBindingCurrent(structure,p->id)
-        && placementCurrent(stampFor(*p,s.session.revision,structure.loaded->generation,1),structure);
+    if(auto p=selectedPlacement(s.session.document)){
+        if(p->id==gRegionSelectionPlacement)s.selectedRegion=gRegionSelectionName;
+        s.activeProjectionAvailable=!gActivate && !gApply
+            && activeBindingCurrent(structure,p->id)
+            && placementCurrent(stampFor(*p,s.session.revision,structure.loaded->generation,1),structure);
+        // Reject unloaded, unrelated and stale file metadata. A file switch
+        // cannot borrow the previous placement's stored capture coordinates.
+        if(s.worldAvailable && !gActivate && activeBindingCurrent(structure,p->id)
+            && structure.loaded->sourceWorldOrigin){
+            auto const& v=*structure.loaded->sourceWorldOrigin;
+            s.sourceWorldOrigin=Cell{v[0],v[1],v[2]};
+        }
+    }
     return s;
 }
 std::optional<VerificationTally> completedVerifierTallyForHud() {
@@ -443,6 +459,7 @@ bool place(std::string const& file) {
 bool select(std::uint64_t id) {
     std::lock_guard lock(gMutex);if(!contextValid())return false; auto snap=gSession.snapshot(); auto d=snap.document;
     if(!selectPlacement(d,id))return false; if (!change(snap,std::move(d))) return false;
+    gRegionSelectionPlacement=0;gRegionSelectionName.clear();
     gProjection.invalidate(true);gActivate=true; return true;
 }
 bool importSavedProjection() {
@@ -479,22 +496,114 @@ bool erase(std::uint64_t id) {
     bool const active=d.selected==id;
     if(!removePlacement(d,id))return false;
     if(!change(snap,std::move(d)))return false;
+    if(gRegionSelectionPlacement==id){gRegionSelectionPlacement=0;gRegionSelectionName.clear();}
     gProjection.invalidate(true,!active);if(active)gActivate=true;return true;
+}
+bool chooseRegion(std::uint64_t placementId,std::string const& name) {
+    std::lock_guard lock(gMutex);
+    if(!contextValid() || name.size()>256)return false;
+    auto const snap=gSession.snapshot();
+    auto const* p=selectedPlacement(snap.document);
+    if(!p || p->id!=placementId)return false;
+    if(gRegionSelectionPlacement==placementId && gRegionSelectionName==name){
+        gRegionSelectionName.clear();
+    }else{
+        gRegionSelectionPlacement=placementId;
+        gRegionSelectionName=name;
+    }
+    return true;
+}
+std::optional<RegionHighlight> highlightRegion(
+    std::uint64_t worldEpoch,int dimension,std::uint64_t loadedGeneration,
+    LoadedStructure const& loaded) noexcept {
+    try {
+        std::lock_guard lock(gMutex);
+        if(!contextValid() || gActivate || gApply || worldEpoch!=gWorldEpoch ||
+           dimension!=gDimension || loaded.generation!=loadedGeneration ||
+           gRegionSelectionName.empty() || gRegionSelectionPlacement!=gActiveId ||
+           loaded.sourcePath!=gActivePath)return {};
+        auto const snap=gSession.snapshot();
+        auto const* p=selectedPlacement(snap.document);
+        if(!p || p->id!=gActiveId || p->dimension!=dimension)return {};
+        RegionArea area;
+        bool found=false;
+        auto const& boxes=loaded.sourceRegions.empty()?loaded.regions:loaded.sourceRegions;
+        for(auto const& r:boxes)if(r.name==gRegionSelectionName){
+            area={r.x,r.y,r.z,r.sizeX,r.sizeY,r.sizeZ};found=true;break;
+        }
+        if(!found)for(auto const& r:p->regions)if(r.name==gRegionSelectionName && r.area){
+            area=*r.area;found=true;break;
+        }
+        if(!found || area.sizeX<=0 || area.sizeY<=0 || area.sizeZ<=0)return {};
+        PlacementTransform t{{loaded.sizeX,loaded.sizeY,loaded.sizeZ},
+                             p->origin,p->rotation,p->mirror};
+        // The transform is a permutation of axes with reflections. Opposite
+        // corners are sufficient for its exact, inclusive world-space AABB.
+        auto const a=t.toWorld({area.x,area.y,area.z});
+        auto const b=t.toWorld({static_cast<std::int64_t>(area.x)+area.sizeX-1,
+                               static_cast<std::int64_t>(area.y)+area.sizeY-1,
+                               static_cast<std::int64_t>(area.z)+area.sizeZ-1});
+        RegionHighlight box{{std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)},
+                            {std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)}};
+        if(box.min.x < -30000000 || box.max.x>30000000 ||
+           box.min.z < -30000000 || box.max.z>30000000 ||
+           box.min.y < -1000000 || box.max.y>1000000)return {};
+        return box;
+    }catch(...){return {};}
+}
+void filterRegionsForActivation(LoadedStructure& loaded,ProjectionRequestStamp const& request) {
+    std::vector<RegionSetting> regions;
+    {
+        std::lock_guard lock(gMutex);
+        if(!gProjection.current(request))return;
+        auto const snap=gSession.snapshot();
+        auto const* p=selectedPlacement(snap.document);
+        if(!p || p->id!=request.placementId)return;
+        regions=p->regions;
+    }
+    detail::filterLoadedRegions(loaded,regions);
 }
 bool edit(SavedPlacement const& placement,std::uint64_t revision) {
     std::lock_guard lock(gMutex);if(!contextValid())return false; auto snap=gSession.snapshot(); if(snap.revision!=revision)return false;
     auto d=snap.document; auto it=std::find_if(d.placements.begin(),d.placements.end(),[&](auto const& p){return p.id==placement.id;});
     if(it==d.placements.end())return false; if(*it==placement)return true;
     bool const fileChanged=it->file!=placement.file;
+    bool const regionsChanged=it->regions!=placement.regions;
+    if(fileChanged && gRegionSelectionPlacement==placement.id){
+        gRegionSelectionName.clear();gRegionSelectionPlacement=0;
+    }
     *it=placement; if(!change(snap,std::move(d)))return false;
     if(snap.document.selected==placement.id){
-        gProjection.invalidate(true,!fileChanged);
-        if(fileChanged){gActivate=true;gApply=false;}else gApply=true;
+        gProjection.invalidate(true,!fileChanged && !regionsChanged);
+        if(fileChanged || regionsChanged){
+            // Only changing the enabled flags/areas of this same source can
+            // preserve the active projection until the new filtered view is ready.
+            gRegionOnlyActivation=!fileChanged && regionsChanged;
+            gActivate=true;gApply=false;
+        }
+        else gApply=true;
     }return true;
 }
 bool moveToFeet(std::uint64_t id) {
     auto s=snapshot(); if(!s.worldAvailable)return false;
     for(auto p:s.session.document.placements)if(p.id==id){p.origin=s.feet;return edit(p,s.session.revision);} return false;
+}
+bool moveToSourceOrigin(std::uint64_t id) {
+    auto s=snapshot();
+    if(!s.worldAvailable || !s.session.writable
+        || s.session.document.selected!=id || !s.sourceWorldOrigin)return false;
+    auto const& origin=*s.sourceWorldOrigin;
+    // Match the placement file's validated coordinate limits; do not ask
+    // the document writer to store an invalid/out-of-world placement.
+    if(origin.x < -30000000 || origin.x > 30000000 ||
+        origin.z < -30000000 || origin.z > 30000000 ||
+        origin.y < -1000000 || origin.y > 1000000)return false;
+    for(auto placement:s.session.document.placements)
+        if(placement.id==id){
+            placement.origin=origin;
+            return edit(placement,s.session.revision);
+        }
+    return false;
 }
 void verify(){
     auto const structure=detail::StructureSession::getInstance().snapshot();
@@ -540,15 +649,21 @@ std::optional<SelectedMistake> highlightTarget(std::uint64_t worldEpoch,int dime
         return gSelection.target(gReport->stamp);
     }catch(...){return {};}
 }
-void reset(){std::lock_guard lock(gMutex);gProjection.invalidate();gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gActiveId=0;gActivePath.clear();invalidateVerification();}
+void reset(){std::lock_guard lock(gMutex);gRegionOnlyActivation=false;gRegionSelectionPlacement=0;gRegionSelectionName.clear();gProjection.invalidate();gSession.clear();gTransientDimensions.clear();gWorldKey.clear();gAvailable=false;gActivate=false;gApply=false;gWorldEpoch=0;gActiveId=0;gActivePath.clear();invalidateVerification();}
 void shutdown(){gJob.reset();reset();}
 void processControl() {
     reconcileProjection();
     std::optional<SavedPlacement> activation;
     bool apply{};
+    bool keepProjection{};
     {
-        std::lock_guard lock(gMutex); if(!gActivate && !gApply)return;apply=gApply && !gActivate;gActivate=false;gApply=false;
+        std::lock_guard lock(gMutex); if(!gActivate && !gApply)return;
+        apply=gApply && !gActivate;
+        keepProjection=gActivate && gRegionOnlyActivation;
+        gRegionOnlyActivation=false;
+        gActivate=false;gApply=false;
         auto snap=gSession.snapshot(); if(contextValid())if(auto p=selectedPlacement(snap.document);p && p->dimension==gDimension)activation=*p;
+        keepProjection=keepProjection && activation && activation->id==gActiveId;
         gActiveId=activation?activation->id:0;
     }
     try {
@@ -562,7 +677,8 @@ void processControl() {
             saveSettings(); return;
         }
     }
-    clear(true); // Preserve only an explicitly queued manual request for this activation.
+    if(!keepProjection)
+        clear(true); // Region-only updates retain the old mesh during replacement.
     if(!activation)return;
         auto const& p=*activation;
         auto const resolved=resolveSchematicPath(library(),p.file);
@@ -624,6 +740,7 @@ void tick(LocalPlayer& player) {
             if(key!=gWorldKey || (dim==gDimension && view->worldEpoch!=gWorldEpoch))gTransientDimensions.clear();
             else if(!stable)gTransientDimensions.remember(gDimension,gSession.snapshot().document);
             bool const freshRequest=gProjection.synchronizeWorld(view->worldEpoch,dim);
+            gRegionSelectionPlacement=0;gRegionSelectionName.clear();
             gSession.clear();gWorldKey=key;gWorldEpoch=view->worldEpoch;gDimension=dim;invalidateVerification();gActivePath.clear();gActiveId=0;
             if(stable)gSession.bind(LHolo::getInstance().getSelf().getConfigDir()/"placements"/key/("dimension-"+std::to_string(dim)+".json"));
             else {

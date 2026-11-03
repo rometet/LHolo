@@ -66,12 +66,24 @@ namespace {
 constexpr std::uint64_t kOpenTimeout=5000, kContentTimeout=3000, kRequestTimeout=3500;
 std::atomic_bool installed{false};
 std::atomic_bool preferenceEnabled{false};
+std::atomic_int grabModifiers{2}; // default Alt+right-click
+constexpr int kSupportedModifiers=7;
+constexpr int kMaxRequestsPerActivation=108;
+constexpr std::size_t kBatchActions=36;
+constexpr std::uint64_t kMaxSessionMs=30000;
 struct Slot {
     std::string id;
     int amount{};
     ItemStackNetIdVariant netId;
     int index{};
     std::shared_ptr<NetworkItemStackDescriptor> descriptor;
+};
+struct BatchReceipt {
+    int sourceSlot{-1},destinationSlot{-1},amount{};
+    std::string itemId;
+    std::shared_ptr<NetworkItemStackDescriptor> descriptor;
+    int approvedAmount{};
+    std::optional<ItemStackNetId> approvedNetId;
 };
 struct SilentSession {
     enum class Phase {Idle, Armed, Open, Ready, Waiting, AwaitingInventory, Closing};
@@ -83,13 +95,9 @@ struct SilentSession {
     ContainerEnumName expectedSource{ContainerEnumName::LevelEntityContainer};
     std::vector<Slot> slots;
     std::optional<ItemStackRequestId> requestId;
-    int beforeInventoryCount{};
-    int attempt{};
-    std::string expectedItem;
-    int destinationSlot{-1};
-    int acceptedDestinationAmount{};
-    std::optional<ItemStackNetId> acceptedDestinationNetId;
-    std::shared_ptr<NetworkItemStackDescriptor> sourceDescriptor;
+    std::vector<BatchReceipt> batch;
+    int successfulRequests{};
+    std::uint64_t readyAfter{};
 };
 std::mutex mutex;
 SilentSession sess;
@@ -97,7 +105,15 @@ SilentSession sess;
 bool enabled() noexcept {
     return preferenceEnabled.load(std::memory_order_acquire);
 }
-bool alt() noexcept {return !!(GetAsyncKeyState(VK_MENU)&0x8000);}
+int heldModifiers() noexcept {
+    return ((GetAsyncKeyState(VK_CONTROL)&0x8000) ? 1 : 0)
+        | ((GetAsyncKeyState(VK_MENU)&0x8000) ? 2 : 0)
+        | ((GetAsyncKeyState(VK_SHIFT)&0x8000) ? 4 : 0);
+}
+bool chordPressed() noexcept {
+    const int configured=grabModifiers.load(std::memory_order_acquire);
+    return configured>0 && heldModifiers()==configured;
+}
 bool validContainerBlock(Block const* block) {
     if(!block)return false;
     auto const id=block->getTypeName();
@@ -110,7 +126,7 @@ bool validContainerBlock(Block const* block) {
 // The packet supplies the authoritative clicked position. Never arm for
 // arbitrary GUI openings or non-container targets.
 bool armFromPacketBlock(BlockPos const& pos,char const* trigger) {
-    if(!installed.load(std::memory_order_acquire) || !enabled() || !alt())return false;
+    if(!installed.load(std::memory_order_acquire) || !enabled() || !chordPressed())return false;
     auto client=ll::service::getClientInstance();
     auto* player=client?client->getLocalPlayer():nullptr;
     if(!player || !StructureSession::getInstance().loaded())return false;
@@ -170,7 +186,7 @@ std::atomic_bool requestTraceInstalled{};
 LL_TYPE_INSTANCE_HOOK(SilentRequestTraceHook,ll::memory::HookPriority::Low,
     LoopbackPacketSender,&LoopbackPacketSender::$sendToServer,void,Packet& packet) {
     app::hook_lifecycle::DetourGuard guard;
-    if(guard && installed.load(std::memory_order_acquire) && enabled() && alt()) {
+    if(guard && installed.load(std::memory_order_acquire) && enabled() && chordPressed()) {
         if(packet.getId()==MinecraftPacketIds::InventoryTransaction) {
             auto& tx=static_cast<InventoryTransactionPacket&>(packet);
             if(auto* use=std::get_if<ItemUseInventoryTransaction>(
@@ -239,7 +255,7 @@ LL_TYPE_INSTANCE_HOOK(SilentContainerOpenHook,ll::memory::HookPriority::Normal,
         if(packet.mType==SharedTypes::Legacy::ContainerType::Container)
             armFromPacketBlock(*packet.mPos,"ContainerOpen");
         std::lock_guard lock(mutex);
-        if(enabled() && alt()) {
+        if(enabled() && chordPressed()) {
             static std::atomic<int> diagnosticCount{};
             if(diagnosticCount.fetch_add(1,std::memory_order_relaxed)<12)
                 LHolo::getInstance().getSelf().getLogger().info(
@@ -325,47 +341,48 @@ LL_TYPE_INSTANCE_HOOK(SilentResponseHook,ll::memory::HookPriority::Normal,
         if(sess.phase==SilentSession::Phase::Waiting && sess.requestId) {
             for(auto const& resp:*packet.mResponses) {
                 if(resp.mClientRequestId->mRawId!=sess.requestId->mRawId)continue;
-                log(resp.mResult==ItemStackNetResult::Success
-                    ?"REQUEST_ACCEPTED":"REQUEST_REJECTED",
-                    static_cast<int>(resp.mResult),sess.attempt);
-                if(resp.mResult==ItemStackNetResult::Success) {
-                    // A server ACK with authoritative destination slot data
-                    // can be reconciled without any screen or additional request.
-                    // Never infer inventory changes from an ACK alone.
+                bool const accepted=resp.mResult==ItemStackNetResult::Success;
+                log(accepted?"BATCH_ACCEPTED":"BATCH_REJECTED",
+                    static_cast<int>(resp.mResult),static_cast<int>(sess.batch.size()));
+                if(accepted) {
                     for(auto const& updated:*resp.mContainers) {
                         const auto name=updated.mFullContainerName->mName;
                         if(name!=ContainerEnumName::CombinedHotbarAndInventoryContainer
                             && name!=ContainerEnumName::HotbarContainer
                             && name!=ContainerEnumName::InventoryContainer)continue;
-                        for(auto const& updatedSlot:*updated.mSlots) {
-                            const int requested=static_cast<int>(updatedSlot.mRequestedSlot);
-                            const int actual=static_cast<int>(updatedSlot.mSlot);
-                            const int count=static_cast<int>(updatedSlot.mAmount);
-                            LHolo::getInstance().getSelf().getLogger().info(
-                                "MATERIAL_GRAB_CLIENT_ONLY_ACK_SLOT container={} requested={} slot={} amount={} net={}",
-                                updated.mFullContainerName->toString(),requested,
-                                actual,count,updatedSlot.mItemStackNetId->mRawId);
-                            if(requested!=sess.destinationSlot && actual!=sess.destinationSlot)
-                                continue;
-                            if(count<1 || count>64 || count>sess.attempt)continue;
-                            if(updatedSlot.mItemStackNetId->mRawId<=0)continue;
-                            sess.acceptedDestinationAmount=count;
-                            sess.acceptedDestinationNetId=*updatedSlot.mItemStackNetId;
+                        for(auto const& slot:*updated.mSlots) {
+                            int const requested=static_cast<int>(slot.mRequestedSlot);
+                            int const actual=static_cast<int>(slot.mSlot);
+                            int const quantity=static_cast<int>(slot.mAmount);
+                            auto const netId=*slot.mItemStackNetId;
+                            for(auto& move:sess.batch) {
+                                if(requested!=move.destinationSlot
+                                    && actual!=move.destinationSlot)continue;
+                                if(quantity<1 || quantity>move.amount || netId.mRawId<=0)
+                                    continue;
+                                move.approvedAmount=quantity;
+                                move.approvedNetId=netId;
+                                LHolo::getInstance().getSelf().getLogger().info(
+                                    "MATERIAL_GRAB_CLIENT_ONLY_BATCH_ACK_SLOT"
+                                    " dst={} amount={} net={}",
+                                    move.destinationSlot,quantity,netId.mRawId);
+                            }
                         }
                     }
+                    // Never reuse an old source NetId, including partial takes.
+                    for(auto const& move:sess.batch)
+                        std::erase_if(sess.slots,[&](Slot const& slot) {
+                            return slot.index==move.sourceSlot;
+                        });
+                    sess.successfulRequests+=static_cast<int>(sess.batch.size());
                 }
-                // ACK alone does not guarantee the native client inventory
-                // has applied the resulting slot update. Keep the authenticated
-                // session open until we observe that update on the game thread.
-                sess.phase=resp.mResult==ItemStackNetResult::Success
+                sess.phase=accepted
                     ? SilentSession::Phase::AwaitingInventory
                     : SilentSession::Phase::Closing;
                 break;
             }
         }
     }
-    // Normal net manager may not recognize silent requests, but must still
-    // process unrelated item responses. Never fabricate client-side items.
     origin(source,packet);
 }
 LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
@@ -373,7 +390,7 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
     ItemStack& item,BlockPos const& at,uchar face,Vec3 const& hit,
     HandSlot handSlot,Block const* target,bool first) {
     app::hook_lifecycle::DetourGuard guard;
-    if(guard && alt() && first && target) {
+    if(guard && chordPressed() && first && target) {
         static std::atomic<int> diagnosticCount{};
         if(diagnosticCount.fetch_add(1,std::memory_order_relaxed)<12)
             LHolo::getInstance().getSelf().getLogger().info(
@@ -382,7 +399,7 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
                 target->getTypeName(),static_cast<int>(handSlot));
     }
     if(guard && installed.load(std::memory_order_acquire) && enabled()
-        && alt() && first && handSlot==HandSlot::Mainhand
+        && chordPressed() && first && handSlot==HandSlot::Mainhand
         && validContainerBlock(target)) {
         auto client=ll::service::getClientInstance();
         auto* player=client?client->getLocalPlayer():nullptr;
@@ -422,50 +439,64 @@ LL_TYPE_INSTANCE_HOOK(SilentUseHook,ll::memory::HookPriority::High,
     }
     return origin(item,at,face,hit,handSlot,target,first);
 }
-bool submitOne(LocalPlayer& player) {
-    Slot found;
-    int targetSlot=-1,amount=0,prior=0;
+bool submitBatch(LocalPlayer& player) {
+    std::vector<Slot> selectedSources;
+    std::vector<GrabBatchMove> plan;
     FullContainerName sourceName;
-    ContainerID openId{ContainerID::None};
     {
         std::lock_guard lock(mutex);
         if(sess.phase!=SilentSession::Phase::Ready)return false;
+        auto const now=GetTickCount64();
+        if(now<sess.readyAfter)return false;
+        if(now-sess.begun>kMaxSessionMs
+            || sess.successfulRequests>=kMaxRequestsPerActivation) {
+            sess.phase=SilentSession::Phase::Closing;
+            return false;
+        }
         bool complete=true;
         auto counts=structure::countInventoryItems(player.getInventory(),&complete);
         auto hud=StructureUiState::getInstance().materialHudView();
-        if(!complete || !hud || !hud->ready){sess.phase=SilentSession::Phase::Closing;return false;}
+        if(!complete || !hud || !hud->ready){
+            sess.phase=SilentSession::Phase::Closing;
+            return false;
+        }
         auto budget=computeGrabBudget(hud->requirements,counts,complete);
         auto& inventory=player.getInventory();
-        for(auto const& src:sess.slots) {
-            const int requested=grabAmountForSlot(budget,src.id,src.amount);
-            if(requested<=0)continue;
-            for(int index=0;index<inventory.getContainerSize() && index<36;++index) {
-                auto const& dst=inventory.getItem(index);
-                if(!dst.isNull())continue; // start only with empty slots (no merging risk).
-                targetSlot=index;
-                found=src;
-                amount=std::min(64,requested);
-                prior=counts.contains(src.id)?counts.at(src.id):0;
-                break;
-            }
-            if(targetSlot>=0)break;
+        std::vector<int> empty;
+        for(int i=0;i<inventory.getContainerSize() && i<36;++i)
+            if(inventory.getItem(i).isNull())empty.push_back(i);
+        std::vector<GrabBatchSource> sources;
+        sources.reserve(sess.slots.size());
+        for(auto const& source:sess.slots)
+            sources.push_back({source.index,source.id,source.amount});
+        plan=planGrabBatch(std::move(budget),sources,empty,
+            std::min(kBatchActions,
+                static_cast<std::size_t>(kMaxRequestsPerActivation-sess.successfulRequests)));
+        if(plan.empty()) {
+            sess.phase=SilentSession::Phase::Closing;
+            return false;
         }
-        if(targetSlot<0) {sess.phase=SilentSession::Phase::Closing;return false;}
+        for(auto const& action:plan) {
+            auto it=std::find_if(sess.slots.begin(),sess.slots.end(),
+                [&](Slot const& source){return source.index==action.sourceSlot;});
+            if(it==sess.slots.end() || !it->descriptor) {
+                sess.phase=SilentSession::Phase::Closing;
+                return false;
+            }
+            selectedSources.push_back(*it);
+        }
         sourceName=sess.sourceName;
-        openId=sess.containerId;
+        sess.batch.clear();
+        for(std::size_t i=0;i<plan.size();++i)
+            sess.batch.push_back({
+                plan[i].sourceSlot,plan[i].destinationSlot,plan[i].amount,
+                plan[i].itemId,selectedSources[i].descriptor
+            });
         sess.phase=SilentSession::Phase::Waiting;
         sess.lastSent=GetTickCount64();
-        sess.expectedItem=found.id;
-        sess.destinationSlot=targetSlot;
-        sess.sourceDescriptor=found.descriptor;
-        sess.acceptedDestinationAmount=0;
-        sess.acceptedDestinationNetId.reset();
-        sess.beforeInventoryCount=prior;
-        sess.attempt=amount;
     }
     auto client=ll::service::getClientInstance();
     if(!client){closeSession();return false;}
-    // Use Mojang's packet factory to initialize the correct versioned packet.
     auto packet=MinecraftPackets::createPacket(MinecraftPacketIds::ItemStackRequest);
     if(!packet){closeSession();return false;}
     auto& req=static_cast<ItemStackRequestPacket&>(*packet);
@@ -473,19 +504,19 @@ bool submitOne(LocalPlayer& player) {
     ItemStackRequestId requestId{};
     requestId.clientInit();
     entry.mClientRequestId=requestId;
-    // Native Shift-click uses a Place action when moving FROM the chest.
-    // Match the actual request, not the InventoryContentPacket's placeholder.
-    ItemStackRequestCereal::PlaceActionData place{};
-    place.mAmount=static_cast<uchar>(amount);
-    place.mSource->mFullContainerName=sourceName;
-    place.mSource->mSlot=static_cast<uchar>(found.index);
-    place.mSource->mNetIdVariant=found.netId;
-    place.mDestination->mFullContainerName->mName=
-        ContainerEnumName::CombinedHotbarAndInventoryContainer;
-    place.mDestination->mFullContainerName->mDynamicId=std::nullopt;
-    place.mDestination->mSlot=static_cast<uchar>(targetSlot);
-    place.mDestination->mNetIdVariant=ItemStackNetIdVariant{};
-    entry.mActions->emplace_back(place);
+    for(std::size_t i=0;i<plan.size();++i) {
+        ItemStackRequestCereal::PlaceActionData place{};
+        place.mAmount=static_cast<uchar>(plan[i].amount);
+        place.mSource->mFullContainerName=sourceName;
+        place.mSource->mSlot=static_cast<uchar>(plan[i].sourceSlot);
+        place.mSource->mNetIdVariant=selectedSources[i].netId;
+        place.mDestination->mFullContainerName->mName=
+            ContainerEnumName::CombinedHotbarAndInventoryContainer;
+        place.mDestination->mFullContainerName->mDynamicId=std::nullopt;
+        place.mDestination->mSlot=static_cast<uchar>(plan[i].destinationSlot);
+        place.mDestination->mNetIdVariant=ItemStackNetIdVariant{};
+        entry.mActions->emplace_back(place);
+    }
     req.mRequests->push_back(std::move(entry));
     {
         std::lock_guard lock(mutex);
@@ -493,10 +524,10 @@ bool submitOne(LocalPlayer& player) {
         sess.requestId=requestId;
     }
     LHolo::getInstance().getSelf().getLogger().info(
-        "MATERIAL_GRAB_CLIENT_ONLY_DIRECT_REQUEST source={} slot={} net={} destination={} amount={} request={}",
-        sourceName.toString(),found.index,found.netId.toString(),targetSlot,amount,requestId.mRawId);
+        "MATERIAL_GRAB_CLIENT_ONLY_BATCH_REQUEST actions={} request={}",
+        plan.size(),requestId.mRawId);
     client->getPacketSender().sendToServer(*packet);
-    log("SENT_DIRECT_ITEM_STACK_REQUEST",amount,targetSlot);
+    log("SENT_BATCH_REQUEST",static_cast<int>(plan.size()));
     return true;
 }
 LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
@@ -510,84 +541,82 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
         std::lock_guard lock(mutex);
         phase=sess.phase;start=sess.begun;last=sess.lastSent;
     }
+    if(phase!=SilentSession::Phase::Idle && now-start>kMaxSessionMs) {
+        closeSession();
+        return;
+    }
     if(phase==SilentSession::Phase::Ready) {
-        app::invokeNativeCallback([&]{submitOne(*this);},
+        app::invokeNativeCallback([&]{submitBatch(*this);},
             [](char const* err) noexcept {
                 app::reportNativeCallbackFailure("client-only material transfer",err);
             });
     } else if(phase==SilentSession::Phase::AwaitingInventory) {
-        // Keep the silent container alive until the normal client inventory
-        // reflects the server-accepted transfer; only then refresh HUD data.
         app::invokeNativeCallback([&] {
-            std::string expected;
-            int previous=0,attempt=0;
+            std::vector<BatchReceipt> moves;
             {
                 std::lock_guard lock(mutex);
                 if(sess.phase!=SilentSession::Phase::AwaitingInventory)return;
-                expected=sess.expectedItem;
-                previous=sess.beforeInventoryCount;
-                attempt=sess.attempt;
+                moves=sess.batch;
             }
+            auto& inventory=this->getInventory();
             bool complete=true;
-            auto items=structure::countInventoryItems(this->getInventory(),&complete);
-            auto found=items.find(expected);
-            int current=found==items.end()?0:found->second;
-            if(complete && current==previous && now-last>=20) {
-                // The server approved this request, but the client inventory
-                // may not have a registered predictive screen to apply it.
-                // Only the response's authoritative destination slot is safe
-                // to reconcile, and only if it remains unoccupied.
-                int dest=-1,approvedCount=0;
-                std::optional<ItemStackNetId> approvedNetId;
-                std::shared_ptr<NetworkItemStackDescriptor> sourceDescriptor;
-                {
-                    std::lock_guard lock(mutex);
-                    if(sess.phase==SilentSession::Phase::AwaitingInventory) {
-                        dest=sess.destinationSlot;
-                        approvedCount=sess.acceptedDestinationAmount;
-                        approvedNetId=sess.acceptedDestinationNetId;
-                        sourceDescriptor=sess.sourceDescriptor;
-                    }
+            bool conflicted=false;
+            int present=0;
+            for(auto const& move:moves) {
+                if(move.destinationSlot<0 || move.destinationSlot>=inventory.getContainerSize()) {
+                    conflicted=true;break;
                 }
-                auto& inventory=this->getInventory();
-                if(sourceDescriptor && approvedNetId && approvedCount>0
-                    && approvedCount<=attempt && dest>=0
-                    && dest<inventory.getContainerSize()
-                    && inventory.getItem(dest).isNull()) {
+                auto const& existing=inventory.getItem(move.destinationSlot);
+                if(!existing.isNull()) {
+                    int const count=static_cast<int>(existing.mCount);
+                    if(existing.getTypeName()!=move.itemId
+                        || count<1 || count>move.amount
+                        || (move.approvedAmount>0 && count!=move.approvedAmount)) {
+                        conflicted=true;break;
+                    }
+                    ++present;
+                    continue;
+                }
+                // Apply only server-returned slot quantities and positive NetId,
+                // never speculate based on a request or a success flag alone.
+                if(now-last>=20 && move.descriptor && move.approvedNetId
+                    && move.approvedAmount>0
+                    && move.approvedAmount<=move.amount) {
                     ItemStack received=ItemStack::fromDescriptor(
-                        *sourceDescriptor,this->getLevel().getBlockPalette(),true);
-                    if(!received.isNull() && received.getTypeName()==expected) {
-                        received.set(approvedCount);
-                        received.mNetIdVariant->mVariant=*approvedNetId;
-                        inventory.setItem(dest,received);
-                        LHolo::getInstance().getSelf().getLogger().info(
-                            "MATERIAL_GRAB_CLIENT_ONLY_AUTHORITATIVE_SLOT_APPLIED"
-                            " slot={} amount={} item={}",dest,approvedCount,expected);
-                        items=structure::countInventoryItems(inventory,&complete);
-                        auto updated=items.find(expected);
-                        current=updated==items.end()?0:updated->second;
+                        *move.descriptor,this->getLevel().getBlockPalette(),true);
+                    if(received.isNull() || received.getTypeName()!=move.itemId) {
+                        conflicted=true;break;
                     }
-                }
+                    received.set(move.approvedAmount);
+                    received.mNetIdVariant->mVariant=*move.approvedNetId;
+                    inventory.setItem(move.destinationSlot,received);
+                    ++present;
+                } else complete=false;
             }
-            if(complete && current>previous) {
+            if(conflicted) {
+                log("BATCH_DESTINATION_CONFLICT",present,static_cast<int>(moves.size()));
+                closeSession();
+                return;
+            }
+            if(complete && present==static_cast<int>(moves.size())) {
                 {
                     std::lock_guard lock(mutex);
                     if(sess.phase!=SilentSession::Phase::AwaitingInventory)return;
-                    sess.phase=SilentSession::Phase::Closing;
+                    sess.phase=SilentSession::Phase::Ready;
+                    sess.readyAfter=now+50;
+                    sess.requestId.reset();
+                    sess.batch.clear();
                 }
-                LHolo::getInstance().getSelf().getLogger().info(
-                    "MATERIAL_GRAB_CLIENT_ONLY_INVENTORY_CONFIRMED before={} after={} requested={}",
-                    previous,current,attempt);
+                log("BATCH_INVENTORY_CONFIRMED",present);
                 requestMaterialHudAvailabilityRefresh();
-                closeSession();
-            } else if(now-last>1200) {
-                // An ACK without inventory reconciliation is not evidence of
-                // actual receipt. Do not replay or manufacture any item.
-                log("ACK_AWAITING_INVENTORY_TIMED_OUT",previous,current);
+            } else if(now-last>2500) {
+                // Stop on missing authoritative data; no duplicate request.
+                log("BATCH_RECONCILIATION_TIMEOUT",present,
+                    static_cast<int>(moves.size()));
                 closeSession();
             }
         }, [](char const* err) noexcept {
-            app::reportNativeCallbackFailure("client-only material reconciliation",err);
+            app::reportNativeCallbackFailure("client-only batch reconciliation",err);
         });
     } else if(phase==SilentSession::Phase::Closing
         || (phase==SilentSession::Phase::Armed && now-start>kOpenTimeout)
@@ -598,6 +627,15 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
 }
 }
 bool clientOnlyGrabEnabled() noexcept { return enabled(); }
+int clientOnlyGrabModifiers() noexcept {
+    return grabModifiers.load(std::memory_order_acquire);
+}
+bool clientOnlyGrabChordPressed() noexcept { return chordPressed(); }
+void setClientOnlyGrabModifiers(int modifiers) {
+    if(modifiers<1 || modifiers>kSupportedModifiers)modifiers=2;
+    const int previous=grabModifiers.exchange(modifiers,std::memory_order_acq_rel);
+    if(previous!=modifiers)closeSession();
+}
 
 bool hasLegacyClientOnlyGrabMarker() noexcept {
     // Migration only. Never consulted during normal runtime operations.

@@ -28,12 +28,14 @@ struct Settings {
     float comparisonStrength{1.0f};
     float correctionOutlineWidth{1.0f};
     bool structureBoundsEnabled{true};
+    bool regionBoundsEnabled{true};
     bool correctionSeeThrough{false};
     bool missingSeeThrough{false};
     bool experimentalConsent{false};
     // Experimental no-GUI server-authoritative schematic material grabbing.
     // Explicit user opt-in through the Experimental tab, no marker required.
     bool clientOnlyGrabEnabled{false};
+    int clientOnlyGrabModifiers{2}; // Ctrl=1, Alt=2, Shift=4; right-click fixed
     // Transient migration metadata: older versions used a marker file.
     bool clientOnlyGrabConfigured{false};
     bool materialHudEnabled{false};

@@ -60,6 +60,14 @@ void ProjectionSession::setStructureBoundsEnabled(bool enabled) {
     mStructureBoundsEnabled.store(enabled, std::memory_order_relaxed);
 }
 
+bool ProjectionSession::regionBoundsEnabled() const {
+    return mRegionBoundsEnabled.load(std::memory_order_relaxed);
+}
+
+void ProjectionSession::setRegionBoundsEnabled(bool enabled) {
+    mRegionBoundsEnabled.store(enabled, std::memory_order_relaxed);
+}
+
 bool ProjectionSession::correctionSeeThrough() const {
     return mCorrectionSeeThrough.load(std::memory_order_relaxed);
 }

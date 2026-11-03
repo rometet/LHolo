@@ -239,17 +239,11 @@ void scheduleProjectionMeshBuild(
     snapshot->dimension = state.dimension;
     snapshot->structureGeneration = state.structureGeneration;
     snapshot->anchor = state.anchor;
-    // Structure data and the virtual projected world are immutable for one
-    // placement generation. Only correction bytes need a task-local copy.
+    // Keep source geometry and virtual projected world immutable/shared.
+    // Snapshot only the target section plus its six face-neighbor sections:
+    // whole-structure correction copies are expensive even below 8M blocks.
     snapshot->structure = state.structure;
-    // Measured full-vector copies dominate large projections. Keep the faster
-    // contiguous copy for small structures; large tasks capture bounded neighbors.
-    bool const compactBlockState = state.structure->renderBlocks.size() >= 8U * 1024U * 1024U;
     std::vector<std::size_t> snapshotIndices;
-    if (!compactBlockState) {
-        snapshot->correctionStates = state.correctionStates;
-        snapshot->blockActorRendererAvailable = state.blockActorRendererAvailable;
-    }
     snapshot->sectionBlockIndices = {state.sectionBlockIndices[section]};
     // Always capture just the target section for component gates. Keep the
     // existing correction/actor neighbor snapshot and its large-model policy.
@@ -274,16 +268,12 @@ void scheduleProjectionMeshBuild(
         }
         auto const& positions = state.sectionExtraBlockPositions[found->second];
         snapshot->extraBlockPositions.insert(positions.begin(), positions.end());
-        if (compactBlockState) {
-            auto const& indices = state.sectionBlockIndices.at(found->second);
-            snapshotIndices.insert(snapshotIndices.end(), indices.begin(), indices.end());
-        }
+        auto const& indices = state.sectionBlockIndices.at(found->second);
+        snapshotIndices.insert(snapshotIndices.end(), indices.begin(), indices.end());
     }
-    if (compactBlockState) {
-        snapshot->sectionBlockSnapshot.emplace();
-        snapshot->sectionBlockSnapshot->capture(std::move(snapshotIndices),
-            state.correctionStates, state.blockActorRendererAvailable);
-    }
+    snapshot->sectionBlockSnapshot.emplace();
+    snapshot->sectionBlockSnapshot->capture(std::move(snapshotIndices),
+        state.correctionStates, state.blockActorRendererAvailable);
     snapshot->expectedWorldBlocks = state.expectedWorldBlocks;
     snapshot->expectedWorldLiquids = state.expectedWorldLiquids;
     snapshot->expectedWorldBlockActors = state.expectedWorldBlockActors;
@@ -306,6 +296,21 @@ void scheduleProjectionMeshBuild(
             snapshotDataFinished - snapshotStarted
         ).count()
     );
+    // Rate-limited performance checkpoint: quantify the bounded snapshot
+    // before and after optimization without flooding the per-frame logger.
+    if (snapshotDataMicros >= 2000) {
+        static auto lastSlowSnapshotLog = std::chrono::steady_clock::time_point{};
+        if (snapshotDataFinished - lastSlowSnapshotLog >= std::chrono::seconds(5)) {
+            lastSlowSnapshotLog = snapshotDataFinished;
+            logger().info(
+                "LHolo snapshot slow section={} totalBlocks={} localCells={} snapshotBytes={} prepareUs={}",
+                section, state.structure->renderBlocks.size(),
+                snapshot->sectionBlockSnapshot->size(),
+                snapshot->sectionBlockSnapshot->bytes(),
+                snapshotDataMicros
+            );
+        }
+    }
     // 26.51 removed the ChunkViewSource(ChunkSource&, LoadMode) export; the
     // player chunk-view factory is the only remaining creation path.
     auto* localPlayer = []() -> LocalPlayer* {
@@ -377,6 +382,21 @@ void scheduleProjectionMeshBuild(
                     Tessellator::UploadMode::Never,
                     settings
                 );
+                result.bodyClassifyMicros = snapshot->meshBodyClassifyMicros;
+                result.bodyTessellateMicros = snapshot->meshBodyTessellateMicros;
+                result.liquidMicros = snapshot->meshLiquidMicros;
+                result.auxMicros = snapshot->meshAuxMicros;
+                result.placeholderMicros = snapshot->meshPlaceholderMicros;
+                result.correctionSetupMicros = snapshot->meshCorrectionSetupMicros;
+                result.correctionOutlineMicros = snapshot->meshCorrectionOutlineMicros;
+                result.correctionFillMicros = snapshot->meshCorrectionFillMicros;
+                result.outlineAttemptedEdges = snapshot->meshOutlineAttemptedEdges;
+                result.outlineEmittedEdges = snapshot->meshOutlineEmittedEdges;
+                result.outlineGridBytes = snapshot->meshOutlineGridBytes;
+                result.fillCandidateFaces = snapshot->meshFillCandidateFaces;
+                result.fillEmittedFaces = snapshot->meshFillEmittedFaces;
+                result.fillRunOriginalFaces = snapshot->meshFillRunOriginalFaces;
+                result.fillRunQuads = snapshot->meshFillRunQuads;
                 result.workerBuildMicros = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - workerStarted
@@ -518,6 +538,7 @@ void buildNextProjectionSectionSynchronously(
             );
         });
         ++state.meshUploadRevision;
+        state.drawCache.noteMeshUpload(section);
         break;
     }
 }

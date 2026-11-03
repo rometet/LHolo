@@ -7,6 +7,7 @@
 // (at your option) any later version.
 
 #include "projection/world/ProjectionVirtualWorld.h"
+#include "projection/world/ProjectionVirtualAirPolicy.h"
 
 #include <tuple>
 #include <utility>
@@ -21,6 +22,8 @@ thread_local ExpectedLiquidMap const*     gTessellationLiquids{};
 thread_local ExpectedBlockActorMap const* gTessellationBlockActors{};
 thread_local NativeLiquidTelemetry*       gNativeLiquidTelemetry{};
 thread_local bool                         gSuppressRegionWrites{};
+thread_local Block const*                 gDiodeAir{};
+thread_local int                          gDiodeCenterX{}, gDiodeCenterY{}, gDiodeCenterZ{};
 
 } // namespace
 
@@ -53,12 +56,35 @@ ScopedTessellationBlocks::~ScopedTessellationBlocks() {
     gNativeLiquidTelemetry   = mPreviousTelemetry;
 }
 
+ScopedDiodeAirNeighborhood::ScopedDiodeAirNeighborhood(
+    BlockPos const& center, Block const* air
+) noexcept
+: mPreviousAir(std::exchange(gDiodeAir, air)),
+  mPreviousX(std::exchange(gDiodeCenterX, center.x)),
+  mPreviousY(std::exchange(gDiodeCenterY, center.y)),
+  mPreviousZ(std::exchange(gDiodeCenterZ, center.z)) {}
+
+ScopedDiodeAirNeighborhood::~ScopedDiodeAirNeighborhood() noexcept {
+    gDiodeAir = mPreviousAir;
+    gDiodeCenterX = mPreviousX;
+    gDiodeCenterY = mPreviousY;
+    gDiodeCenterZ = mPreviousZ;
+}
+
+bool isDiodeVirtualAirPosition(BlockPos const& pos) noexcept {
+    return gDiodeAir && inVirtualAirNeighborhood(
+        pos.x, pos.y, pos.z,
+        gDiodeCenterX, gDiodeCenterY, gDiodeCenterZ
+    );
+}
+
 Block const* findTessellationBlock(BlockPos const& position) {
     if (!gTessellationBlocks) return nullptr;
     auto const found = gTessellationBlocks->find(
         std::tuple{position.x, position.y, position.z}
     );
-    return found == gTessellationBlocks->end() ? nullptr : found->second;
+    if (found != gTessellationBlocks->end()) return found->second;
+    return isDiodeVirtualAirPosition(position) ? gDiodeAir : nullptr;
 }
 
 Block const* findTessellationLiquid(BlockPos const& position) {
@@ -67,7 +93,8 @@ Block const* findTessellationLiquid(BlockPos const& position) {
     auto const found = gTessellationLiquids->find(
         std::tuple{position.x, position.y, position.z}
     );
-    return found == gTessellationLiquids->end() ? nullptr : found->second;
+    if (found != gTessellationLiquids->end()) return found->second;
+    return isDiodeVirtualAirPosition(position) ? gDiodeAir : nullptr;
 }
 
 BlockActor const* findTessellationBlockActor(BlockPos const& position) {

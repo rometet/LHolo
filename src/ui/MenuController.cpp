@@ -106,6 +106,26 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.layerAxis = structure::toInt(sessionSnapshot.transform.layerAxis);
     model.status = sessionSnapshot.status;
     model.schematic = structure::schematic::snapshot();
+    model.regionRows.clear();
+    model.regionSupportsCustom=sessionSnapshot.loaded
+        && sessionSnapshot.loaded->sourceRegions.size()==1
+        && sessionSnapshot.loaded->sourceRegions.front().name=="main"
+        && sessionSnapshot.loaded->regionRenderBlocks.empty();
+    // Region definitions are from the current selected/loaded placement, never
+    // a stale file while a different placement is being asynchronously loaded.
+    if(sessionSnapshot.loaded && model.schematic.activeProjectionAvailable) {
+        auto const& regions=sessionSnapshot.loaded->sourceRegions.empty()
+            ? sessionSnapshot.loaded->regions : sessionSnapshot.loaded->sourceRegions;
+        model.regionRows.reserve(regions.size());
+        for(auto const& r:regions)
+            model.regionRows.push_back({r.name,r.x,r.y,r.z,r.sizeX,r.sizeY,r.sizeZ});
+        if(model.regionSupportsCustom){
+            auto const* selected=structure::selectedPlacement(model.schematic.session.document);
+            if(selected)for(auto const& r:selected->regions)if(r.area)
+                model.regionRows.push_back({r.name,r.area->x,r.area->y,r.area->z,
+                    r.area->sizeX,r.area->sizeY,r.area->sizeZ,true});
+        }
+    }
     if(sessionSnapshot.loaded) { model.sizeX=sessionSnapshot.loaded->sizeX;model.sizeY=sessionSnapshot.loaded->sizeY;model.sizeZ=sessionSnapshot.loaded->sizeZ; }
     model.hasLoadedStructure = static_cast<bool>(sessionSnapshot.loaded);
     model.hasSavedProjection = sessionSnapshot.saved.available;
@@ -117,6 +137,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.materialCount = sessionSnapshot.loaded
         ? static_cast<int>(sessionSnapshot.loaded->materialCount) : 0;
     model.structureBoundsEnabled = projection::getStructureBoundsEnabled();
+    model.regionBoundsEnabled = projection::getRegionBoundsEnabled();
     model.correctionSeeThrough = projection::getCorrectionSeeThrough();
     model.missingSeeThrough = projection::getMissingSeeThrough();
     auto const placementModes = place::getPlacementModes();
@@ -126,6 +147,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.placementModesRevision = placementModes.revision;
     model.experimentalConsent = structure::experimentalConsentGiven();
     model.clientOnlyGrabEnabled=structure::detail::clientOnlyGrabEnabled();
+    model.clientOnlyGrabModifiers=structure::detail::clientOnlyGrabModifiers();
     model.materialHudEnabled = structure::materialHudEnabled();
     model.materialHudPosition = std::clamp(structure::materialHudPosition(), 0, 3);
     model.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
@@ -204,6 +226,10 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
         projection::setStructureBoundsEnabled(model.structureBoundsEnabled);
         changed = true;
     }
+    if (projection::getRegionBoundsEnabled() != model.regionBoundsEnabled) {
+        projection::setRegionBoundsEnabled(model.regionBoundsEnabled);
+        changed = true;
+    }
     if (projection::getCorrectionSeeThrough() != model.correctionSeeThrough) {
         projection::setCorrectionSeeThrough(model.correctionSeeThrough);
         changed = true;
@@ -214,6 +240,10 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     }
     if (structure::detail::clientOnlyGrabEnabled()!=model.clientOnlyGrabEnabled) {
         structure::detail::setClientOnlyGrabEnabled(model.clientOnlyGrabEnabled);
+        changed=true;
+    }
+    if (structure::detail::clientOnlyGrabModifiers()!=model.clientOnlyGrabModifiers) {
+        structure::detail::setClientOnlyGrabModifiers(model.clientOnlyGrabModifiers);
         changed=true;
     }
     // Assisted-placement modes are session-only safety controls. Applying a
@@ -322,8 +352,14 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
     actions.importSavedSchematic = [&refreshModel] { structure::schematic::importSavedProjection(); refreshModel=true; };
     actions.placeSchematic = [&refreshModel](auto const& file) { structure::schematic::place(file); refreshModel=true; };
     actions.selectPlacement = [&refreshModel](auto id) { structure::schematic::select(id); refreshModel=true; };
+    actions.selectRegion = [&refreshModel](auto id,auto const& name) {
+        structure::schematic::chooseRegion(id,name);refreshModel=true;
+    };
     actions.deletePlacement = [&refreshModel](auto id) { structure::schematic::erase(id); refreshModel=true; };
     actions.movePlacementToFeet = [&refreshModel](auto id) { structure::schematic::moveToFeet(id); refreshModel=true; };
+    actions.movePlacementToSourceOrigin = [&refreshModel](auto id) {
+        structure::schematic::moveToSourceOrigin(id);refreshModel=true;
+    };
     actions.editPlacement = [&refreshModel](auto const& p,auto revision) { structure::schematic::edit(p,revision); refreshModel=true; };
     actions.verifySchematic = [] { structure::schematic::verify(); };
     actions.cancelVerification = [] { structure::schematic::cancelVerification(); };
@@ -344,6 +380,10 @@ MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureR
         // changes are reflected immediately; subsequent frames read session
         // state normally.
         refreshModel = true;
+    };
+    actions.loadStructureAtSourceOrigin = [&refreshModel](std::string_view pathValue) {
+        structure::requestStructureFileLoad(std::string{pathValue},true);
+        refreshModel=true;
     };
     actions.restoreProjection = [&refreshModel] {
         structure::restoreSavedProjection();
@@ -473,6 +513,10 @@ void renderStructureMenu() {
             lastPath.c_str()
         );
         gPathInitialized = true;
+        // The file list was previously populated only after publishing a
+        // projection (or clicking Refresh). First-time users could not find
+        // an existing .lholo manifest before loading any schematic.
+        structure::schematic::refreshFiles();
     }
     auto const metrics = calculateMetrics(displaySize, effectiveScale);
     applyFluentTheme(metrics);

@@ -3,12 +3,23 @@
 #include "structure/PlacementTransform.h"
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace lholo::structure {
 inline constexpr std::size_t kMaxPlacements = 64, kMaxPlacementDocument = 131072;
+struct RegionArea {
+    int x{},y{},z{},sizeX{1},sizeY{1},sizeZ{1};
+    bool operator==(RegionArea const&) const = default;
+};
+struct RegionSetting {
+    std::string name; // immutable key from the source file
+    bool enabled{true};
+    std::optional<RegionArea> area; // custom source-local AABB, mcstructure only
+    bool operator==(RegionSetting const&) const = default;
+};
 struct SavedPlacement {
     std::uint64_t id{};
     std::string name, file;
@@ -19,6 +30,7 @@ struct SavedPlacement {
     LayerAxis layerAxis{LayerAxis::BottomToTop};
     LayerDisplayMode layerMode{LayerDisplayMode::All};
     int layer{};
+    std::vector<RegionSetting> regions; // sparse overrides, omitted means enabled
     bool operator==(SavedPlacement const&) const = default;
 };
 struct PlacementDocument {

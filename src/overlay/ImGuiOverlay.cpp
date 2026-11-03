@@ -15,6 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "overlay/ImGuiOverlay.h"
+#include "overlay/PresentFrameStats.h"
+#include "overlay/GpuUtilizationProbe.h"
+#include "projection/runtime/ProjectionFrameTiming.h"
+#include "structure/StructureSession.h"
 #include "overlay/BlockIconGpu.h"
 #include "resourcepacks/WorldPackReloadGpuOwner.h"
 #include "overlay/OverlayFonts.h"
@@ -50,6 +54,7 @@
 
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cfloat>
 #include <filesystem>
 #include <mutex>
@@ -111,6 +116,7 @@ std::atomic_bool gInstalled{false};
 std::atomic_bool gExecuteHookInstalled{false};
 std::atomic_bool gShuttingDown{false};
 std::atomic_bool gRendering{false};
+detail::PresentFrameStats gPresentFrameStats;
 std::atomic_uint gHookCallbacks{};
 thread_local unsigned int gHookCallbackDepth{};
 thread_local char const*  gHookCallbackKind{"none"};
@@ -967,6 +973,47 @@ void render(IDXGISwapChain* swapChain) {
     // See the cursor-ownership note at the top of this file.
     ImGui::GetIO().MouseDrawCursor = false;
     auto const showHint = structure::actionHintActive();
+    // Measure game Present cadence in the foreground, with the same
+    // schematic displayed or hidden as separate sampling modes. Sampling
+    // runs even with the LHolo menu/HUD closed, without GPU readback.
+    auto const measuring = !showGui && isForegroundGameWindow(gWindow)
+        && static_cast<bool>(structure::getLoaded());
+    auto const projectionVisible =
+        structure::detail::StructureSession::getInstance().visible();
+    auto const nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (auto const report = gPresentFrameStats.observe(
+            nowUs, measuring, projectionVisible)) {
+        auto const cpu = projection::detail::projectionFrameTiming().consume();
+        auto const correction = projection::detail::correctionSubmitTiming().consume();
+        auto const actors = projection::detail::projectedActorPassTiming().consume();
+        auto const gpu = detail::gpuUtilizationProbe().sample();
+        logger().info(
+            "LHolo FPS sample: projectionVisible={} fps={} frameAvgMs={} frameP95Ms={} frameP99Ms={} presents={} "
+            "opaqueCpuAvgUs={} opaqueCpuMaxUs={} opaqueCallbacks={} alphaCpuAvgUs={} "
+            "alphaCpuMaxUs={} alphaCallbacks={} fillDraws={} fillSubmitUs={} fillPasses={} "
+            "outlineDraws={} outlineSubmitUs={} outlinePasses={} "
+            "fillBatchDraws={} outlineBatchDraws={} "
+            "actorPassCpuAvgUs={} actorPassCalls={} actorCandidatesPerPass={} "
+            "pistonDispatches={} otherActorDispatches={} source=DXGI_Present gpuTimeMeasured=0 "
+            "nvmlAvailable={} nvidiaGpuUtilPercent={} nvidiaMemoryControllerPercent={}",
+            report->projectionVisible ? 1 : 0,
+            report->fps, report->averageMs, report->p95Ms, report->p99Ms,
+            report->frames,
+            cpu.opaqueCount ? cpu.opaqueTotalUs / cpu.opaqueCount : 0,
+            cpu.opaquePeakUs, cpu.opaqueCount,
+            cpu.alphaCount ? cpu.alphaTotalUs / cpu.alphaCount : 0,
+            cpu.alphaPeakUs, cpu.alphaCount,
+            correction.fillCalls, correction.fillMicros, correction.fillPasses,
+            correction.outlineCalls, correction.outlineMicros, correction.outlinePasses,
+            correction.fillBatchedDraws, correction.outlineBatchedDraws,
+            actors.calls ? actors.totalUs / actors.calls : 0, actors.calls,
+            actors.calls ? actors.candidateVisits / actors.calls : 0,
+            actors.pistonDispatches, actors.otherDispatches,
+            gpu.available ? 1 : 0,
+            gpu.enginePercent, gpu.memoryControllerPercent
+        );
+    }
     if (!showGui && !showHud && !showHint) return;
 
     if (showGui && isForegroundGameWindow(gWindow)) {

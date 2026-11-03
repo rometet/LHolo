@@ -61,7 +61,7 @@ struct GrabSession {
 thread_local GrabSession session;
 // The player must explicitly opt in. Regular right-click always works normally.
 // Holding Alt while opening the chest/shulker GUI arms ONE collection session.
-bool altPressed() noexcept { return (GetAsyncKeyState(VK_MENU)&0x8000)!=0; }
+bool grabChordPressed() noexcept { return clientOnlyGrabChordPressed(); }
 bool hasPendingMaterialNeed() {
     // OFF means no automatic material grab at all (not a silent-to-hidden
     // fallback). Native chest interaction remains unchanged.
@@ -186,7 +186,7 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabEarlyChestHook,ll::memory::HookPriority::Low,
     auto* native=static_cast<ScreenController const*>(this);
     if((blockType==BlockActorType::Chest || blockType==BlockActorType::ShulkerBox
         || blockType==BlockActorType::BarrelBlock)
-        && altPressed() && hasPendingMaterialNeed()) {
+        && grabChordPressed() && hasPendingMaterialNeed()) {
         earlyArmedScreen.store(native,std::memory_order_release);
         suppressionDeadline.store(0,std::memory_order_release);
         suppressedScreen.store(native,std::memory_order_release);
@@ -207,11 +207,11 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabOpenHook,ll::memory::HookPriority::Low,
     // It remains completely unrendered during the short collection session.
     auto* native=static_cast<ScreenController const*>(this);
     bool const early=earlyArmedScreen.load(std::memory_order_acquire)==native;
-    bool const armed=(early || altPressed()) && hasPendingMaterialNeed();
+    bool const armed=(early || grabChordPressed()) && hasPendingMaterialNeed();
     session=GrabSession{this,armed,false,false,false,GetTickCount64(),
         GetTickCount64()+150,0,{}};
     LHolo::getInstance().getSelf().getLogger().info(
-        "MATERIAL_GRAB_OPEN alt={} early={} armed={}",altPressed(),early,armed);
+        "MATERIAL_GRAB_OPEN alt={} early={} armed={}",grabChordPressed(),early,armed);
     if(armed) {
         suppressionDeadline.store(0,std::memory_order_release);
         suppressedScreen.store(native,std::memory_order_release);

@@ -644,6 +644,18 @@ void testVerifierMouseRows(float scale=1,bool actualFonts=false) {
 
 int main() {
     try {
+        // The Windows picker starts unfiltered, to expose .lholo even when
+        // the shell remembers a restrictive multi-pattern filter. The next
+        // filter still contains exactly the 3 supported schematic extensions.
+        check(std::string_view{lholo::ui::StructureOpenDefaultPatterns}=="*.*",
+            "Windows Browse must show .lholo immediately without changing filter");
+        auto const patterns=std::string_view{lholo::ui::StructureOpenFilePatterns};
+        check(patterns.find("*.mcstructure")!=std::string_view::npos,
+            "Bedrock structures must appear in the default file picker");
+        check(patterns.find("*.litematic")!=std::string_view::npos,
+            "Litematic structures must appear in the default file picker");
+        check(patterns.find("*.lholo")!=std::string_view::npos,
+            "LHolo region manifests must appear in the default file picker");
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
         testVerifierMouseRows();

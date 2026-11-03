@@ -32,7 +32,7 @@ bool safeSchematicPath(std::string_view value) {
     }
     auto ext = detail::pathFromUtf8(value).extension().wstring();
     for (auto& c : ext) if (c >= L'A' && c <= L'Z') c += L'a' - L'A';
-    return ext == L".mcstructure" || ext == L".litematic";
+    return ext == L".mcstructure" || ext == L".litematic" || ext == L".lholo";
 }
 std::filesystem::path resolveSchematicPath(std::filesystem::path const& root, std::string_view relative) {
     if (!safeSchematicPath(relative)) throw std::runtime_error("Unsafe schematic path");
@@ -77,6 +77,24 @@ void validate(PlacementDocument const& d) {
     if (d.placements.size() > kMaxPlacements) throw std::runtime_error("Too many placements");
     std::set<std::uint64_t> ids;
     for (auto const& p : d.placements) {
+        if (p.regions.size()>256)throw std::runtime_error("Too many region overrides");
+        std::set<std::string> regionNames;
+        int customCount=0;
+        for(auto const& region:p.regions) {
+            if(region.name.empty() || region.name.size()>256 ||
+                !regionNames.insert(region.name).second)
+                throw std::runtime_error("Invalid/duplicate region override");
+            if(region.area){
+                ++customCount;
+                auto const& r=*region.area;
+                if(r.x<0 || r.y<0 || r.z<0 || r.sizeX<1 || r.sizeY<1 || r.sizeZ<1
+                    || static_cast<std::int64_t>(r.x)+r.sizeX>1000000
+                    || static_cast<std::int64_t>(r.y)+r.sizeY>1000000
+                    || static_cast<std::int64_t>(r.z)+r.sizeZ>1000000)
+                    throw std::runtime_error("Invalid custom region bounds");
+            }
+        }
+        if(customCount>4)throw std::runtime_error("Too many custom regions");
         if (!p.id || !ids.insert(p.id).second || !safeSchematicPath(p.file) || p.name.size() > 128
             || p.rotation < 0 || p.rotation > 3 || p.mirror < 0 || p.mirror > 2 || p.layer < 0
             || toInt(p.layerAxis) < 0 || toInt(p.layerAxis) > 8 || toInt(p.layerMode) < 0 || toInt(p.layerMode) > 3
@@ -88,10 +106,26 @@ void validate(PlacementDocument const& d) {
 }
 std::string encodePlacements(PlacementDocument const& d) {
     validate(d);
-    nlohmann::json j{{"version",1},{"selected",d.selected},{"placements",nlohmann::json::array()}};
-    for (auto const& p : d.placements) j["placements"].push_back({{"id",p.id},{"name",p.name},{"file",p.file},
-        {"dimension",p.dimension},{"origin",{p.origin.x,p.origin.y,p.origin.z}},{"rotation",p.rotation},{"mirror",p.mirror},
-        {"visible",p.visible},{"countExtras",p.countExtras},{"layerAxis",toInt(p.layerAxis)},{"layerMode",toInt(p.layerMode)},{"layer",p.layer}});
+    nlohmann::json j{{"version",2},{"selected",d.selected},{"placements",nlohmann::json::array()}};
+    for (auto const& p : d.placements) {
+        nlohmann::json item={{"id",p.id},{"name",p.name},{"file",p.file},
+            {"dimension",p.dimension},{"origin",{p.origin.x,p.origin.y,p.origin.z}},
+            {"rotation",p.rotation},{"mirror",p.mirror},{"visible",p.visible},
+            {"countExtras",p.countExtras},{"layerAxis",toInt(p.layerAxis)},
+            {"layerMode",toInt(p.layerMode)},{"layer",p.layer}};
+        if(!p.regions.empty()){
+            item["regions"]=nlohmann::json::array();
+            for(auto const& region:p.regions){
+                nlohmann::json entry={{"name",region.name},{"enabled",region.enabled}};
+                if(region.area){
+                    auto const& b=*region.area;
+                    entry["bounds"]={b.x,b.y,b.z,b.sizeX,b.sizeY,b.sizeZ};
+                }
+                item["regions"].push_back(std::move(entry));
+            }
+        }
+        j["placements"].push_back(std::move(item));
+    }
     auto text = j.dump(2);
     if (text.size() > kMaxPlacementDocument) throw std::runtime_error("Placement document too large");
     return text;
@@ -101,7 +135,8 @@ PlacementDocument decodePlacements(std::string_view text) {
     auto const j = nlohmann::json::parse(text,[](int depth,auto,auto&){
         if(depth>16)throw std::runtime_error("Placement nesting too deep");return true;
     });
-    if (!j.is_object() || field(j,"version",0) != 1 || !j.contains("placements") || !j["placements"].is_array())
+    if (!j.is_object() || (field(j,"version",0)!=1 && field(j,"version",0)!=2)
+        || !j.contains("placements") || !j["placements"].is_array())
         throw std::runtime_error("Invalid/unsupported placement document");
     if (j["placements"].size() > kMaxPlacements) throw std::runtime_error("Too many placements");
     PlacementDocument d;
@@ -125,6 +160,29 @@ PlacementDocument decodePlacements(std::string_view text) {
         p.layerAxis = layerAxisFromInt(field(v,"layerAxis",3));
         p.layerMode = layerDisplayModeFromInt(field(v,"layerMode",0));
         p.layer = (std::max)(0,field(v,"layer",0));
+        if(auto it=v.find("regions");it!=v.end()){
+            if(!it->is_array() || it->size()>256)
+                throw std::runtime_error("Invalid region overrides array");
+            for(auto const& region:*it) {
+                if(!region.is_object() || !region.contains("name")
+                    || !region.at("name").is_string()
+                    || !region.contains("enabled") || !region.at("enabled").is_boolean())
+                    throw std::runtime_error("Invalid region override");
+                RegionSetting setting{region.at("name").get<std::string>(),
+                    region.at("enabled").get<bool>()};
+                if(auto bounds=region.find("bounds");bounds!=region.end()){
+                    if(!bounds->is_array() || bounds->size()!=6)
+                        throw std::runtime_error("Invalid custom region bounds");
+                    for(auto const& coord:*bounds)
+                        if(!coord.is_number_integer())throw std::runtime_error("Invalid bounds value");
+                    setting.area=RegionArea{
+                        (*bounds)[0].get<int>(),(*bounds)[1].get<int>(),
+                        (*bounds)[2].get<int>(),(*bounds)[3].get<int>(),
+                        (*bounds)[4].get<int>(),(*bounds)[5].get<int>()};
+                }
+                p.regions.push_back(std::move(setting));
+            }
+        }
         d.placements.push_back(std::move(p));
     }
     if (std::none_of(d.placements.begin(),d.placements.end(),[&](auto const& p){ return p.id == d.selected; })) d.selected = 0;

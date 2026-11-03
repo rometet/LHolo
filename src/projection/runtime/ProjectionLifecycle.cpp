@@ -72,7 +72,10 @@ bool prepareProjectionState(
 ) {
     auto& client = renderContext.mClientInstance;
     auto* player = client.getLocalPlayer();
-    if (!player || !loaded || loaded->renderBlocks.empty()) return false;
+    // An all-OFF region selection is an intentional empty effective view. Keep
+    // the placement active for region outlines, verifier and later re-enabling.
+    // Empty section collections are valid and have no mesh tasks to schedule.
+    if (!player || !loaded) return false;
 
     state.client = &client;
     state.level = &player->getLevel();
