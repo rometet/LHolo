@@ -19,6 +19,7 @@
 #include "structure/formats/JavaNbtReader.h"
 #include "structure/formats/LitematicFormatRules.h"
 #include "structure/formats/McstructureIndices.h"
+#include "structure/formats/McstructureInput.h"
 #include "structure/StructureLoader.h"
 #include "structure/PlacementSession.h"
 #include "block/BlockPlacementRules.h"
@@ -54,6 +55,7 @@
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/game/ClientInstance.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#include "mc/deps/nbt/ByteArrayTag.h"
 #include "mc/deps/nbt/IntArrayTag.h"
 #include "mc/deps/nbt/IntTag.h"
 #include "mc/deps/nbt/ListTag.h"
@@ -64,6 +66,7 @@
 #include "mc/world/level/material/Material.h"
 #include "mc/world/level/levelgen/structure/StructureBlockPalette.h"
 #include "mc/world/level/levelgen/structure/StructureTemplate.h"
+#include "mc/world/level/levelgen/structure/StructureCompression.h"
 #include "mc/world/level/Level.h"
 
 namespace lholo::structure::detail {
@@ -466,6 +469,40 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     // the staged result instead of deep-copying every block-index tag.
     prepared->root = std::make_shared<CompoundTag>(std::move(*root));
 
+    // Compressed 26.60 native format: structure is a zlib ByteArray.
+    auto const* compressionTag = findTag(*prepared->root, "compression");
+    auto compression = StructureCompression::None;
+    if (compressionTag) {
+        if (!compressionTag->hold<IntTag>()) {
+            error = "mcstructure compression must be an integer";
+            return nullptr;
+        }
+        compression = static_cast<StructureCompression>(static_cast<int>(compressionTag->get<IntTag>()));
+    }
+    if (compression == StructureCompression::Zlib) {
+        auto const* tag = findTag(*prepared->root, "structure");
+        if (!tag || !tag->hold<ByteArrayTag>()) {
+            error = "compressed mcstructure must contain a structure ByteArray";
+            return nullptr;
+        }
+        auto const& payload = tag->get<ByteArrayTag>();
+        auto decodedBytes = inflateMcstructureTag(
+            {reinterpret_cast<char const*>(payload.data()), payload.size()},
+            kMaximumInflatedFileSize,error);
+        if (!decodedBytes) return nullptr;
+        auto decoded = CompoundTag::fromBinaryNbt(*decodedBytes,true);
+        if (!decoded) {
+            error = "decompressed mcstructure invalid NBT: " + decoded.error().message();
+            return nullptr;
+        }
+        prepared->root->mTags["structure"] = std::move(*decoded);
+        // Retain the intact compressed envelope for vanilla fallback.
+        if (!prepared->fallbackOriginalBytes)
+            prepared->fallbackOriginalBytes=std::make_shared<std::string>(std::move(*bytes));
+    } else if (compression != StructureCompression::None) {
+        error="unsupported mcstructure compression value";
+        return nullptr;
+    }
     auto const* size = findList(*prepared->root, "size");
     auto const* structure = findCompound(*prepared->root, "structure");
     if (!size || !structure) {
