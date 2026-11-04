@@ -54,7 +54,7 @@ void opacityChecks() {
     }
     CHECK(currentDerived(0xffffffffU, true, 0.F) >> 24U == 0);
     CHECK(currentDerived(0xffffffffU, true, .5F) >> 24U == 80);
-    CHECK(currentDerived(0xffffffffU, false, .5F) >> 24U == 128);
+    CHECK(currentDerived(0xffffffffU, false, .5F) >> 24U == 88); // lava: 176 * 50%
     CHECK(currentProxy(0.F) == 0);
     for (float invalid : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
         CHECK(currentDerived(0xffffffffU, true, invalid) == baselineDerived(0xffffffffU, true));
