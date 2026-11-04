@@ -301,35 +301,18 @@ void testStructureTransformConcurrency() {
 }
 
 void testRenderCameraRead() {
-    using lholo::render::readRenderCameraPosition;
-    LHOLO_CHECK(!readRenderCameraPosition(nullptr));
-    SYSTEM_INFO system{};
-    GetSystemInfo(&system);
-    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(nullptr, system.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    LHOLO_CHECK(allocation != nullptr);
-    if (!allocation) return;
-    struct ReleasePage {
-        void* page;
-        ~ReleasePage() { VirtualFree(page, 0, MEM_RELEASE); }
-    } release{allocation};
-    std::array<float, 3> expected{-1.5f, 20.25f, 1000.5f};
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    auto const camera = readRenderCameraPosition(allocation);
-    LHOLO_CHECK(camera && camera->x == expected[0] && camera->y == expected[1] && camera->z == expected[2]);
-    LHOLO_CHECK(!readRenderCameraPosition(allocation + system.dwPageSize - 12));
-    DWORD previous{};
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READONLY, &previous));
-    LHOLO_CHECK(readRenderCameraPosition(allocation).has_value());
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_EXECUTE, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_NOACCESS, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READWRITE, &previous));
-    expected[1] = std::numeric_limits<float>::quiet_NaN();
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+    // 26.60 uses the typed SDK camera target, not an ABI offset.
+    using lholo::render::validateCameraTarget;
+    auto target=validateCameraTarget(Vec3{-1.5f,20.25f,1000.5f});
+    LHOLO_CHECK(target && target->x==-1.5f
+        && target->y==20.25f && target->z==1000.5f);
+    LHOLO_CHECK(validateCameraTarget(Vec3{0.0f,0.0f,0.0f}).has_value());
+    auto const nan=std::numeric_limits<float>::quiet_NaN();
+    auto const inf=std::numeric_limits<float>::infinity();
+    LHOLO_CHECK(!validateCameraTarget(Vec3{nan,0.0f,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,inf,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,0.0f,-inf}));
 }
-
 void testProjectionActivationRequests() {
     ProjectionActivationRequests requests;
     LHOLO_CHECK(!requests.consumeAnchor());

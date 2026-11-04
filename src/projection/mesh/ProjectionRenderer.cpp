@@ -53,6 +53,7 @@
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
+#include "mc/client/model/models/PistonArmModel.h"
 #include "mc/client/renderer/game/ItemInHandRenderer.h"
 #include "mc/common/client/renderer/helpers/MeshHelpers.h"
 #include "mc/common/Brightness.h"
@@ -237,26 +238,29 @@ mce::MaterialPtr const& projectionPrivateBlendMaterial(
     // Do not change the already-live material if a new resource pack makes
     // source creation fail. The original vanilla render material remains safe.
     try {
-        auto privateInfo = std::make_shared<mce::RenderMaterialInfo>();
-        privateInfo->mHashedName.get() = current->mHashedName.get();
-        privateInfo->mPtr = std::make_unique<mce::RenderMaterial>(*current->mPtr.get());
-        // Native DepthWriteMask is a binary HAL flag on 26.51: 0=none, 1=all.
-        // Keep depth testing; projected alpha must be occluded by opaque world.
-        auto& depth = privateInfo->mPtr->depthStencilStateDescription.get();
-        depth.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
-        mce::MaterialPtr privatePtr{vanillaBlend};
-        privatePtr.mRenderMaterialInfoPtr = privateInfo;
-        auto privateOwner = std::make_unique<mce::MaterialPtr>(privatePtr);
-        state.glassPrivateBlendMaterial = std::move(privateOwner);
+        // 26.60 does not export RenderMaterial's copy constructor. Select
+        // the engine-owned, depth-write-free transparent shader instead of
+        // constructing a fake native material or mutating a shared one.
+        auto existing = render::resolveNamedMaterial("beacon_beam_transparent", vanillaBlend);
+        if (!existing) {
+            logger().warn("LHoloGlassR5 missing native beacon_beam_transparent; using vanilla fallback");
+            return vanillaBlend;
+        }
+        auto* resolved = tryRenderMaterial(*existing);
+        if (!resolved || !resolved->blendStateDescription->enableBlend
+            || !resolved->depthStencilStateDescription->depthTestEnabled
+            || static_cast<unsigned>(resolved->depthStencilStateDescription->depthWriteMask) != 0U) {
+            logger().warn("LHoloGlassR5 native material lacks transparent depth contract");
+            return vanillaBlend;
+        }
+        state.glassPrivateBlendMaterial = std::make_unique<mce::MaterialPtr>(*existing);
         state.glassPrivateBlendBase = current->weak_from_this();
         logger().info(
-            "LHoloGlassR5 privateMaterial=1 material={} baseDepthWrite={} "
-            "privateDepthWrite={} depthTest={} blend={}",
-            current->mHashedName->getString(),
-            static_cast<unsigned int>(current->mPtr->depthStencilStateDescription->depthWriteMask),
-            static_cast<unsigned int>(depth.depthWriteMask),
-            depth.depthTestEnabled ? 1 : 0,
-            privateInfo->mPtr->blendStateDescription->enableBlend ? 1 : 0
+            "LHoloGlassR5 nativeMaterial={} depthWrite={} depthTest={} blend={}",
+            state.glassPrivateBlendMaterial->mRenderMaterialInfoPtr->mHashedName->getString(),
+            static_cast<unsigned>(resolved->depthStencilStateDescription->depthWriteMask),
+            resolved->depthStencilStateDescription->depthTestEnabled,
+            resolved->blendStateDescription->enableBlend
         );
         return *state.glassPrivateBlendMaterial;
     } catch (std::exception const& exception) {
@@ -882,17 +886,9 @@ void submitProjectedBlockActorPass(
             auto* pistonRenderer = isPiston
                 ? static_cast<PistonBlockActorRenderer*>(dispatcher.mRenderers.get()[rendererId].get())
                 : nullptr;
-            ProjectedPistonRender const pistonRender{
-                pistonRenderer ? &pistonRenderer->mPistonArm.get() : nullptr,
-                &pistonBlend,
-                structureOpacity
-            };
-            ScopedProjectedPistonRender pistonScope{
-                pistonPass == ProjectedPistonPass::Ghost ? &pistonRender : nullptr
-            };
             if (isPiston) ++pistonDispatches;
             else ++otherDispatches;
-            dispatcher.render(
+            auto const dispatchNative = [&]() {            dispatcher.render(
                 renderContext,
                 region,
                 *renderComponent,
@@ -904,7 +900,34 @@ void submitProjectedBlockActorPass(
                 nullptr,
                 -1,
                 std::nullopt
-            );
+            );            };
+            if (pistonPass == ProjectedPistonPass::Ghost && pistonRenderer
+                && render::materialExists(pistonBlend)) {
+                // renderArm is not exported on 26.60. We already own the
+                // projected dispatcher call, so scope the native model's
+                // render materials here rather than hooking a missing symbol.
+                auto& model = pistonRenderer->mPistonArm.get();
+                auto& variants = model.mMaterialVariants.get();
+                auto& skinning = variants.mSkinningMaterialPtr->mRenderMaterialInfoPtr;
+                auto& skinningColor = variants.mSkinningColorMaterialPtr->mRenderMaterialInfoPtr;
+                auto const savedSkinning = skinning;
+                auto const savedColor = skinningColor;
+                app::ScopeExit restoreVariants{[&]() noexcept {
+                    skinning = savedSkinning;
+                    skinningColor = savedColor;
+                }};
+                skinning = pistonBlend.mRenderMaterialInfoPtr;
+                skinningColor = pistonBlend.mRenderMaterialInfoPtr;
+                auto& shader = renderContext.mScreenContext.currentShaderColor;
+                ScopedPistonAppearance appearance{
+                    model.mDefaultMaterial->mRenderMaterialInfoPtr,
+                    pistonBlend.mRenderMaterialInfoPtr,
+                    shader.color.get(),shader.dirty,structureOpacity
+                };
+                dispatchNative();
+            } else {
+                dispatchNative();
+            }
         } catch (std::exception const& exception) {
             app::reportNativeCallbackFailure("projected block actor render", exception.what());
         } catch (...) {

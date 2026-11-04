@@ -60,6 +60,7 @@
 #include <memory>
 #include <algorithm>
 #include <variant>
+#include <type_traits>
 
 namespace lholo::structure::detail {
 namespace {
@@ -512,12 +513,19 @@ bool submitBatch(LocalPlayer& player) {
     auto packet=MinecraftPackets::createPacket(MinecraftPacketIds::ItemStackRequest);
     if(!packet){closeSession();return false;}
     auto& req=static_cast<ItemStackRequestPacket&>(*packet);
-    ItemStackRequestPacketData::RequestData entry{};
+    // Construct request in a fixed-size vector to avoid native
+    // descriptor copy through RequestData relocation.
+    std::vector<ItemStackRequestPacketData::RequestData> requests(1);
+    auto& entry = requests.front();
     ItemStackRequestId requestId{};
     requestId.clientInit();
     entry.mClientRequestId=requestId;
+    // Build variant actions in their final slots without copying native
+    // NetworkItemInstanceDescriptorData (copy ctor not exported in 26.60).
+    using Action = std::remove_reference_t<decltype(*entry.mActions)>::value_type;
+    std::vector<Action> preparedActions(plan.size());
     for(std::size_t i=0;i<plan.size();++i) {
-        ItemStackRequestCereal::PlaceActionData place{};
+        auto& place = preparedActions[i].emplace<ItemStackRequestCereal::PlaceActionData>();
         place.mAmount=static_cast<uchar>(plan[i].amount);
         place.mSource->mFullContainerName=sourceName;
         place.mSource->mSlot=static_cast<uchar>(plan[i].sourceSlot);
@@ -527,9 +535,8 @@ bool submitBatch(LocalPlayer& player) {
         place.mDestination->mFullContainerName->mDynamicId=std::nullopt;
         place.mDestination->mSlot=static_cast<uchar>(plan[i].destinationSlot);
         place.mDestination->mNetIdVariant=ItemStackNetIdVariant{};
-        entry.mActions->emplace_back(place);
     }
-    req.mRequests->push_back(std::move(entry));
+    entry.mActions->swap(preparedActions);    req.mRequests->swap(requests);
     {
         std::lock_guard lock(mutex);
         if(sess.phase!=SilentSession::Phase::Waiting)return false;
@@ -594,13 +601,22 @@ LL_TYPE_INSTANCE_HOOK(SilentTickHook,ll::memory::HookPriority::Low,
                 if(now-last>=20 && move.descriptor && move.approvedNetId
                     && move.approvedAmount>0
                     && move.approvedAmount<=move.amount) {
-                    ItemStack received=ItemStack::fromDescriptor(
-                        *move.descriptor,this->getLevel().getBlockPalette(),true);
-                    if(received.isNull() || received.getTypeName()!=move.itemId) {
+                    // 26.60 no longer exports ItemStack::fromDescriptor.
+                    // Recover only ordinary, server-identified materials using
+                    // the native item entry; fail closed on complex descriptors.
+                    auto const& desc=*move.descriptor;
+                    if(!desc.mImpl || !desc.mImpl->isValid()
+                        || desc.mImpl->getType()!=ItemDescriptor::InternalType::Default) {
                         conflicted=true;break;
                     }
-                    received.set(move.approvedAmount);
-                    received.mNetIdVariant->mVariant=*move.approvedNetId;
+                    auto const itemEntry=desc.mImpl->getItem();
+                    auto const* item=itemEntry.mItem;
+                    if(!item) {conflicted=true;break;}
+                    ItemStack received{};
+                    received.reinit(*item,move.approvedAmount,itemEntry.mAuxValue);
+                    if(received.isNull() || received.getTypeName()!=move.itemId) {
+                        conflicted=true;break;
+                    }                    received.mNetIdVariant->mVariant=*move.approvedNetId;
                     inventory.setItem(move.destinationSlot,received);
                     ++present;
                 } else complete=false;

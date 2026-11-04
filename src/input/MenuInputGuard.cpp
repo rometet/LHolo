@@ -21,6 +21,7 @@
 #include "mc/deps/input/win/HIDControllerGameCoreDesktop.h"
 
 #include <cstdint>
+#include <Windows.h>
 #include <atomic>
 #include <array>
 #include <algorithm>
@@ -30,7 +31,9 @@ namespace {
 
 MenuInputGuardStatus gInstallStatus{};
 std::atomic_bool gInputGuardReady{};
-std::array<bool,6> gTextInputHooksInstalled{};
+std::array<bool,1> gTextInputHooksInstalled{};
+std::atomic_bool gScreenFocusInstalled{};
+std::atomic_bool gWindowMessageSourceReady{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
@@ -62,60 +65,10 @@ LL_TYPE_INSTANCE_HOOK(MenuScreenTextFocusHook,ll::memory::HookPriority::Highest,
     if(tracking && !selected && gInputGuardReady.load(std::memory_order_acquire))
         ui.clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Focus,token);
 }
-LL_TYPE_INSTANCE_HOOK(MenuKeyboardShowHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$onShowKeyboard,
-    void,::std::string_view const currentText,int maxLength,bool isMultiline,::InputMode inputMode) {
-    app::hook_lifecycle::DetourGuard guard;
-    if(guard && gInputGuardReady.load(std::memory_order_acquire))trackTextInput(NativeTextInputFlag::Keyboard,true);
-    origin(currentText,maxLength,isMultiline,inputMode);
-}
-LL_TYPE_INSTANCE_HOOK(MenuKeyboardHideHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$onHideKeyboard,void) {
-    app::hook_lifecycle::DetourGuard guard;
-    bool const tracking=guard && gInputGuardReady.load(std::memory_order_acquire);
-    auto const token=tracking?structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::Keyboard):0;
-    origin();
-    if(tracking && gInputGuardReady.load(std::memory_order_acquire))structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Keyboard,token);
-}
-LL_TYPE_INSTANCE_HOOK(MenuImeStartHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$imeStartComposition,void) {
-    app::hook_lifecycle::DetourGuard guard;
-    if(guard && gInputGuardReady.load(std::memory_order_acquire))trackTextInput(NativeTextInputFlag::Ime,true);
-    origin();
-}
-LL_TYPE_INSTANCE_HOOK(MenuImeEndHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$imeEndComposition,void) {
-    app::hook_lifecycle::DetourGuard guard;
-    bool const tracking=guard && gInputGuardReady.load(std::memory_order_acquire);
-    auto const token=tracking?structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::Ime):0;
-    origin();
-    if(tracking && gInputGuardReady.load(std::memory_order_acquire))structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Ime,token);
-}
-
-// Invalidate routes at a game GUI transition, before the next player-tick
-// snapshot. Native access stays inside this owning engine callback.
-LL_TYPE_INSTANCE_HOOK(MenuGameplayInputHook,ll::memory::HookPriority::Highest,
-    ClientInstance,&ClientInstance::$setInGameInputEnabled,void,bool enabled) {
-    app::hook_lifecycle::DetourGuard guard;
-    bool tracking{};
-    std::uint64_t token{};
-    try {
-        if(guard && gInputGuardReady.load(std::memory_order_acquire) && gInputHandoffDepth==0) {
-            auto const client=ll::service::getClientInstance();
-            tracking=client && &*client==this;
-            if(tracking) {
-                token=structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::GameplayDisabled);
-                if(!enabled)trackTextInput(NativeTextInputFlag::GameplayDisabled,true);
-            }
-        }
-    } catch (...) {
-        structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(false);
-    }
-    origin(enabled);
-    if(tracking && enabled && gInputGuardReady.load(std::memory_order_acquire))
-        structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::GameplayDisabled,token);
-}
-
+// 26.60 no longer exports HIDControllerGameCoreDesktop's keyboard/IME hooks.
+// Keep the native ScreenView focus event above and consume actual Win32
+// IME/window activation transitions from LHolo's existing WndProc, avoiding
+// guessed native offsets, background hooks or swallowed game text messages.
 LL_TYPE_INSTANCE_HOOK(
     MenuMouseInputHook,
     ll::memory::HookPriority::Highest,
@@ -194,6 +147,37 @@ LL_TYPE_INSTANCE_HOOK(
 
 } // namespace
 
+void observeNativeWindowMessage(unsigned int message, std::uintptr_t wParam) noexcept {
+    if (!gInputGuardReady.load(std::memory_order_acquire)) return;
+    auto& ui=structure::detail::StructureUiState::getInstance();
+    if (!gWindowMessageSourceReady.exchange(true,std::memory_order_acq_rel)
+        && gTextInputHooksInstalled[0])
+        ui.setNativeTextInputHooksReady(true);
+    switch (message) {
+    case WM_IME_STARTCOMPOSITION:
+        trackTextInput(NativeTextInputFlag::Ime,true);
+        break;
+    case WM_IME_ENDCOMPOSITION:
+        ui.clearNativeTextInputFlagIfCurrent(
+            NativeTextInputFlag::Ime,ui.nativeTextInputToken(NativeTextInputFlag::Ime));
+        break;
+    case WM_KILLFOCUS:
+        trackTextInput(NativeTextInputFlag::GameplayDisabled,true);
+        break;
+    case WM_SETFOCUS:
+        ui.clearNativeTextInputFlagIfCurrent(
+            NativeTextInputFlag::GameplayDisabled,
+            ui.nativeTextInputToken(NativeTextInputFlag::GameplayDisabled));
+        break;
+    case WM_ACTIVATEAPP:
+        if (!wParam) trackTextInput(NativeTextInputFlag::GameplayDisabled,true);
+        else ui.clearNativeTextInputFlagIfCurrent(
+            NativeTextInputFlag::GameplayDisabled,
+            ui.nativeTextInputToken(NativeTextInputFlag::GameplayDisabled));
+        break;
+    default: break;
+    }
+}
 MenuInputHandoffScope::MenuInputHandoffScope() { ++gInputHandoffDepth; }
 
 MenuInputHandoffScope::~MenuInputHandoffScope() {
@@ -212,14 +196,11 @@ MenuInputGuardStatus installMenuInputGuard() {
         gInstallStatus.keyUpInputHookInstalled = MenuKeyUpInputHook::hook() == 0;
     }
     if(!gTextInputHooksInstalled[0])gTextInputHooksInstalled[0]=MenuScreenTextFocusHook::hook()==0;
-    if(!gTextInputHooksInstalled[1])gTextInputHooksInstalled[1]=MenuKeyboardShowHook::hook()==0;
-    if(!gTextInputHooksInstalled[2])gTextInputHooksInstalled[2]=MenuKeyboardHideHook::hook()==0;
-    if(!gTextInputHooksInstalled[3])gTextInputHooksInstalled[3]=MenuImeStartHook::hook()==0;
-    if(!gTextInputHooksInstalled[4])gTextInputHooksInstalled[4]=MenuImeEndHook::hook()==0;
-    if(!gTextInputHooksInstalled[5])gTextInputHooksInstalled[5]=MenuGameplayInputHook::hook()==0;
-    gInstallStatus.textInputHooksInstalled=std::all_of(gTextInputHooksInstalled.begin(),gTextInputHooksInstalled.end(),[](bool installed){return installed;});
-    structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(gInstallStatus.textInputHooksInstalled);
-    gInputGuardReady.store(
+    gScreenFocusInstalled.store(gTextInputHooksInstalled[0],std::memory_order_release);
+    gInstallStatus.textInputHooksInstalled=gTextInputHooksInstalled[0]
+        && gWindowMessageSourceReady.load(std::memory_order_acquire);
+    structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(
+        gInstallStatus.textInputHooksInstalled);    gInputGuardReady.store(
         gInstallStatus.mouseInputHookInstalled && gInstallStatus.keyDownInputHookInstalled
             && gInstallStatus.keyUpInputHookInstalled,
         std::memory_order_release
@@ -230,18 +211,15 @@ MenuInputGuardStatus installMenuInputGuard() {
 bool uninstallMenuInputGuard() {
     structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(false);
     gInputGuardReady.store(false, std::memory_order_release);
+    gScreenFocusInstalled.store(false,std::memory_order_release);
     bool ok = true;
     auto removeTextHook=[&](std::size_t index,bool removed){
         if(removed)gTextInputHooksInstalled[index]=false;
         else ok=false;
     };
-    if(gTextInputHooksInstalled[5])removeTextHook(5,MenuGameplayInputHook::unhook());
-    if(gTextInputHooksInstalled[4])removeTextHook(4,MenuImeEndHook::unhook());
-    if(gTextInputHooksInstalled[3])removeTextHook(3,MenuImeStartHook::unhook());
-    if(gTextInputHooksInstalled[2])removeTextHook(2,MenuKeyboardHideHook::unhook());
-    if(gTextInputHooksInstalled[1])removeTextHook(1,MenuKeyboardShowHook::unhook());
     if(gTextInputHooksInstalled[0])removeTextHook(0,MenuScreenTextFocusHook::unhook());
-    gInstallStatus.textInputHooksInstalled=std::all_of(gTextInputHooksInstalled.begin(),gTextInputHooksInstalled.end(),[](bool installed){return installed;});
+    gWindowMessageSourceReady.store(false,std::memory_order_release);
+    gInstallStatus.textInputHooksInstalled=false;
     if (gInstallStatus.keyUpInputHookInstalled) {
         if (MenuKeyUpInputHook::unhook()) gInstallStatus.keyUpInputHookInstalled = false;
         else ok = false;

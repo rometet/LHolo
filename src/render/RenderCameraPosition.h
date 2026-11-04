@@ -8,6 +8,11 @@ struct NativeCameraPosition { float x{}, y{}, z{}; };
 
 // Read the SDK-declared camera target: the old byte-40 layout changed in 26.60.
 // The render callback owns the BaseActorRenderContext and its Impl lifetime.
+inline std::optional<NativeCameraPosition> validateCameraTarget(Vec3 const& camera) {
+    if (!std::isfinite(camera.x) || !std::isfinite(camera.y) || !std::isfinite(camera.z))
+        return std::nullopt;
+    return NativeCameraPosition{camera.x, camera.y, camera.z};
+}
 inline std::optional<NativeCameraPosition> readRenderCameraPosition(
     BaseActorRenderContext const& context
 ) {

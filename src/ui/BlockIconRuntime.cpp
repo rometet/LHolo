@@ -43,25 +43,29 @@ LL_TYPE_INSTANCE_HOOK(IconPackComposeHook,ll::memory::HookPriority::Normal,
     app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
     origin();
 }
-LL_TYPE_INSTANCE_HOOK(IconTextureReloadHook,ll::memory::HookPriority::Normal,
-    mce::TextureGroup,&mce::TextureGroup::reloadAllTextures,void) {
+/*
+ * 26.60: reloadAllTextures/reloadImages no longer have exported entry points.
+ * Observe the public mutation boundaries used by the same texture owner.
+ * Pack stack recomposition is still tracked by IconPackComposeHook above.
+ */
+LL_TYPE_INSTANCE_HOOK(IconTextureUnloadHook,ll::memory::HookPriority::Normal,
+    mce::TextureGroup,&mce::TextureGroup::unloadTexture,bool,
+    ResourceLocation const& location,bool assertOnFailure) {
     app::hook_lifecycle::DetourGuard guard;
-    if(!guard){origin();return;}
+    if(!guard)return origin(location,assertOnFailure);
     auto mutation=resourcepacks::state().beginMutation([] {store().beginChange();});
     app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
-    origin();
+    return origin(location,assertOnFailure);
 }
-LL_TYPE_INSTANCE_HOOK(IconImagesReloadHook,ll::memory::HookPriority::Normal,
-    mce::TextureGroup,&mce::TextureGroup::reloadImages,void,
-    gsl::span<ResourceLocationPair> asyncImages,gsl::span<ResourceLocation> immediateImages,
-    std::vector<ResourceLocation> keep,ImageCacheMode mode) {
+LL_TYPE_INSTANCE_HOOK(IconTextureUpdateHook,ll::memory::HookPriority::Normal,
+    mce::TextureGroup,&mce::TextureGroup::updateTextureInPlace,bool,
+    ResourceLocation const& location,cg::ImageBuffer image) {
     app::hook_lifecycle::DetourGuard guard;
-    if(!guard){origin(asyncImages,immediateImages,std::move(keep),mode);return;}
+    if(!guard)return origin(location,std::move(image));
     auto mutation=resourcepacks::state().beginMutation([] {store().beginChange();});
     app::ScopeExit end{[&]() noexcept {resourcepacks::state().finishMutation(mutation,[] {store().endChange();});}};
-    origin(asyncImages,immediateImages,std::move(keep),mode);
-}
-std::string text(ResourcePackManager const& manager,char const* path) {
+    return origin(location,std::move(image));
+}std::string text(ResourcePackManager const& manager,char const* path) {
     std::string value;
     if(!manager.load(ResourceLocation{Core::PathView{path},ResourceFileSystem::UserPackage},value))return {};
     return value;
@@ -101,16 +105,16 @@ CatalogRead readCatalog(ResourcePackManager& manager,std::uint64_t generation) {
 bool installHooks() {
     store().reset(false);
     composeInstalled=IconPackComposeHook::hook()==0;
-    if(composeInstalled)reloadInstalled=IconTextureReloadHook::hook()==0;
-    if(reloadInstalled)imagesInstalled=IconImagesReloadHook::hook()==0;
+    if(composeInstalled)reloadInstalled=IconTextureUnloadHook::hook()==0;
+    if(reloadInstalled)imagesInstalled=IconTextureUpdateHook::hook()==0;
     if(!imagesInstalled)return false; // Kernel's tracked rollback removes partial installs.
     store().reset(true);return true;
 }
 bool uninstallHooks() {
     store().reset(false);
     bool ok=true;
-    if(imagesInstalled) {if(IconImagesReloadHook::unhook())imagesInstalled=false;else ok=false;}
-    if(reloadInstalled) {if(IconTextureReloadHook::unhook())reloadInstalled=false;else ok=false;}
+    if(imagesInstalled) {if(IconTextureUpdateHook::unhook())imagesInstalled=false;else ok=false;}
+    if(reloadInstalled) {if(IconTextureUnloadHook::unhook())reloadInstalled=false;else ok=false;}
     if(composeInstalled) {if(IconPackComposeHook::unhook())composeInstalled=false;else ok=false;}
     return ok;
 }

@@ -18,6 +18,12 @@ option("target_type")
     set_values("server", "client")
 option_end()
 
+-- Local builds may override the official package resolver with a validated
+-- locally built LeviLamina SDK. Normal builds use the upstream recipe.
+local offlineRepo = os.getenv("LHOLO_LOCAL_XMAKE_REPO")
+if offlineRepo and #offlineRepo > 0 then
+    add_repositories("lholo-local " .. offlineRepo)
+end
 add_repositories("levimc-repo " .. (get_config("levimc_repo") or "https://github.com/LiteLDev/xmake-repo.git"))
 
 add_requires("levilamina 26.60.0", {configs = {target_type = get_config("target_type") or "client"}})
