@@ -34,9 +34,9 @@ bool disjointRegionBounds(std::vector<Box> const& regions) noexcept {
 // Compact one-byte ownership per source block; avoids retaining a second
 // full vector<RenderBlock> for disjoint native composites. Invalid layouts
 // fail closed, leaving the original full per-region vectors untouched.
-template<class Box, class Cell>
+template<class Box, class Cells>
 std::vector<std::uint8_t> makeDisjointRegionOwners(
-    std::vector<Box> const& regions, std::vector<Cell> const& cells) {
+    std::vector<Box> const& regions, Cells const& cells) {
     if(regions.empty() || regions.size()>255 || cells.empty() ||
        !disjointRegionBounds(regions)) return {};
     std::vector<std::uint8_t> owners;

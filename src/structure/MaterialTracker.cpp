@@ -76,24 +76,25 @@ MaterialHudWorkerState& materialHudWorkerState() {
     return state;
 }
 
-void countBlock(BlockCounts& counts, Block const* blockValue) {
-    if (!blockValue) return;
+void countBlock(BlockCounts& counts, Block const* blockValue, std::uint64_t quantity=1) {
+    if (!blockValue || quantity==0) return;
     auto& count = counts[blockValue];
-    if (count != std::numeric_limits<std::uint64_t>::max()) ++count;
+    auto const limit=std::numeric_limits<std::uint64_t>::max();
+    count = quantity>limit-count ? limit : count+quantity;
 }
 
 RawMaterialCounts collectRawMaterials(
-    std::vector<LoadedStructure::RenderBlock> const& renderBlocks
+    StructureBlocks const& renderBlocks
 ) {
     RawMaterialCounts counts;
     // Palette cardinality is normally tiny compared with the block count. Do
     // not reserve one hash bucket per projected cell for very large structures.
     counts.body.reserve(std::min<std::size_t>(renderBlocks.size(), 4096));
     counts.liquid.reserve(std::min<std::size_t>(renderBlocks.size(), 64));
-    for (auto const& entry : renderBlocks) {
-        countBlock(counts.body, entry.block);
-        countBlock(counts.liquid, entry.liquid);
-    }
+    renderBlocks.forEachCountedValue([&](StructureBlock const& entry,std::uint64_t quantity) {
+        countBlock(counts.body,entry.block,quantity);
+        countBlock(counts.liquid,entry.liquid,quantity);
+    });
     return counts;
 }
 
@@ -197,7 +198,7 @@ std::vector<MaterialRequirement> resolveMaterials(
 }
 
 std::vector<MaterialRequirement> collectMaterials(
-    std::vector<LoadedStructure::RenderBlock> const& renderBlocks,
+    StructureBlocks const& renderBlocks,
     std::string_view localeCode
 ) {
     return resolveMaterials(collectRawMaterials(renderBlocks), localeCode);

@@ -3,6 +3,7 @@
 #include "projection/runtime/ProjectionVisibility.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/core/ProjectionVisibilityRules.h"
+#include "resourcepacks/WorldPackReloadState.h"
 #include "mc/client/gui/screens/ScreenContext.h"
 #include "mc/client/renderer/BaseActorRenderContext.h"
 #include "mc/deps/renderer/Camera.h"
@@ -48,16 +49,53 @@ void updateProjectionVisibility(ProjectionState& state, BaseActorRenderContext& 
         static_cast<float>(state.anchor.x+state.cachedOffsetX)-camera.x,
         static_cast<float>(state.anchor.y+state.cachedOffsetY)-camera.y,
         static_cast<float>(state.anchor.z+state.cachedOffsetZ)-camera.z};
+    float const farClip=cam.mZFar;
     bool changed=resetBounds;
     for(auto& sec:state.sections) {
-        auto const visible=projectionBoundsVisible(frustum,sec.buildBounds,origin,2.0f);
-        auto const prefetch=projectionBoundsVisible(frustum,sec.buildBounds,origin,16.0f);
-        if(sec.renderVisible!=visible || sec.buildVisible!=visible ||
-           sec.prefetchVisible!=prefetch)changed=true;
-        sec.renderVisible=visible;
-        sec.buildVisible=visible;
-        sec.prefetchVisible=prefetch;
-    }
+        auto const view=classifyProjectionSection(frustum,sec.buildBounds,origin,farClip);
+        if(sec.renderVisible!=view.renderVisible
+            || sec.buildVisible!=view.buildVisible
+            || sec.prefetchVisible!=view.prefetchVisible
+            || sec.withinBuildDistance!=view.withinBuildDistance
+            || sec.withinRetentionDistance!=view.withinRetentionDistance)changed=true;
+        sec.renderVisible=view.renderVisible;
+        sec.buildVisible=view.buildVisible;
+        sec.prefetchVisible=view.prefetchVisible;
+        sec.withinBuildDistance=view.withinBuildDistance;
+        sec.withinRetentionDistance=view.withinRetentionDistance;    }
     if(changed)++state.visibilityRevision;
+    // Retire at most two out-of-range Blend GPU streams per frame, without
+    // touching the original opaque/correction/liquid owners. Rebuild the
+    // section when it returns to range. Never retire during pack reload.
+    auto const reload=resourcepacks::state().snapshot();
+    bool const mutationActive=state.placementBuildActive
+        || bool(state.pendingRegionReuse) || (reload && reload->closed);
+    std::size_t retired{};
+    auto const blendBucket=static_cast<std::size_t>(RenderBucket::Blend);
+    for(std::size_t i=0;i<state.sections.size() && retired<2;++i) {
+        auto& section=state.sections[i];
+        auto& blend=section.meshes[blendBucket];
+        if(!shouldRetireDistantTransparentMesh(
+            section.withinRetentionDistance,section.dirty,
+            section.buildInFlight,bool(blend || section.blendSource),mutationActive))
+            continue;
+        blend.reset();
+        section.blendSource.reset();
+        section.blendSortOrder.clear();
+        section.blendSortKeyValid=false;
+        section.blendSortUnsupported=false;
+        ++section.blendSortUploadGeneration;
+        // A new full native build restores every layer while the old opaque
+        // meshes remain drawable. Worker revisions reject older results.
+        section.dirty=true;
+        section.incrementalDirty=false;
+        ++section.requestedRevision;
+        ++state.meshUploadRevision;
+        state.blendSourceScanValid=false;
+        state.drawCache.noteMeshUpload(i);
+        state.transparentDrawBatches.clear();
+        state.meshPreflightDone=false;
+        ++retired;
+    }
 }
 }

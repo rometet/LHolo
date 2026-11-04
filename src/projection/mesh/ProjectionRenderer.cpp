@@ -214,6 +214,87 @@ std::string_view transparentMeshLayoutIssue(mce::MeshData const& data) {
     return "sort_contract_rejected";
 }
 
+template<class T>
+bool appendTransparentBatchField(
+    std::vector<T>& target,std::vector<T> const& source,
+    std::size_t before,std::size_t incoming) {
+    if(target.empty() && source.empty())return true;
+    if(target.size()!=before || source.size()!=incoming)return false;
+    target.insert(target.end(),source.begin(),source.end());
+    return true;
+}
+
+// Preserve existing section/primitive ordering; only coalesce compatible
+// *already uploaded* native blend sources. The original GPU meshes remain the
+// fallback, and no engine-owned material, texture or buffer is modified.
+std::unique_ptr<mce::Mesh> buildTransparentDrawBatch(
+    ProjectionState const& state,
+    std::span<std::size_t const> orderedSections,
+    std::shared_ptr<mce::BufferResourceService> service,
+    std::size_t& vertexCount) {
+    vertexCount=0;
+    if(!service || orderedSections.size()<2 || orderedSections.size()>kTransparentBatchGroupSize)
+        return nullptr;
+    std::unique_ptr<mce::MeshData> combined;
+    for(auto const sectionIndex:orderedSections) {
+        if(sectionIndex>=state.sections.size())return nullptr;
+        auto const& section=state.sections[sectionIndex];
+        auto const blendIndex=static_cast<std::size_t>(RenderBucket::Blend);
+        auto const& gpu=section.meshes[blendIndex];
+        auto const* source=section.blendSource.get();
+        if(section.blendSortUnsupported || !gpu || !gpu->isValid() || !source
+            || source->mMode!=mce::PrimitiveMode::QuadList
+            || !source->mIndices.get().empty())return nullptr;
+        auto const count=source->mPositions.get().size();
+        if(count==0 || count%4 || count>kTransparentBatchMaxVertices-vertexCount
+            || gpu->mVertexCount.get().value_or(static_cast<unsigned>(count))!=count)
+            return nullptr;
+        auto part=cloneNativeMeshData(*source);
+        if(!section.blendSortOrder.empty()
+            && sortTransparentMeshDataBackToFront(*part,section.blendSortOrder)
+                != TransparentMeshSortResult::Changed)return nullptr;
+        if(!combined) {
+            combined=std::move(part);
+        } else {
+            auto& target=*combined;
+            auto const before=target.mPositions.get().size();
+            if(target.mMode!=part->mMode
+                || target.mFieldEnabled.get()!=part->mFieldEnabled.get()
+                || !part->mIndices.get().empty()
+                || !appendTransparentBatchField(target.mNormals.get(),part->mNormals.get(),before,count)
+                || !appendTransparentBatchField(target.mTangents.get(),part->mTangents.get(),before,count)
+                || !appendTransparentBatchField(target.mColors.get(),part->mColors.get(),before,count)
+                || !appendTransparentBatchField(target.mBoneId0s.get(),part->mBoneId0s.get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[0].get(),part->mTextureUVs[0].get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[1].get(),part->mTextureUVs[1].get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[2].get(),part->mTextureUVs[2].get(),before,count)
+                || !appendTransparentBatchField(target.mPBRTextureIndices.get(),part->mPBRTextureIndices.get(),before,count)
+                || !appendTransparentBatchField(target.mMERS.get(),part->mMERS.get(),before,count)
+                || !appendTransparentBatchField(target.mGeoType.get(),part->mGeoType.get(),before,count))
+                return nullptr;
+            target.mPositions.get().insert(target.mPositions.get().end(),
+                part->mPositions.get().begin(),part->mPositions.get().end());
+            auto& bounds=target.mAABB.get();
+            auto const& next=part->mAABB.get();
+            for(int axis=0;axis<3;++axis) {
+                bounds.first[axis]=std::min(bounds.first[axis],next.first[axis]);
+                bounds.second[axis]=std::max(bounds.second[axis],next.second[axis]);
+            }
+            auto& uvBounds=target.mUVAABB.get();
+            auto const& nextUV=part->mUVAABB.get();
+            for(int axis=0;axis<2;++axis) {
+                uvBounds.first[axis]=std::min(uvBounds.first[axis],nextUV.first[axis]);
+                uvBounds.second[axis]=std::max(uvBounds.second[axis],nextUV.second[axis]);
+            }
+        }
+        vertexCount+=count;
+    }
+    if(!combined || combined->mPositions.get().size()!=vertexCount)return nullptr;
+    auto mesh=std::make_unique<mce::Mesh>(
+        service,std::move(*combined),false,"LHoloTransparentSectionBatch");
+    return mesh->isValid() && mesh->mVertexCount.get().value_or(0u)>0
+        ?std::move(mesh):nullptr;
+}
 mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     auto* info = material.mRenderMaterialInfoPtr.get();
     return info ? info->mPtr.get() : nullptr;
@@ -1508,6 +1589,7 @@ void submitProjectionMeshPass(
                     continue;
                 }
                 mesh = std::move(replacement);
+                ++sectionState.blendSortUploadGeneration;
                 ++state.glassR4SortReplacements;
                 if (result == TransparentMeshSortResult::Changed) {
                     ++changedBlendMeshes;
@@ -1598,6 +1680,92 @@ void submitProjectionMeshPass(
         }
     };
 
+    auto renderBatchedBlend = [&](std::vector<VisibleMesh> const& visible,
+                                  mce::MaterialPtr const& material) {
+        if(!materialExists(material))return;
+        auto& cache=state.transparentDrawBatches;
+        if(visible.size()<2 || visible.size()>4096) {
+            cache.clear();
+            renderMeshes(visible,material);
+            return;
+        }
+        cache.observe(visible,state.activationGeneration,
+            state.meshUploadRevision,state.visibilityRevision);
+        // A newly uploaded camera-sort buffer changes only its own group.
+        // Compare monotonic GPU upload generations, not sampled camera hashes.
+        for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+            auto& group=cache.groups[groupIndex];
+            if(!group.mesh)continue;
+            auto const first=cache.groupStart(groupIndex);
+            auto const last=cache.groupEnd(groupIndex);
+            bool current=group.sortGenerations.size()==last-first;
+            for(auto i=first;i<last && current;++i)
+                current=cache.visible[i]<state.sections.size()
+                    && state.sections[cache.visible[i]].blendSortUploadGeneration
+                        ==group.sortGenerations[i-first];
+            if(!current) {
+                cache.retire(groupIndex);
+                group.unsupported=false;
+                cache.lastChange=std::chrono::steady_clock::now();
+            }
+        }
+        // Build at most one bounded GPU group per stationary frame; incomplete
+        // groups keep drawing their original section meshes without flicker.
+        if(cache.readyToBuild()
+            && cache.storedVertices<kTransparentBatchMaxResidentVertices) {
+            auto service=renderContext.mScreenContext.tessellator.mBufferResourceService.lock();
+            if(service) {
+                for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+                    auto& group=cache.groups[groupIndex];
+                    if(group.mesh || group.unsupported)continue;
+                    auto const first=cache.groupStart(groupIndex);
+                    auto const last=cache.groupEnd(groupIndex);
+                    if(last-first<2){group.unsupported=true;continue;}
+                    try {
+                        std::size_t vertices{};
+                        auto mesh=buildTransparentDrawBatch(state,
+                            std::span<std::size_t const>{cache.visible.data()+first,last-first},
+                            service,vertices);
+                        if(!mesh || vertices>kTransparentBatchMaxResidentVertices-cache.storedVertices) {
+                            group.unsupported=true;
+                            continue;
+                        }
+                        group.sortGenerations.reserve(last-first);
+                        for(auto i=first;i<last;++i)
+                            group.sortGenerations.push_back(
+                                state.sections[cache.visible[i]].blendSortUploadGeneration);
+                        group.vertexCount=vertices;
+                        group.mesh=std::move(mesh);
+                        cache.storedVertices+=vertices;
+                        break;
+                    } catch(std::exception const& e) {
+                        group.unsupported=true;
+                        app::reportNativeCallbackFailure("transparent GPU draw batching",e.what());
+                    } catch(...) {
+                        group.unsupported=true;
+                        app::reportNativeCallbackFailure("transparent GPU draw batching",
+                            "unknown native exception");
+                    }
+                }
+            }
+        }
+        auto const blend=isBlendRenderMaterial(material);
+        for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+            auto const& group=cache.groups[groupIndex];
+            if(group.mesh && group.mesh->isValid()
+                && group.mesh->mVertexCount.get().value_or(0u)>0) {
+                group.mesh->renderMesh(
+                    renderContext.mScreenContext,material,*state.terrainTextureVariant,
+                    0,group.mesh->mVertexCount.get().value_or(0u),
+                    emptyOffscreenCaptureDescription(),nullptr);
+                ++state.glassR3RetainedDrawCalls;
+                if(blend)++state.glassR3BlendDrawCalls;
+            } else {
+                for(auto i=cache.groupStart(groupIndex);i<cache.groupEnd(groupIndex);++i)
+                    submitRetainedMesh(cache.visible[i],blendBucket,material,blend);
+            }
+        }
+    };
     // R6 fallback hulls and R7 Exact Replay use the same R5 material owner.
     if (structureOpacity >= 0.999f) {
         if (!renderAlphaLayer) {
@@ -1632,7 +1800,7 @@ void submitProjectionMeshPass(
             auto transparentMeshes = collectBucket(blendBucket);
             sortBackToFront(transparentMeshes);
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, projectedBlendMaterial);
+            renderBatchedBlend(transparentMeshes, projectedBlendMaterial);
         }
     } else if (renderAlphaLayer) {
         // In ghost-opacity mode all terrain buckets are blended. The exact

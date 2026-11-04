@@ -169,6 +169,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (auto& mesh : state.warningFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.correctionOutlineSectionMeshes) mesh.reset();
         state.correctionDrawBatches.clear();
+    state.transparentDrawBatches.clear();
         for (auto& mesh : state.wrongFillSectionMeshes) mesh.reset();
         for (auto& mesh : state.wrongOutlineSectionMeshes) mesh.reset();
         for (auto& mesh : state.nativeLiquidSectionMeshes) mesh.reset();

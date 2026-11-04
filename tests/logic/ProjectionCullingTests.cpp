@@ -71,6 +71,38 @@ void testFrustum() {
     CULL_CHECK(projectionBoundsVisible(identity, prefetch, {}, 16));
 }
 
+void testNativeFarClipStreaming() {
+    ProjectionFrustum const open{};
+    ProjectionBounds bounds;
+    bounds.include({0,0,0});bounds.include({16,16,16});
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{0,0,0},0));
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{-15,0,-15},0));
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{100,0,0},100));
+    CULL_CHECK(!projectionBoundsWithinDistance(bounds,{101,0,0},100));
+    CULL_CHECK(projectionBoundsWithinDistance({}, {100000,0,100000},1));
+    auto near=classifyProjectionSection(open,bounds,{100,0,0},128);
+    CULL_CHECK(near.renderVisible && near.buildVisible && near.prefetchVisible);
+    CULL_CHECK(near.withinBuildDistance && near.withinRetentionDistance);
+    auto edge=classifyProjectionSection(open,bounds,{140,0,0},128);
+    CULL_CHECK(!edge.renderVisible && !edge.buildVisible);
+    CULL_CHECK(edge.prefetchVisible && edge.withinBuildDistance);
+    CULL_CHECK(edge.withinRetentionDistance);
+    auto far=classifyProjectionSection(open,bounds,{180,0,0},128);
+    CULL_CHECK(!far.renderVisible && !far.prefetchVisible);
+    CULL_CHECK(!far.withinBuildDistance && !far.withinRetentionDistance);
+    CULL_CHECK(shouldRetireDistantTransparentMesh(false,false,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,true,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,true,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,false,true,true));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(true,false,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,false,false,false));
+    // Invalid camera clip must not stall the only mesher candidate.
+    for(auto bad: {0.0f,-1.0f,std::numeric_limits<float>::quiet_NaN(),
+                   std::numeric_limits<float>::infinity()}) {
+        auto unknown=classifyProjectionSection(open,bounds,{100000,0,100000},bad);
+        CULL_CHECK(unknown.withinBuildDistance && unknown.withinRetentionDistance);
+    }
+}
 void testLiquidProxyDrawSelection() {
     // The fallback proxy is deliberately different from its cached GPU
     // ownership: hidden sections must not submit draws or lose their meshes.
@@ -224,6 +256,7 @@ void testShell() {
 
 int runProjectionCullingTests() {
     testFrustum();
+    testNativeFarClipStreaming();
     testLiquidProxyDrawSelection();
     testTransformedBounds();
     testBuildSelection();

@@ -272,6 +272,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.sections[section].blendSortKeyValid = false;
                 state.sections[section].blendSortUnsupported = false;
                 state.sections[section].blendSortOrder.clear();
+                ++state.sections[section].blendSortUploadGeneration;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);

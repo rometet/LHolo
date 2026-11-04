@@ -296,12 +296,12 @@ void record(Job& job, Cell world, VerificationState state, Block const* expected
         retainMismatch(job,{state,world,describe(expected),describe(actual),dx*dx+dy*dy+dz*dz,actualLiquid,actualExtra});
     }
 }
-LoadedStructure::RenderBlock const* entryAt(Job const& job,Cell local) {
-    auto const it=std::lower_bound(job.loaded->renderBlocks.begin(),job.loaded->renderBlocks.end(),local,
-        [](auto const& entry,Cell p){return std::tuple{entry.x,entry.y,entry.z}<std::tuple{p.x,p.y,p.z};});
-    return it!=job.loaded->renderBlocks.end() && Cell{it->x,it->y,it->z}==local?&*it:nullptr;
-}
-void addMaterial(Job& job, Block const* expected, VerificationState state,Cell local,BlockSource& source) {
+std::optional<LoadedStructure::RenderBlock> entryAt(Job const& job,Cell local) {
+    auto const index=job.loaded->renderBlocks.find(
+        static_cast<int>(local.x),static_cast<int>(local.y),static_cast<int>(local.z));
+    if(!index)return {};
+    return job.loaded->renderBlocks[*index];
+}void addMaterial(Job& job, Block const* expected, VerificationState state,Cell local,BlockSource& source) {
     if (!expected) return;
     auto const door=expected->getState<bool>(VanillaStates::UpperBlockBit());
     auto const head=expected->getState<bool>(VanillaStates::HeadPieceBit());
@@ -320,7 +320,7 @@ void addMaterial(Job& job, Block const* expected, VerificationState state,Cell l
                 mate.z+=stepZ[*direction]*(other?-1:1);
             }
         }
-        auto const peer=mate==local?nullptr:entryAt(job,mate);
+        auto const peer=mate==local?std::optional<LoadedStructure::RenderBlock>{}:entryAt(job,mate);
         bool const peerVisible=peer && peer->block && peer->block->getTypeName()==expected->getTypeName()
             && visible(job,mate,peer->materialIndex,peer->liquidMaterialIndex);
         quantity=requiredItemRule(expected->getTypeName(),door.value_or(false),head.value_or(false),peerVisible).quantity;
@@ -384,9 +384,8 @@ void scanAir(Job& job, LocalPlayer& player,std::size_t& budget) {
     if(!cell)return;
     auto const local=*cell;
     if(!visible(job,local))return;
-    auto const found = std::lower_bound(job.loaded->renderBlocks.begin(),job.loaded->renderBlocks.end(),local,
-        [](auto const& e, Cell p){return std::tuple{e.x,e.y,e.z} < std::tuple{p.x,p.y,p.z};});
-    if (found != job.loaded->renderBlocks.end() && Cell{found->x,found->y,found->z} == local) return;
+    if(job.loaded->renderBlocks.find(static_cast<int>(local.x),
+        static_cast<int>(local.y),static_cast<int>(local.z))) return;
     auto const world = job.transform.toWorld(local);
     BlockPos const pos{static_cast<int>(world.x),static_cast<int>(world.y),static_cast<int>(world.z)};
     auto& source = player.getDimensionBlockSource(); auto const& actual = source.getBlock(pos);

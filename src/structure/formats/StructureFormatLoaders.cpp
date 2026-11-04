@@ -144,7 +144,7 @@ void assignMaterialIndices(LoadedStructure& loaded) {
             liquidKeys[index], static_cast<int>(bodyKeys.size() + index)
         );
     }
-    for (auto& entry : loaded.renderBlocks) {
+    for (auto& entry : loaded.renderBlocks.mutableValues()) {
         if (auto const found = bodyIndices.find(keyFor(entry.block)); found != bodyIndices.end()) {
             entry.materialIndex = found->second;
         }
@@ -1002,6 +1002,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
     }
 
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = prepared->path;
     return loaded;
@@ -1196,6 +1197,7 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         });
     }
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = path;
     return loaded;
@@ -1467,11 +1469,12 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
             cell.block.block, cell.block.liquid, std::move(cell.blockEntityNbt)
         });
     }
-    std::sort(loaded->renderBlocks.begin(), loaded->renderBlocks.end(), [](auto const& left, auto const& right) {
+    std::sort(loaded->renderBlocks.mutableValues().begin(), loaded->renderBlocks.mutableValues().end(), [](auto const& left, auto const& right) {
         return std::tie(left.x, left.y, left.z) < std::tie(right.x, right.y, right.z);
     });
     loaded->primaryBlocks = loaded->renderBlocks.size();
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = path;
     return loaded;
@@ -1575,11 +1578,12 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
             }
         loaded.regions=std::move(tiles);
         if(loaded.sourceBacking)loaded.renderBlocks=source.renderBlocks;
-        std::erase_if(loaded.renderBlocks,[&](LoadedStructure::RenderBlock const& b){
+        std::erase_if(loaded.renderBlocks.mutableValues(),[&](LoadedStructure::RenderBlock const& b){
             return !enabled(ownerAt(b.x,b.y,b.z));
         });
         loaded.primaryBlocks=loaded.renderBlocks.size();
         assignMaterialIndices(loaded);
+        loaded.renderBlocks.packFromValues(loaded.sizeX,loaded.sizeY,loaded.sizeZ);
         return;
     }
     // File-native subregions: preserve the original source order and original
@@ -1617,6 +1621,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
                 loaded.renderBlocks.push_back(source.renderBlocks[i]);
         loaded.primaryBlocks=loaded.renderBlocks.size();
         assignMaterialIndices(loaded);
+        loaded.renderBlocks.packFromValues(loaded.sizeX,loaded.sizeY,loaded.sizeZ);
         return;
     }
     auto const& regionCells=source.regionRenderBlocks;
@@ -1644,7 +1649,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
     if(disjoint) {
         for(std::size_t i=0;i<loaded.sourceRegions.size();++i) {
             if(!enabled(loaded.sourceRegions[i].name))continue;
-            loaded.renderBlocks.insert(loaded.renderBlocks.end(),
+            loaded.renderBlocks.mutableValues().insert(loaded.renderBlocks.mutableValues().end(),
                 regionCells[i].begin(),regionCells[i].end());
         }
     }else {
@@ -1662,7 +1667,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
         for(auto& [key,cell]:merged)
             loaded.renderBlocks.push_back(std::move(cell));
     }
-    std::sort(loaded.renderBlocks.begin(),loaded.renderBlocks.end(),[](auto const& a,auto const& b){
+    std::sort(loaded.renderBlocks.mutableValues().begin(),loaded.renderBlocks.mutableValues().end(),[](auto const& a,auto const& b){
         return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
     });
     loaded.primaryBlocks=loaded.renderBlocks.size();
@@ -1764,7 +1769,7 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
         result->paletteEntries+=loaded->paletteEntries;
         result->secondaryBlocks+=loaded->secondaryBlocks;
         auto& records=result->regionRenderBlocks.emplace_back(
-            std::move(loaded->renderBlocks));
+            std::move(loaded->renderBlocks.mutableValues()));
         for(auto& block:records){
             block.x+=offsets[0];
             block.y+=offsets[1];
@@ -1786,8 +1791,8 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
     if(!anyOverlap) {
         result->renderBlocks.reserve(totalBlocks);
         for(auto const& region:result->regionRenderBlocks)
-            result->renderBlocks.insert(
-                result->renderBlocks.end(),region.begin(),region.end());
+            result->renderBlocks.mutableValues().insert(
+                result->renderBlocks.mutableValues().end(),region.begin(),region.end());
     }else{
         // File order is authoritative when two region bounds overlap.
         std::unordered_map<std::uint64_t,LoadedStructure::RenderBlock> latest;
@@ -1803,7 +1808,7 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
         for(auto& [key,value]:latest)
             result->renderBlocks.push_back(std::move(value));
     }
-    std::sort(result->renderBlocks.begin(),result->renderBlocks.end(),
+    std::sort(result->renderBlocks.mutableValues().begin(),result->renderBlocks.mutableValues().end(),
         [](auto const& a,auto const& b){
             return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
         });

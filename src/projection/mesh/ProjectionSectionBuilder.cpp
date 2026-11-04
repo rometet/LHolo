@@ -2045,17 +2045,16 @@ void buildLiquidProxySectionMesh(
                 state.anchor.y + offsetY + p.y,
                 state.anchor.z + offsetZ + p.z
             };
-            auto const neighborEntry = [&](int dx, int dy, int dz)
-                -> structure::LoadedStructure::RenderBlock const* {
-                auto const found = state.expectedWorldBlockIndices->find(std::tuple{
-                    worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
+            auto const neighborEntry = [&](int dx,int dy,int dz)
+                -> std::optional<structure::LoadedStructure::RenderBlock> {
+                auto const found=state.expectedWorldBlockIndices->find(std::tuple{
+                    worldPosition.x+dx,worldPosition.y+dy,worldPosition.z+dz
                 });
-                return found == state.expectedWorldBlockIndices->end()
-                        || found->second >= state.structure->renderBlocks.size()
-                    ? nullptr : &state.structure->renderBlocks[found->second];
-            };
-            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                if(found==state.expectedWorldBlockIndices->end()
+                    || found->second>=state.structure->renderBlocks.size())return {};
+                return state.structure->renderBlocks[found->second];
+            };            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
+                auto const neighbor = neighborEntry(dx, dy, dz);
                 if (!neighbor || !neighbor->liquid) return false;
                 auto const* transformed = transformExpectedBlock(
                     neighbor->liquid, sectionTransformSettings, identityTransform
@@ -2067,7 +2066,7 @@ void buildLiquidProxySectionMesh(
                 return neighborIsLava == isLava;
             };
             auto const neighborOccludesFace = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                auto const neighbor = neighborEntry(dx, dy, dz);
                 auto const opaqueFullBlock = neighbor && neighbor->block
                     && !neighbor->block->isAir()
                     && neighbor->block->getBlockType().mIsOpaqueFullBlock;
@@ -2096,8 +2095,8 @@ void buildLiquidProxySectionMesh(
                 return (8.0f - static_cast<float>(depth)) / 9.0f;
             };
             auto const columnHeight = [&](int dx, int dz) -> float {
-                auto const* n = (dx == 0 && dz == 0)
-                    ? &entry : neighborEntry(dx, 0, dz);
+                auto const neighbor=neighborEntry(dx,0,dz);
+                auto const* n=(dx==0 && dz==0) ? &entry : (neighbor ? &*neighbor : nullptr);
                 if (!n) return 0.0f;
                 if (!n->liquid) return -1.0f;
                 auto const* transformed = transformExpectedBlock(

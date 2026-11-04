@@ -65,7 +65,7 @@ std::optional<std::size_t> selectNextDirtySection(
             };
             auto const delta=center-cameraPosition;
             return ProjectionBuildCandidate{
-                sec.dirty,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
+                sec.dirty && sec.withinBuildDistance,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
                 sec.incrementalDirty,delta.x*delta.x+delta.y*delta.y+delta.z*delta.z
             };
         });
@@ -494,7 +494,7 @@ void buildNextProjectionSectionSynchronously(
     // worker creation or three consecutive worker operations fail.
     for (std::size_t attempt = 0; attempt < state.sections.size(); ++attempt) {
         auto const section = state.dirtySectionCursor++ % state.sections.size();
-        if (!state.sections[section].dirty) continue;
+        if (!state.sections[section].dirty || !state.sections[section].withinBuildDistance) continue;
         if (!sectionBuildStorageReady(state, section)) {
             state.sections[section].dirty = false;
             state.sections[section].buildInFlight = false;
