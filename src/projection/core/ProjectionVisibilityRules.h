@@ -81,14 +81,23 @@ inline ProjectionSectionVisibility classifyProjectionSection(
     ProjectionSectionVisibility result;
     auto const eligible=std::isfinite(farClip) && farClip>=32.0f && farClip<=8192.0f;
     auto const radius=eligible?farClip:std::numeric_limits<float>::infinity();
-    result.withinBuildDistance=projectionBoundsWithinDistance(bounds,origin,radius+16.0f);
-    result.withinRetentionDistance=projectionBoundsWithinDistance(bounds,origin,radius+32.0f);
-    result.renderVisible=projectionBoundsWithinDistance(bounds,origin,radius)
-        && projectionBoundsVisible(frustum,bounds,origin,2.0f);
-    result.buildVisible=projectionBoundsWithinDistance(bounds,origin,radius)
-        && projectionBoundsVisible(frustum,bounds,origin,2.0f);
-    result.prefetchVisible=result.withinBuildDistance
-        && projectionBoundsVisible(frustum,bounds,origin,16.0f);
+    // The frustum intentionally contains only SIDE planes. Native mZFar
+    // is not a safe HARD cutoff for schematics: the game's projection can
+    // still be visible past it, leaving Missing comparison colors blank
+    // at the far ends of large structures.
+    //
+    // Use the side frustum as the authority for drawing and mesh builds.
+    // Distance is a hint ONLY for unseen prefetch and GPU residency. A
+    // visible/fringe section must not have its transparent source retired.
+    auto const inView=projectionBoundsVisible(frustum,bounds,origin,2.0f);
+    auto const inPrefetchView=projectionBoundsVisible(frustum,bounds,origin,16.0f);
+    result.renderVisible=inView;
+    result.buildVisible=inView;
+    result.prefetchVisible=inPrefetchView;
+    result.withinBuildDistance=inPrefetchView
+        || projectionBoundsWithinDistance(bounds,origin,radius+16.0f);
+    result.withinRetentionDistance=inPrefetchView
+        || projectionBoundsWithinDistance(bounds,origin,radius+32.0f);
     return result;
 }
 inline bool shouldRetireDistantTransparentMesh(

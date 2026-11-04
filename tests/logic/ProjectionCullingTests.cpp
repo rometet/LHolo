@@ -83,13 +83,39 @@ void testNativeFarClipStreaming() {
     auto near=classifyProjectionSection(open,bounds,{100,0,0},128);
     CULL_CHECK(near.renderVisible && near.buildVisible && near.prefetchVisible);
     CULL_CHECK(near.withinBuildDistance && near.withinRetentionDistance);
+    // Missing/invalid camera matrices must not hard-clip distant overlays.
     auto edge=classifyProjectionSection(open,bounds,{140,0,0},128);
-    CULL_CHECK(!edge.renderVisible && !edge.buildVisible);
+    CULL_CHECK(edge.renderVisible && edge.buildVisible);
     CULL_CHECK(edge.prefetchVisible && edge.withinBuildDistance);
     CULL_CHECK(edge.withinRetentionDistance);
     auto far=classifyProjectionSection(open,bounds,{180,0,0},128);
-    CULL_CHECK(!far.renderVisible && !far.prefetchVisible);
-    CULL_CHECK(!far.withinBuildDistance && !far.withinRetentionDistance);
+    CULL_CHECK(far.renderVisible && far.prefetchVisible);
+    CULL_CHECK(far.withinBuildDistance && far.withinRetentionDistance);
+    // The native side-only frustum may see beyond Camera::mZFar. These
+    // projected Missing overlays must not be culled or retired there.
+    glm::mat4 projection{0};
+    projection[0][0]=projection[1][1]=1.0f;
+    projection[2][2]=-1.002f;
+    projection[2][3]=-1.0f;
+    projection[3][2]=-0.2f;
+    auto const sideOnly=ProjectionFrustum::fromViewProjection(projection);
+    CULL_CHECK(sideOnly.isValid());
+    ProjectionBounds distant;
+    distant.include({-8.0f,-8.0f,-410.0f});
+    distant.include({8.0f,8.0f,-390.0f});
+    CULL_CHECK(projectionBoundsVisible(sideOnly,distant,{}));
+    CULL_CHECK(!projectionBoundsWithinDistance(distant,{},128.0f));
+    auto const visibleFar=classifyProjectionSection(sideOnly,distant,{},128.0f);
+    CULL_CHECK(visibleFar.renderVisible && visibleFar.buildVisible);
+    CULL_CHECK(visibleFar.prefetchVisible);
+    CULL_CHECK(visibleFar.withinBuildDistance && visibleFar.withinRetentionDistance);
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(
+        visibleFar.withinRetentionDistance,false,false,true,false));
+    // Off-screen distant sections still benefit from frustum scheduling.
+    auto const offscreenFar=classifyProjectionSection(sideOnly,distant,{2000.0f,0.0f,0.0f},128.0f);
+    CULL_CHECK(!offscreenFar.renderVisible && !offscreenFar.buildVisible);
+    CULL_CHECK(!offscreenFar.prefetchVisible);
+    CULL_CHECK(!offscreenFar.withinBuildDistance && !offscreenFar.withinRetentionDistance);
     CULL_CHECK(shouldRetireDistantTransparentMesh(false,false,false,true,false));
     CULL_CHECK(!shouldRetireDistantTransparentMesh(false,true,false,true,false));
     CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,true,true,false));
