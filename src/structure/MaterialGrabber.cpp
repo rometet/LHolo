@@ -172,41 +172,31 @@ void collectOne(ContainerScreenController& screen) {
     // No matching accessible stack in this GUI, or no valid vanilla destination.
     session.finished=true;
 }
-// Prepare the draw sink during the native chest controller's construction,
-// before the first ScreenView::render and before onOpen. Prevents a one-frame
-// vanilla chest flash on Alt+right-click.
-LL_TYPE_INSTANCE_HOOK(MaterialGrabEarlyChestHook,ll::memory::HookPriority::Low,
-    ChestScreenController,&ChestScreenController::$ctor,void*,
-    std::shared_ptr<ClientInstanceScreenModel> model,
-    Player& player, BlockPos const& pos, ActorUniqueID uniqueId,
-    BlockActorType blockType) {
-    app::hook_lifecycle::DetourGuard guard;
-    auto* result=origin(std::move(model),player,pos,uniqueId,blockType);
-    if(!guard || !available.load(std::memory_order_acquire)) return result;
-    auto* native=static_cast<ScreenController const*>(this);
-    if((blockType==BlockActorType::Chest || blockType==BlockActorType::ShulkerBox
-        || blockType==BlockActorType::BarrelBlock)
-        && grabChordPressed() && hasPendingMaterialNeed()) {
-        earlyArmedScreen.store(native,std::memory_order_release);
-        suppressionDeadline.store(0,std::memory_order_release);
-        suppressedScreen.store(native,std::memory_order_release);
-        LHolo::getInstance().getSelf().getLogger().info(
-            "MATERIAL_GRAB_EARLY_ARM type={}",static_cast<int>(blockType));
-    } else {
-        // A normal new chest may reuse the address of a retired hidden screen.
-        stopSuppression(this);
-    }
-    return result;
-}
 LL_TYPE_INSTANCE_HOOK(MaterialGrabOpenHook,ll::memory::HookPriority::Low,
     ContainerScreenController,&ContainerScreenController::$onOpen,void) {
     app::hook_lifecycle::DetourGuard guard;
+    // 26.60 does not export the chest controller constructor. Arm the render
+    // suppression before onOpen whenever the container model is already
+    // available, so the first UI render cannot expose a transient chest frame.
+    // If the model is initialized by origin(), the post-open branch below
+    // still suppresses the next render and all subsequent native UI frames.
+    auto* native=static_cast<ScreenController const*>(this);
+    bool const early=guard && available.load(std::memory_order_acquire)
+        && grabChordPressed() && hasPendingMaterialNeed()
+        && mContainerManagerController.get()
+        && supportedContainer(*mContainerManagerController.get());
+    if(early) {
+        suppressedScreen.store(native,std::memory_order_release);
+        earlyArmedScreen.store(native,std::memory_order_release);
+        suppressionDeadline.store(0,std::memory_order_release);
+    } else {
+        // Clear a retired screen that reused this pointer before any render.
+        stopSuppression(this);
+    }
     origin();
     if(!guard || !available.load(std::memory_order_acquire))return;
     // Native screen must exist for valid server-authoritative item transfers.
     // It remains completely unrendered during the short collection session.
-    auto* native=static_cast<ScreenController const*>(this);
-    bool const early=earlyArmedScreen.load(std::memory_order_acquire)==native;
     bool const armed=(early || grabChordPressed()) && hasPendingMaterialNeed();
     session=GrabSession{this,armed,false,false,false,GetTickCount64(),
         GetTickCount64()+150,0,{}};
@@ -294,20 +284,19 @@ LL_TYPE_INSTANCE_HOOK(MaterialGrabLeaveHook,ll::memory::HookPriority::Low,
 } // namespace
 bool installMaterialGrabberHook() {
     available.store(false,std::memory_order_release);
-    if(MaterialGrabEarlyChestHook::hook()!=0)return false;
     if(MaterialGrabOpenHook::hook()!=0) {
-        MaterialGrabEarlyChestHook::unhook();return false;
+        return false;
     }
     if(MaterialGrabTickHook::hook()!=0) {
-        MaterialGrabOpenHook::unhook();MaterialGrabEarlyChestHook::unhook();return false;
+        MaterialGrabOpenHook::unhook();return false;
     }
     if(MaterialGrabLeaveHook::hook()!=0) {
         MaterialGrabTickHook::unhook();MaterialGrabOpenHook::unhook();
-        MaterialGrabEarlyChestHook::unhook();return false;
+        return false;
     }
     if(MaterialGrabRenderHook::hook()!=0) {
         MaterialGrabLeaveHook::unhook();MaterialGrabTickHook::unhook();
-        MaterialGrabOpenHook::unhook();MaterialGrabEarlyChestHook::unhook();return false;
+        MaterialGrabOpenHook::unhook();return false;
     }
     available.store(true,std::memory_order_release);
     if(!installClientOnlyGrabHooks()) LHolo::getInstance().getSelf().getLogger().warn(
@@ -325,7 +314,6 @@ bool uninstallMaterialGrabberHook() {
     auto a=MaterialGrabLeaveHook::unhook();
     auto b=MaterialGrabTickHook::unhook();
     auto c=MaterialGrabOpenHook::unhook();
-    auto e=MaterialGrabEarlyChestHook::unhook();
-    return d&&a&&b&&c&&e;
+    return d&&a&&b&&c;
 }
 }

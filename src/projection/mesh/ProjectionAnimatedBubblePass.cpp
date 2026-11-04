@@ -280,17 +280,15 @@ void submitAnimatedBubbleOverlay(
         return;
     }
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
-    if (vanillaParticleAtlas) {
-        MeshHelpers::renderMeshImmediately(
-            renderContext.mScreenContext,t,projectedBlendMaterial,
-            {std::cref(*vanillaParticleAtlas)},emptyBubbleOffscreenCapture()
-        );
-    } else {
-        MeshHelpers::renderMeshImmediately(
-            renderContext.mScreenContext,t,projectedBlendMaterial,
-            {std::cref(*state.terrainTexture)},emptyBubbleOffscreenCapture()
-        );
-    }
+    // 26.60 supports TextureVariant submission; preserve the particle/terrain
+    // atlas selection and limit handle lifetime to this render call.
+    render::TextureVariant const bubbleTexture{
+        vanillaParticleAtlas ? *vanillaParticleAtlas : *state.terrainTexture
+    };
+    MeshHelpers::renderMeshImmediately(
+        renderContext.mScreenContext,t,projectedBlendMaterial,
+        bubbleTexture,emptyBubbleOffscreenCapture()
+    );
 
     auto& logger=LHolo::getInstance().getSelf().getLogger();
     static std::atomic_bool r12TextureLogged{};

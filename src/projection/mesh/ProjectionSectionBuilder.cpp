@@ -6,6 +6,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionSectionBuilder.h"
 #include "projection/mesh/WaterloggedNativeStreamClip.h"
 #include "projection/mesh/LocalCorrectionPriorityGrid.h"
@@ -977,7 +978,7 @@ void buildProjectionSection(
         std::unique_ptr<mce::MeshData> originalSource;
         if (bucket == RenderBucket::Blend
             && uploadMode != Tessellator::UploadMode::Never) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 tessellator.mMeshData.get()
             );
         }
@@ -988,7 +989,7 @@ void buildProjectionSection(
         ));
         if (bucket == RenderBucket::Blend
             && !builtMesh->mMeshData.get().mPositions.get().empty()) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 builtMesh->mMeshData.get()
             );
         }
@@ -1398,7 +1399,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
             }
             cellVertices += added;
             liquidKinds.insert(liquidKinds.end(), added,
-                expectedLiquid->getBlockType().mMaterial.mSuperHot
+                expectedLiquid->getBlockType().mMaterial.get().mSuperHot
                     ? PraxisCompatLiquidKind::Lava : PraxisCompatLiquidKind::Water);
             cellUvVertices += addedUvs;
             cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
@@ -1692,7 +1693,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
-        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
+        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.get().mSuperHot
             ? PraxisCompatLiquidKind::Lava
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
@@ -1723,7 +1724,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         std::size_t waterCells{}, lavaCells{}, bubbleCells{};
         for (auto const index : succeeded) {
             auto const& entry = state.structure->renderBlocks[index];
-            if (entry.liquid && entry.liquid->getBlockType().mMaterial.mSuperHot)
+            if (entry.liquid && entry.liquid->getBlockType().mMaterial.get().mSuperHot)
                 ++lavaCells;
             else ++waterCells;
             if (entry.block && entry.block->getTypeName() == "minecraft:bubble_column")
@@ -1863,7 +1864,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         += waterSeedVertices;
     state.nativeLiquidTelemetry.praxisCompatLavaNativeVertices
         += lavaNativeVertices;
-    compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
+    compat->nativeStream = cloneNativeMeshData(meshData);
     compat->tessellatorState = {
         .isFormatFixed        = tessellator.mIsFormatFixed,
         .hasNormals           = tessellator.mHasNormals,
@@ -2000,7 +2001,7 @@ void buildLiquidProxySectionMesh(
             if (!expectedLiquid) continue;
 
             bool const isLava = expectedLiquid->getTypeName().find("lava") != std::string::npos
-                || expectedLiquid->getBlockType().mMaterial.mSuperHot;
+                || expectedLiquid->getBlockType().mMaterial.get().mSuperHot;
             auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
             auto const* uvSetStill = graphics ? &graphics->getTexture(0, 0) : nullptr;
             auto const* uvSetFlow = graphics ? &graphics->getTexture(2, 0) : nullptr;
@@ -2062,7 +2063,7 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return false;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 return neighborIsLava == isLava;
             };
             auto const neighborOccludesFace = [&](int dx, int dy, int dz) {
@@ -2105,7 +2106,7 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return -1.0f;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 if (neighborIsLava != isLava) return -1.0f;
                 if (neighborIsSameLiquid(dx, 1, dz)) return 1.0f;
                 return fluidHeight(liquidDepth(*transformed));

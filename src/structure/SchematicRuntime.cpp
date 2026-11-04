@@ -314,8 +314,10 @@ void addMaterial(Job& job, Block const* expected, VerificationState state,Cell l
             if(direction && *direction>=0 && *direction<4){
                 // Native direction vectors; placement/block-state rotation is
                 // still delegated to the game's transformer.
-                mate.x+=Direction::STEP_X()[*direction]*(other?-1:1);
-                mate.z+=Direction::STEP_Z()[*direction]*(other?-1:1);
+                constexpr int stepX[4]{0,-1,0,1}; // South, West, North, East
+                mate.x+=stepX[*direction]*(other?-1:1);
+                constexpr int stepZ[4]{1,0,-1,0};
+                mate.z+=stepZ[*direction]*(other?-1:1);
             }
         }
         auto const peer=mate==local?nullptr:entryAt(job,mate);

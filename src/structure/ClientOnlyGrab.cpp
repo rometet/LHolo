@@ -102,6 +102,18 @@ struct SilentSession {
 std::mutex mutex;
 SilentSession sess;
 
+// MCAPI 26.60 does not export toString() for either diagnostic type.
+// Preserve the same numeric identity in logs without linking engine code.
+std::string containerDebugName(FullContainerName const& name) {
+    std::string result=std::to_string(static_cast<unsigned>(name.mName));
+    if(name.mDynamicId.get())result+=":"+std::to_string(*name.mDynamicId.get());
+    return result;
+}
+std::string netVariantDebugName(ItemStackNetIdVariant const& net) {
+    return std::visit([](auto const& value) {
+        return std::to_string(value.mRawId);
+    },net.mVariant.get());
+}
 bool enabled() noexcept {
     return preferenceEnabled.load(std::memory_order_acquire);
 }
@@ -215,22 +227,22 @@ LL_TYPE_INSTANCE_HOOK(SilentRequestTraceHook,ll::memory::HookPriority::Low,
                     if(auto const* take=std::get_if<ItemStackRequestCereal::TakeActionData>(&action)) {
                         LHolo::getInstance().getSelf().getLogger().info(
                             "MATERIAL_GRAB_CLIENT_ONLY_PACKET_TAKE src={} slot={} net={} dst={} slot={} net={} amount={}",
-                            take->mSource->mFullContainerName->toString(),
+                            containerDebugName(*take->mSource->mFullContainerName),
                             static_cast<int>(take->mSource->mSlot),
-                            take->mSource->mNetIdVariant->toString(),
-                            take->mDestination->mFullContainerName->toString(),
+                            netVariantDebugName(*take->mSource->mNetIdVariant),
+                            containerDebugName(*take->mDestination->mFullContainerName),
                             static_cast<int>(take->mDestination->mSlot),
-                            take->mDestination->mNetIdVariant->toString(),
+                            netVariantDebugName(*take->mDestination->mNetIdVariant),
                             static_cast<int>(take->mAmount));
                     } else if(auto const* place=std::get_if<ItemStackRequestCereal::PlaceActionData>(&action)) {
                         LHolo::getInstance().getSelf().getLogger().info(
                             "MATERIAL_GRAB_CLIENT_ONLY_PACKET_PLACE src={} slot={} net={} dst={} slot={} net={} amount={}",
-                            place->mSource->mFullContainerName->toString(),
+                            containerDebugName(*place->mSource->mFullContainerName),
                             static_cast<int>(place->mSource->mSlot),
-                            place->mSource->mNetIdVariant->toString(),
-                            place->mDestination->mFullContainerName->toString(),
+                            netVariantDebugName(*place->mSource->mNetIdVariant),
+                            containerDebugName(*place->mDestination->mFullContainerName),
                             static_cast<int>(place->mDestination->mSlot),
-                            place->mDestination->mNetIdVariant->toString(),
+                            netVariantDebugName(*place->mDestination->mNetIdVariant),
                             static_cast<int>(place->mAmount));
                     } else {
                         LHolo::getInstance().getSelf().getLogger().info(
@@ -308,12 +320,12 @@ LL_TYPE_INSTANCE_HOOK(SilentInventoryContentHook,ll::memory::HookPriority::Norma
             LHolo::getInstance().getSelf().getLogger().info(
                 "MATERIAL_GRAB_CLIENT_ONLY_SOURCE_NAME id={} name={}",
                 static_cast<int>(packet.mInventoryId),
-                packet.mFullContainerName->toString());
+                containerDebugName(packet.mFullContainerName.get()));
             for(auto const& sourceSlot:sess.slots) {
                 LHolo::getInstance().getSelf().getLogger().info(
                     "MATERIAL_GRAB_CLIENT_ONLY_SOURCE_SLOT id={} slot={} count={} net={}",
                     sourceSlot.id,sourceSlot.index,sourceSlot.amount,
-                    sourceSlot.netId.toString());
+                    netVariantDebugName(sourceSlot.netId));
             }
         }
     }

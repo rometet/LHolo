@@ -1,8 +1,10 @@
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionRenderer.h"
 #include "resourcepacks/WorldPackReloadState.h"
+#include "render/OverlayMaterials.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
 
@@ -447,7 +449,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> clonePraxisExactReplayData(
 ) {
     if (!source.nativeStream) return {};
     auto clone = std::make_unique<PraxisCompatLiquidSectionData>();
-    clone->nativeStream = std::make_unique<mce::MeshData>(*source.nativeStream);
+    clone->nativeStream = cloneNativeMeshData(*source.nativeStream);
     clone->derivedColors = source.derivedColors;
     clone->liquidKinds = source.liquidKinds;
     clone->tessellatorState = source.tessellatorState;
@@ -596,7 +598,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
         if (!source || !source->ready()) return {};
         if (!result) {
             result = std::make_unique<PraxisCompatLiquidSectionData>();
-            result->nativeStream = std::make_unique<mce::MeshData>(
+            result->nativeStream = cloneNativeMeshData(
                 *source->nativeStream
             );
             result->derivedColors = source->derivedColors;
@@ -666,33 +668,33 @@ bool applyNativeReplayQuadOrder(
     // Transactional staging: a failed layout/allocation keeps both original
     // replay streams and face metadata. Canonical data and cull caches never
     // observe this permutation.
-    mce::MeshData candidate{replayData};
+    auto candidate = cloneNativeMeshData(replayData);
     auto metadata = quadInfo;
-    if (!reorderQuadVertexField(candidate.mPositions.get(), order)
-        || !reorderQuadVertexField(candidate.mNormals.get(), order)
-        || !reorderQuadVertexField(candidate.mTangents.get(), order)
-        || !reorderQuadVertexField(candidate.mColors.get(), order)
-        || !reorderQuadVertexField(candidate.mBoneId0s.get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[0].get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[1].get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[2].get(), order)
-        || !reorderQuadVertexField(candidate.mPBRTextureIndices.get(), order)
-        || !reorderQuadVertexField(candidate.mMERS.get(), order)
-        || !reorderQuadVertexField(candidate.mGeoType.get(), order)
+    if (!reorderQuadVertexField(candidate->mPositions.get(), order)
+        || !reorderQuadVertexField(candidate->mNormals.get(), order)
+        || !reorderQuadVertexField(candidate->mTangents.get(), order)
+        || !reorderQuadVertexField(candidate->mColors.get(), order)
+        || !reorderQuadVertexField(candidate->mBoneId0s.get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[0].get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[1].get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[2].get(), order)
+        || !reorderQuadVertexField(candidate->mPBRTextureIndices.get(), order)
+        || !reorderQuadVertexField(candidate->mMERS.get(), order)
+        || !reorderQuadVertexField(candidate->mGeoType.get(), order)
         || !reorderReplayQuadMetadata(metadata, order)) return false;
     // Standard-vector swaps commit without calling an engine MeshData move
     // assignment. No allocation or native submission occurs during commit.
-    replayData.mPositions.get().swap(candidate.mPositions.get());
-    replayData.mNormals.get().swap(candidate.mNormals.get());
-    replayData.mTangents.get().swap(candidate.mTangents.get());
-    replayData.mColors.get().swap(candidate.mColors.get());
-    replayData.mBoneId0s.get().swap(candidate.mBoneId0s.get());
-    replayData.mTextureUVs[0].get().swap(candidate.mTextureUVs[0].get());
-    replayData.mTextureUVs[1].get().swap(candidate.mTextureUVs[1].get());
-    replayData.mTextureUVs[2].get().swap(candidate.mTextureUVs[2].get());
-    replayData.mPBRTextureIndices.get().swap(candidate.mPBRTextureIndices.get());
-    replayData.mMERS.get().swap(candidate.mMERS.get());
-    replayData.mGeoType.get().swap(candidate.mGeoType.get());
+    replayData.mPositions.get().swap(candidate->mPositions.get());
+    replayData.mNormals.get().swap(candidate->mNormals.get());
+    replayData.mTangents.get().swap(candidate->mTangents.get());
+    replayData.mColors.get().swap(candidate->mColors.get());
+    replayData.mBoneId0s.get().swap(candidate->mBoneId0s.get());
+    replayData.mTextureUVs[0].get().swap(candidate->mTextureUVs[0].get());
+    replayData.mTextureUVs[1].get().swap(candidate->mTextureUVs[1].get());
+    replayData.mTextureUVs[2].get().swap(candidate->mTextureUVs[2].get());
+    replayData.mPBRTextureIndices.get().swap(candidate->mPBRTextureIndices.get());
+    replayData.mMERS.get().swap(candidate->mMERS.get());
+    replayData.mGeoType.get().swap(candidate->mGeoType.get());
     quadInfo.swap(metadata);
     return true;
 }
@@ -725,13 +727,13 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
         static_cast<int>(vertexCount),
         true
     );
-    mce::MeshData replayData{*data.nativeStream};
-    replayData.mColors.get() = data.derivedColors;
+    auto replayData = cloneNativeMeshData(*data.nativeStream);
+    replayData->mColors.get() = data.derivedColors;
     auto replayQuadInfo = data.tessellatorState.quadInfo;
     try {
         auto const order = nativeReplayQuadOrder(data.cameraSort,
             std::span<glm::vec3 const>{data.nativeStream->mPositions.get()}, localCamera, sortBudget);
-        if (!applyNativeReplayQuadOrder(replayData, replayQuadInfo, order)) {
+        if (!applyNativeReplayQuadOrder(*replayData, replayQuadInfo, order)) {
             data.cameraSort.unsupported = true;
             logger().warn("NATIVE_REPLAY_PRIMITIVE_SORT incompatible metadata; native order retained");
         }
@@ -740,7 +742,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
         data.cameraSort.keyValid = false;
         data.cameraSort.order.clear();
     }
-    tessellator.mMeshData.get() = std::move(replayData);
+    swapNativeMeshDataFields(tessellator.mMeshData.get(), *replayData);
     tessellator.mIsFormatFixed = data.tessellatorState.isFormatFixed;
     tessellator.mHasNormals = data.tessellatorState.hasNormals;
     tessellator.mIndexPhase = data.tessellatorState.indexPhase;
@@ -769,11 +771,14 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     // is a different exported overload from TextureVariant + generation mode.
     auto const submitStarted = std::chrono::steady_clock::now();
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
+    // 26.60 exports the TextureVariant overload, not the legacy texture-ref list.
+    // Own a copy of the active atlas handle for this submission only.
+    render::TextureVariant const texture{terrainTexture};
     MeshHelpers::renderMeshImmediately(
         screenContext,
         tessellator,
         material,
-        {std::cref(terrainTexture)},
+        texture,
         emptyOffscreenCaptureDescription()
     );
     result.submitMicros = static_cast<std::uint64_t>(
@@ -1433,9 +1438,9 @@ void submitProjectionMeshPass(
                     sectionState.blendSortKeyValid = true;
                     continue;
                 }
-                auto sortedData = *originalSource;
-                auto const vertexCount = sortedData.mPositions.get().size();
-                auto const result = sortTransparentMeshDataBackToFront(sortedData, *order);
+                auto sortedData = cloneNativeMeshData(*originalSource);
+                auto const vertexCount = sortedData->mPositions.get().size();
+                auto const result = sortTransparentMeshDataBackToFront(*sortedData, *order);
                 if (result == TransparentMeshSortResult::Invalid) {
                     // A new upload clears this flag. Do not destroy/rebuild an
                     // unknown engine layout and do not retry it every frame.
@@ -1449,20 +1454,20 @@ void submitProjectionMeshPass(
                             "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
                             "reason={} section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
                             "uv0={} uv1={} uv2={} pbr={} mers={} geoType={}",
-                            transparentMeshLayoutIssue(sortedData),
+                            transparentMeshLayoutIssue(*sortedData),
                             section,
-                            sortedData.mPositions.get().size(),
-                            sortedData.mIndices.get().size(),
-                            sortedData.mNormals.get().size(),
-                            sortedData.mTangents.get().size(),
-                            sortedData.mColors.get().size(),
-                            sortedData.mBoneId0s.get().size(),
-                            sortedData.mTextureUVs[0].get().size(),
-                            sortedData.mTextureUVs[1].get().size(),
-                            sortedData.mTextureUVs[2].get().size(),
-                            sortedData.mPBRTextureIndices.get().size(),
-                            sortedData.mMERS.get().size(),
-                            sortedData.mGeoType.get().size()
+                            sortedData->mPositions.get().size(),
+                            sortedData->mIndices.get().size(),
+                            sortedData->mNormals.get().size(),
+                            sortedData->mTangents.get().size(),
+                            sortedData->mColors.get().size(),
+                            sortedData->mBoneId0s.get().size(),
+                            sortedData->mTextureUVs[0].get().size(),
+                            sortedData->mTextureUVs[1].get().size(),
+                            sortedData->mTextureUVs[2].get().size(),
+                            sortedData->mPBRTextureIndices.get().size(),
+                            sortedData->mMERS.get().size(),
+                            sortedData->mGeoType.get().size()
                         );
                     }
                     continue;
@@ -1471,7 +1476,7 @@ void submitProjectionMeshPass(
                 // published GPU mesh may still carry a previous camera's
                 // order. Rebuilding from originalSource restores identity.
                 auto replacement = std::make_unique<mce::Mesh>(
-                    bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
+                    bufferService, std::move(*sortedData), false, "LHoloBlendCameraSorted");
                 if (!replacement->isValid()) {
                     ++state.glassR4SortUploadFailures;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {

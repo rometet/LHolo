@@ -17,7 +17,7 @@ ItemStack makePlacementItem(Block const& block) {
     std::string_view const name = itemName.empty() ? std::string_view{blockName} : itemName;
     // 26.40 removed the ItemStack(name, count, aux, tag) constructor; the
     // remaining route is default construction followed by reinit().
-    ItemStack item;
+    ItemStack item{ItemStack::EMPTY_ITEM()};
     item.reinit(name, 1, 0);
     return item;
 }
@@ -28,12 +28,9 @@ ItemStack makeManualPlacementItem(Block const& block) {
     // For ordinary blocks, native conversion preserves true material aux and
     // resolves wall-mounted forms. Reinit copies no world block-state data.
     if (placeableBaseName(name) == name && placementItemName(name).empty()) {
-        ItemInstance const gameItem{block};
-        if (!gameItem.isNull()) {
-            ItemStack item;
-            item.reinit(gameItem.getTypeName(), 1, gameItem.getAuxValue());
-            if (!item.isNull()) return item;
-        }
+        ItemStack gameItem{ItemStack::EMPTY_ITEM()};
+        gameItem.reinit(block, 1);
+        if (!gameItem.isNull()) return gameItem;
     }
     return makePlacementItem(block);
 }
@@ -68,7 +65,8 @@ PlacementItem resolvePlacementItem(Block const& block) {
 
     // Block-only forms such as wall signs and wall coral fans resolve to their
     // inventory form through Bedrock's own Block -> ItemInstance conversion.
-    ItemInstance const gameItem{block};
+    ItemStack gameItem{ItemStack::EMPTY_ITEM()};
+    gameItem.reinit(block, 1);
     if (gameItem.isNull()) return {};
     int const size = static_cast<int>(gameItem.getMaxStackSize());
     return {

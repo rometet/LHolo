@@ -673,9 +673,49 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
         ? prepared->blockIndexLayers.size()
         : (stagedBlockIndices ? stagedBlockIndices->size() : 0);
     if (stagedLayerCount != 0) {
-        StructureBlockPalette stagedPalette;
-        if (stagedPalette._parseBlockPalette(*defaultPalette)
-            == StructureBlockPaletteLoadResult::Success) {
+        // Native block-palette parse/destructors are not exported on 26.60.
+        // Construct a 1-cell test structure that keeps the exact palette, then
+        // use MCAPI StructureTemplate::load. The real index streams remain in
+        // prepared->blockIndexLayers and never enter the native parser.
+        std::unique_ptr<StructureTemplate> paletteTemplate;
+        try {
+            CompoundTag paletteProbe{*prepared->root};
+            auto& probeSize = paletteProbe.at("size").get<ListTag>();
+            auto& probeStructure = paletteProbe.at("structure").get<CompoundTag>();
+            auto& probeLayers = probeStructure.at("block_indices").get<ListTag>();
+            if (probeSize.size() == 3
+                && probeSize[0]->getId() == Tag::Int
+                && probeSize[1]->getId() == Tag::Int
+                && probeSize[2]->getId() == Tag::Int) {
+                for (auto& component : probeSize) component->as<IntTag>().data = 1;
+                probeLayers.clear();
+                probeLayers.mType = Tag::IntArray;
+                probeLayers.emplace_back(std::make_unique<IntArrayTag>(std::vector<int>{0}));
+                probeLayers.emplace_back(std::make_unique<IntArrayTag>(std::vector<int>{-1}));
+                auto& probeDefault = probeStructure.at("palette").get<CompoundTag>()
+                    .at("default").get<CompoundTag>();
+                // Keep the native tag schema, but omit all unrelated data.
+                // A 1-cell palette probe must not deserialize the full list
+                // of block entities or world actors from a giant schematic.
+                probeDefault.mTags["block_position_data"] = CompoundTag{};
+                if (auto entity = probeStructure.mTags.find("entities");
+                    entity != probeStructure.mTags.end()
+                    && entity->second.hold<ListTag>()) {
+                    entity->second.get<ListTag>().clear();
+                }
+                paletteTemplate = std::make_unique<StructureTemplate>(
+                    "lholo:palette_only", clientLevel->getUnknownBlockTypeRegistry()
+                );
+                if (!paletteTemplate->load(paletteProbe)) paletteTemplate.reset();
+            }
+        } catch (...) {
+            paletteTemplate.reset();
+        }
+        auto const* stagedPalette = paletteTemplate
+            ? paletteTemplate->mStructureTemplateData.get().getPalette(
+                StructureTemplateData::DEFAULT_PALETTE_NAME())
+            : nullptr;
+        if (stagedPalette) {
             auto const unknownRegistry = clientLevel->getUnknownBlockTypeRegistry();
             std::vector<Block const*> resolvedPalette(
                 static_cast<std::size_t>(prepared->paletteEntries), nullptr
@@ -683,7 +723,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
             for (std::size_t paletteIndex = 0;
                  paletteIndex < resolvedPalette.size();
                  ++paletteIndex) {
-                auto const* resolved = stagedPalette.tryGetBlock(
+                auto const* resolved = stagedPalette->tryGetBlock(
                     static_cast<std::uint64_t>(paletteIndex), unknownRegistry
                 );
                 if (resolved && !resolved->isAir()) {
@@ -735,18 +775,18 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
                 Block const* liquid{};
                 auto const assign = [&](Block const* value) {
                     if (!value) return;
-                    if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+                    if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
                     else if (!block) block = value;
                 };
                 assign(primary);
                 assign(secondary);
                 if (primary && primary->getTypeName() == "minecraft:bubble_column") {
                     block = primary;
-                    liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+                    liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                         ? secondary : nullptr;
                 } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
                     block = secondary;
-                    liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+                    liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                         ? primary : nullptr;
                 }
                 if (!block && !liquid) continue;
@@ -881,18 +921,18 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
         Block const* liquid{};
         auto const assign = [&](Block const* value) {
             if (!value) return;
-            if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+            if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
             else if (!block) block = value;
         };
         assign(primary);
         assign(secondary);
         if (primary && primary->getTypeName() == "minecraft:bubble_column") {
             block = primary;
-            liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+            liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                 ? secondary : nullptr;
         } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
             block = secondary;
-            liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+            liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                 ? primary : nullptr;
         }
         if (!block && !liquid) continue;
@@ -1087,18 +1127,18 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         Block const* liquid{};
         auto const assign = [&](Block const* value) {
             if (!value) return;
-            if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+            if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
             else if (!block) block = value;
         };
         assign(primary);
         assign(secondary);
         if (primary && primary->getTypeName() == "minecraft:bubble_column") {
             block = primary;
-            liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+            liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                 ? secondary : nullptr;
         } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
             block = secondary;
-            liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+            liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                 ? primary : nullptr;
         }
         if (!block && !liquid) continue;

@@ -20,7 +20,11 @@ option_end()
 
 add_repositories("levimc-repo " .. (get_config("levimc_repo") or "https://github.com/LiteLDev/xmake-repo.git"))
 
-add_requires("levilamina 26.51.5", {configs = {target_type = get_config("target_type") or "client"}})
+add_requires("levilamina f28a4b5dd6454948f163b4649238dfecabb7485f", {configs = {target_type = get_config("target_type") or "client"}})
+-- Pin the 26.60 client runtime symbol data with 21 newly resolved LHolo APIs.
+-- Override the LeviLamina source commit's older transitive client.1 dependency.
+add_requires("bedrockdata v26.60.5-client.2")
+add_requireconfs("**.bedrockdata", {version = "v26.60.5-client.2", override = true})
 add_requires("levibuildscript 0.6.1")
 add_requires("imgui v1.91.9", {configs = {shared = false, win32 = true, dx11 = true, no_demo_windows = true}})
 add_requires("minhook v1.3.4", {configs = {shared = false}})

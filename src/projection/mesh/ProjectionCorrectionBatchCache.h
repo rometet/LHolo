@@ -3,6 +3,7 @@
 // Render-thread-only, section-revision-aware batching of the two high-volume
 // Missing correction overlays. The original per-section GPU meshes always
 // remain available for frustum-edge, resource-failure and dynamic fallbacks.
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionCorrectionBatchPolicy.h"
 #include "mc/deps/minecraft_renderer/renderer/Mesh.h"
 #include "mc/deps/minecraft_renderer/renderer/MeshData.h"
@@ -178,7 +179,7 @@ private:
             return nullptr;
         auto const& first = *parts.front();
         if (!first.mIndices.get().empty()) return nullptr;
-        auto result = std::make_unique<mce::MeshData>(first);
+        auto result = cloneNativeMeshData(first);
         auto& target = *result;
         for (std::size_t i = 1; i < parts.size(); ++i) {
             auto const& source = *parts[i];

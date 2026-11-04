@@ -63,30 +63,25 @@ LL_TYPE_INSTANCE_HOOK(IconImagesReloadHook,ll::memory::HookPriority::Normal,
 }
 std::string text(ResourcePackManager const& manager,char const* path) {
     std::string value;
-    if(!manager.loadText(ResourceLocation{Core::PathView{path},ResourceFileSystem::UserPackage},value))return {};
+    if(!manager.load(ResourceLocation{Core::PathView{path},ResourceFileSystem::UserPackage},value))return {};
     return value;
 }
 struct CatalogRead {std::unique_ptr<Catalog> value;bool busy{};std::size_t layers{};};
 CatalogRead readCatalog(ResourcePackManager& manager,std::uint64_t generation) {
     struct PinnedPack {std::shared_ptr<ResourcePack> pack;int subpack{};};
     std::vector<PinnedPack> packs;
-    {
-        // Short ownership snapshot only. Never call a native resource loader
-        // while holding the engine's stack mutex or retain PackInstance refs.
-        std::shared_lock lock{manager.mFullStackAccess.get(),std::try_to_lock};
-        if(!lock.owns_lock())return {{},true};
-        if(!store().readable() || store().revision()!=generation)return {{},true};
-        auto const& stack=manager.mFullStack.get();
-        if(!stack)return {{},true};
-        auto const& instances=stack->mStack.get();
-        if(instances.size()>512)return {};
-        packs.reserve(instances.size());
-        for(auto const& instance:instances) {
-            std::shared_ptr<ResourcePack> owned=instance.mPack.get();
-            packs.push_back({std::move(owned),instance.mSubpackIndex});
-        }
-    }
-    std::vector<MetadataLayer> layers;layers.reserve(packs.size());
+    if(!store().readable() || store().revision()!=generation)return {{},true};
+    // 26.60 no longer exposes a single mFullStack. Ask the engine for
+    // its current stack, pin the pack owners, then release engine control
+    // before any resource IO. Never retain borrowed PackInstance references.
+    bool tooMany=false;
+    manager.iteratePacks([&](PackInstance const& instance) {
+        if(packs.size()>=512){tooMany=true;return;}
+        std::shared_ptr<ResourcePack> owned=instance.mPack.get();
+        if(owned)packs.push_back({std::move(owned),instance.mSubpackIndex});
+    });
+    if(tooMany)return {};
+    if(!store().readable() || store().revision()!=generation)return {{},true};    std::vector<MetadataLayer> layers;layers.reserve(packs.size());
     std::size_t bytes{};
     for(auto const& pinned:packs) {
         if(!store().readable() || store().revision()!=generation)return {{},true};

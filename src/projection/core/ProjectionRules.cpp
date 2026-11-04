@@ -104,7 +104,14 @@ Block const& withFlattenedConnections(
     BlockSource&    region,
     BlockPos const& position
 ) {
-    auto const& blockType = block.getBlockType();
+    // LeviLamina 26.60 client headers expose BlockType::connectionUpdate only
+    // for server builds. Preserve the original state rather than using an
+    // unavailable engine function or touching the real client world.
+#if defined(LL_PLAT_C)
+    (void)region;
+    (void)position;
+    return block;
+#else    auto const& blockType = block.getBlockType();
     if (!blockType.isFenceBlock() && !blockType.isThinFenceBlock()) return block;
     // The vanilla connection update knows every family's connection rules,
     // including the data-driven ones (glass panes, iron bars) whose arms are
@@ -121,6 +128,7 @@ Block const& withFlattenedConnections(
         directionSet.insert(static_cast<NeighborDirection>(direction));
     }
     return blockType.connectionUpdate(region, block, position, directions);
+#endif
 }
 
 bool projectionStatesMatch(Block const& expected, Block const& actual) {

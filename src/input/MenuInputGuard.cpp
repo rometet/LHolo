@@ -12,6 +12,8 @@
 #include "ll/api/memory/Hook.h"
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/game/ClientInstance.h"
+#include "mc/client/gui/screens/ScreenView.h"
+#include "mc/client/gui/controls/TextEditComponent.h"
 
 #include "mc/deps/input/Keyboard.h"
 #include "mc/deps/input/MouseAction.h"
@@ -28,7 +30,7 @@ namespace {
 
 MenuInputGuardStatus gInstallStatus{};
 std::atomic_bool gInputGuardReady{};
-std::array<bool,7> gTextInputHooksInstalled{};
+std::array<bool,6> gTextInputHooksInstalled{};
 thread_local std::uint32_t gInputHandoffDepth{};
 
 bool menuOwnsGameInput() {
@@ -47,20 +49,18 @@ void trackTextInput(NativeTextInputFlag flag, bool blocked) {
 
 // Native text/IME transitions arrive synchronously before a following key.
 // These callbacks publish values only and always forward the game callback.
-LL_TYPE_INSTANCE_HOOK(MenuTextFocusGainedHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$onTextEditComponentGainedFocus,
-    void,::std::string_view const currentText,int maxLength) {
-    app::hook_lifecycle::DetourGuard guard;
-    if(guard && gInputGuardReady.load(std::memory_order_acquire))trackTextInput(NativeTextInputFlag::Focus,true);
-    origin(currentText,maxLength);
-}
-LL_TYPE_INSTANCE_HOOK(MenuTextFocusLostHook,ll::memory::HookPriority::Highest,
-    HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$onTextEditComponentLostFocus,void) {
+LL_TYPE_INSTANCE_HOOK(MenuScreenTextFocusHook,ll::memory::HookPriority::Highest,
+    ScreenView,&ScreenView::_fireSelectedStateChangeEvent,void,
+    TextEditComponent const& component,bool selected) {
     app::hook_lifecycle::DetourGuard guard;
     bool const tracking=guard && gInputGuardReady.load(std::memory_order_acquire);
-    auto const token=tracking?structure::detail::StructureUiState::getInstance().nativeTextInputToken(NativeTextInputFlag::Focus):0;
-    origin();
-    if(tracking && gInputGuardReady.load(std::memory_order_acquire))structure::detail::StructureUiState::getInstance().clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Focus,token);
+    auto& ui=structure::detail::StructureUiState::getInstance();
+    auto const token=tracking && !selected
+        ? ui.nativeTextInputToken(NativeTextInputFlag::Focus):0;
+    if(tracking && selected) trackTextInput(NativeTextInputFlag::Focus,true);
+    origin(component,selected);
+    if(tracking && !selected && gInputGuardReady.load(std::memory_order_acquire))
+        ui.clearNativeTextInputFlagIfCurrent(NativeTextInputFlag::Focus,token);
 }
 LL_TYPE_INSTANCE_HOOK(MenuKeyboardShowHook,ll::memory::HookPriority::Highest,
     HIDControllerGameCoreDesktop,&HIDControllerGameCoreDesktop::$onShowKeyboard,
@@ -211,13 +211,12 @@ MenuInputGuardStatus installMenuInputGuard() {
     if (!gInstallStatus.keyUpInputHookInstalled) {
         gInstallStatus.keyUpInputHookInstalled = MenuKeyUpInputHook::hook() == 0;
     }
-    if(!gTextInputHooksInstalled[0])gTextInputHooksInstalled[0]=MenuTextFocusGainedHook::hook()==0;
-    if(!gTextInputHooksInstalled[1])gTextInputHooksInstalled[1]=MenuTextFocusLostHook::hook()==0;
-    if(!gTextInputHooksInstalled[2])gTextInputHooksInstalled[2]=MenuKeyboardShowHook::hook()==0;
-    if(!gTextInputHooksInstalled[3])gTextInputHooksInstalled[3]=MenuKeyboardHideHook::hook()==0;
-    if(!gTextInputHooksInstalled[4])gTextInputHooksInstalled[4]=MenuImeStartHook::hook()==0;
-    if(!gTextInputHooksInstalled[5])gTextInputHooksInstalled[5]=MenuImeEndHook::hook()==0;
-    if(!gTextInputHooksInstalled[6])gTextInputHooksInstalled[6]=MenuGameplayInputHook::hook()==0;
+    if(!gTextInputHooksInstalled[0])gTextInputHooksInstalled[0]=MenuScreenTextFocusHook::hook()==0;
+    if(!gTextInputHooksInstalled[1])gTextInputHooksInstalled[1]=MenuKeyboardShowHook::hook()==0;
+    if(!gTextInputHooksInstalled[2])gTextInputHooksInstalled[2]=MenuKeyboardHideHook::hook()==0;
+    if(!gTextInputHooksInstalled[3])gTextInputHooksInstalled[3]=MenuImeStartHook::hook()==0;
+    if(!gTextInputHooksInstalled[4])gTextInputHooksInstalled[4]=MenuImeEndHook::hook()==0;
+    if(!gTextInputHooksInstalled[5])gTextInputHooksInstalled[5]=MenuGameplayInputHook::hook()==0;
     gInstallStatus.textInputHooksInstalled=std::all_of(gTextInputHooksInstalled.begin(),gTextInputHooksInstalled.end(),[](bool installed){return installed;});
     structure::detail::StructureUiState::getInstance().setNativeTextInputHooksReady(gInstallStatus.textInputHooksInstalled);
     gInputGuardReady.store(
@@ -236,13 +235,12 @@ bool uninstallMenuInputGuard() {
         if(removed)gTextInputHooksInstalled[index]=false;
         else ok=false;
     };
-    if(gTextInputHooksInstalled[6])removeTextHook(6,MenuGameplayInputHook::unhook());
-    if(gTextInputHooksInstalled[5])removeTextHook(5,MenuImeEndHook::unhook());
-    if(gTextInputHooksInstalled[4])removeTextHook(4,MenuImeStartHook::unhook());
-    if(gTextInputHooksInstalled[3])removeTextHook(3,MenuKeyboardHideHook::unhook());
-    if(gTextInputHooksInstalled[2])removeTextHook(2,MenuKeyboardShowHook::unhook());
-    if(gTextInputHooksInstalled[1])removeTextHook(1,MenuTextFocusLostHook::unhook());
-    if(gTextInputHooksInstalled[0])removeTextHook(0,MenuTextFocusGainedHook::unhook());
+    if(gTextInputHooksInstalled[5])removeTextHook(5,MenuGameplayInputHook::unhook());
+    if(gTextInputHooksInstalled[4])removeTextHook(4,MenuImeEndHook::unhook());
+    if(gTextInputHooksInstalled[3])removeTextHook(3,MenuImeStartHook::unhook());
+    if(gTextInputHooksInstalled[2])removeTextHook(2,MenuKeyboardHideHook::unhook());
+    if(gTextInputHooksInstalled[1])removeTextHook(1,MenuKeyboardShowHook::unhook());
+    if(gTextInputHooksInstalled[0])removeTextHook(0,MenuScreenTextFocusHook::unhook());
     gInstallStatus.textInputHooksInstalled=std::all_of(gTextInputHooksInstalled.begin(),gTextInputHooksInstalled.end(),[](bool installed){return installed;});
     if (gInstallStatus.keyUpInputHookInstalled) {
         if (MenuKeyUpInputHook::unhook()) gInstallStatus.keyUpInputHookInstalled = false;
