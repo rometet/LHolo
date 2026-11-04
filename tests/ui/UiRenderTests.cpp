@@ -410,6 +410,22 @@ void renderPages(ImVec2 viewport, float scale, int state, int language) {
     lholo::structure::SavedPlacement p;p.id=1;p.file="a.mcstructure";p.name="Placement with a long name";
     model.schematic.session.document.placements={p};
     model.schematic.session.document.selected=state?1:0;
+    model.schematicsTab=state>=2?1:0;
+    model.syncAvailable=state!=0;
+    model.syncRole=static_cast<int>(state>=2?lholo::sync::Role::Member:lholo::sync::Role::Viewer);
+    model.syncServerVersion="26.51.5-1.0.0";
+    if(state>=2){
+        lholo::sync::SharedPlacementDto shared;
+        shared.placementId=lholo::sync::Uuid::random();
+        shared.format=lholo::sync::SchematicFormat::Mcstructure;
+        shared.displayName="shared/long-shared-structure-name.mcstructure";
+        shared.dimension=0;shared.originX=4;shared.originY=66;shared.originZ=-11;shared.revision=3;
+        model.sharedItems={shared};
+        model.sharedEditView=std::make_shared<lholo::ui::SharedEditViewState>();
+        model.sharedEditView->beginFrom(shared);
+        model.syncEditPhase=static_cast<int>(state==2?lholo::sync::EditPhase::Granted:lholo::sync::EditPhase::Failed);
+        model.syncEditMessage="LOCKED: locked by another editor";
+    }
     if(state==2 || state==3){
         auto report=std::make_shared<lholo::structure::schematic::Report>();
         report->tally.correct=12;report->tally.missing=4;report->tally.wrongType=3;report->tally.wrongState=1;report->tally.extra=2;report->tally.unknown=7;report->truncated=true;
@@ -642,10 +658,176 @@ void testVerifierMouseRows(float scale=1,bool actualFonts=false) {
     resetFluentTheme();ImGui::DestroyContext(context);
 }
 
+void testSharedEditDraftModel() {
+    using namespace lholo::ui;
+    using lholo::sync::EditPhase;
+    check(clampSharedRotation(-1)==0 && clampSharedRotation(4)==3 && clampSharedRotation(2)==2,"rotation clamps to the wire range");
+    check(clampSharedMirror(-2)==0 && clampSharedMirror(3)==2 && clampSharedMirror(1)==1,"mirror clamps to the wire range");
+    lholo::sync::SharedPlacementDto item;
+    item.placementId=lholo::sync::Uuid::random();
+    item.format=lholo::sync::SchematicFormat::Mcstructure;
+    item.displayName="original.mcstructure";
+    item.dimension=7;item.originX=1;item.originY=2;item.originZ=3;
+    item.rotation=5;item.mirror=9;item.revision=4;item.ownerId="xuid:123";
+    SharedEditViewState draft;
+    check(!draft.draftReady && !draft.editing(item.placementId),"an untouched draft edits nothing");
+    draft.beginFrom(item);
+    check(draft.draftReady && draft.editing(item.placementId),"starting an edit seeds the draft for one entry");
+    check(draft.name=="original.mcstructure" && draft.x==1 && draft.y==2 && draft.z==3,"draft copies name and origin");
+    check(draft.rotation==3 && draft.mirror==2,"draft clamps rotation and mirror on load");
+    draft.name="renamed.mcstructure";draft.x=64;draft.y=-5;draft.z=128;draft.rotation=4;draft.mirror=-1;
+    auto const updated=draft.applyTo(item);
+    check(updated.displayName=="renamed.mcstructure" && updated.originX==64 && updated.originY==-5 && updated.originZ==128,"commit carries the edited name and origin");
+    check(updated.rotation==3 && updated.mirror==0,"commit clamps out-of-range rotation and mirror");
+    check(updated.placementId==item.placementId && updated.revision==item.revision && updated.ownerId==item.ownerId
+        && updated.dimension==item.dimension && updated.format==item.format,"commit preserves immutable identity fields");
+    draft.clear();
+    check(!draft.draftReady && !draft.editing(item.placementId),"clearing drops the draft");
+    check(canCommitEdit(EditPhase::Granted),"granted phase permits commit");
+    check(!canCommitEdit(EditPhase::Pending) && !canCommitEdit(EditPhase::Committing) && !canCommitEdit(EditPhase::Applied)
+        && !canCommitEdit(EditPhase::Failed) && !canCommitEdit(EditPhase::Idle),"commit is gated on the granted phase");
+    check(editPanelOpen(EditPhase::Pending) && editPanelOpen(EditPhase::Granted) && editPanelOpen(EditPhase::Committing)
+        && editPanelOpen(EditPhase::Failed) && !editPanelOpen(EditPhase::Applied) && !editPanelOpen(EditPhase::Idle),
+        "the editor stays open only for active and failed edits");
+    for(auto phase:{EditPhase::Pending,EditPhase::Granted,EditPhase::Committing,EditPhase::Applied,EditPhase::Failed}) {
+        check(editPhaseTextKey(phase)!=lholo::i18n::TextKey::None,"every edit phase has a localized label");
+        check(!std::string_view{lholo::i18n::tr(editPhaseTextKey(phase))}.empty(),"each edit phase label carries text");
+    }
+    check(editPhaseTextKey(EditPhase::Idle)==lholo::i18n::TextKey::None,"idle has no label");
+}
+
+void testSharedEditPanel() {
+    using namespace lholo::ui;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={1400,1800};io.DeltaTime=1.f/60.f;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;io.Fonts->AddFontDefault();io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    MenuModel model;model.schematicsTab=1;model.syncAvailable=true;
+    model.syncRole=static_cast<int>(lholo::sync::Role::Member);model.syncServerVersion="26.51.5-1.0.0";
+    lholo::sync::SharedPlacementDto item;
+    item.placementId=lholo::sync::Uuid::random();item.displayName="shared-structure.mcstructure";
+    item.format=lholo::sync::SchematicFormat::Mcstructure;item.originX=4;item.originY=66;item.originZ=-11;
+    item.rotation=1;item.mirror=0;item.revision=3;
+    model.sharedItems={item};
+    model.sharedEditView=std::make_shared<SharedEditViewState>();
+    model.sharedEditView->beginFrom(item);
+    std::size_t commits{},cancels{};lholo::sync::Uuid committedId{};
+    MenuActions actions;
+    actions.commitSharedEdit=[&](lholo::sync::Uuid const& id){++commits;committedId=id;};
+    actions.cancelSharedEdit=[&](lholo::sync::Uuid const& id){++cancels;};
+    auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
+    auto frame=[&]{ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({1200,1700});
+        ImGui::Begin("SharedEditTest");renderSchematicsPage(model,actions,metrics);ImGui::End();ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"shared edit panel scopes");};
+    auto panelWindow=[&]()->ImGuiWindow*{
+        for(auto* window:context->Windows)if(window->Active
+            && std::string_view{window->Name}.find("##SharedEditPanel")!=std::string_view::npos)return window;
+        return static_cast<ImGuiWindow*>(nullptr);};
+    auto activate=[&](char const* label){
+        auto* panel=panelWindow();check(panel!=nullptr,"shared edit panel exists");
+        context->NavNextActivateId=panel->GetID(label);context->NavNextActivateFlags=ImGuiActivateFlags_None;frame();};
+    model.syncEditPhase=static_cast<int>(lholo::sync::EditPhase::Pending);
+    frame();frame();
+    check(panelWindow()!=nullptr,"editor opens while the lock is pending");
+    activate(lholo::i18n::tr(lholo::i18n::TextKey::SharedEditCommit));
+    check(commits==0,"commit is disabled until the edit lock is granted");
+    model.syncEditPhase=static_cast<int>(lholo::sync::EditPhase::Granted);
+    frame();
+    activate(lholo::i18n::tr(lholo::i18n::TextKey::SharedEditCommit));
+    check(commits==1 && committedId==item.placementId,"a granted lease commits the edited placement");
+    activate(lholo::i18n::tr(lholo::i18n::TextKey::SharedEditCancel));
+    check(cancels==1,"cancel abandons the draft");
+    model.syncEditPhase=static_cast<int>(lholo::sync::EditPhase::Failed);
+    model.syncEditMessage="LOCKED: locked by another editor";
+    frame();frame();
+    check(panelWindow()!=nullptr,"a failed edit keeps the editor visible with its reason");
+    activate(lholo::i18n::tr(lholo::i18n::TextKey::SharedEditCommit));
+    check(commits==1,"a failed edit cannot commit without a new lease");
+    check(!keepDraft(*model.sharedEditView,lholo::sync::EditPhase::Idle,item.placementId),"an idle edit no longer keeps the draft");
+    model.syncEditPhase=static_cast<int>(lholo::sync::EditPhase::Idle);
+    if(!keepDraft(*model.sharedEditView,lholo::sync::EditPhase::Idle,item.placementId))model.sharedEditView->clear();
+    frame();frame();
+    check(panelWindow()==nullptr,"an idle edit closes the editor");
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
+
+void testSchematicsTabSelectionPersists() {
+    using namespace lholo::ui;
+    auto* context=ImGui::CreateContext();context->ErrorCallback=errorCallback;
+    auto& io=ImGui::GetIO();io.IniFilename=nullptr;io.LogFilename=nullptr;
+    io.DisplaySize={1400,1800};io.DeltaTime=1.f/60.f;
+    io.ConfigFlags|=ImGuiConfigFlags_NavEnableKeyboard;io.Fonts->AddFontDefault();io.Fonts->Build();
+    lholo::i18n::setLanguageByCode("en_US");
+    lholo::sync::SharedPlacementDto item;
+    item.placementId=lholo::sync::Uuid::random();item.displayName="shared.mcstructure";
+    item.format=lholo::sync::SchematicFormat::Mcstructure;item.revision=1;
+    MenuActions actions;
+    auto const metrics=calculateMetrics(io.DisplaySize,1);applyFluentTheme(metrics);
+    auto activeWindow=[&](char const* name)->ImGuiWindow*{
+        for(auto* window:context->Windows)if(window->Active
+            && std::string_view{window->Name}.find(name)!=std::string_view::npos)return window;
+        return static_cast<ImGuiWindow*>(nullptr);};
+    // The controller owns the selected tab outside the per-frame model and must
+    // re-apply it to every rebuild (capturing it back after rendering). Losing
+    // that step is the regression that snapped the Shared tab back to Local.
+    int persistedTab=0;
+    auto frame=[&](MenuModel& model){
+        model.schematicsTab=persistedTab;
+        model.sharedItems={item};
+        model.syncAvailable=true;model.syncRole=static_cast<int>(lholo::sync::Role::Member);
+        ImGui::NewFrame();ImGui::SetNextWindowPos({10,10});ImGui::SetNextWindowSize({1200,1700});
+        ImGui::Begin("TabPersistenceTest");renderSchematicsPage(model,actions,metrics);ImGui::End();ImGui::Render();
+        check(context->ErrorCountCurrentFrame==0,"schematics tab test scopes");
+        persistedTab=model.schematicsTab;};
+    auto activateTab=[&](lholo::i18n::TextKey key){
+        auto* page=ImGui::FindWindowByName("TabPersistenceTest");
+        check(page!=nullptr,"schematics page window exists");
+        context->NavNextActivateId=page->GetID(lholo::i18n::tr(key));
+        context->NavNextActivateFlags=ImGuiActivateFlags_None;};
+    MenuModel model;
+    frame(model);
+    check(model.schematicsTab==0 && persistedTab==0,"the local tab is the default selection");
+    check(activeWindow("##SchematicPlacements")!=nullptr && activeWindow("##SharedCatalog")==nullptr,
+        "the local tab renders the local placement list");
+    activateTab(lholo::i18n::TextKey::SharedTabShared);frame(model);
+    check(model.schematicsTab==1,"clicking Shared selects the shared tab");
+    check(persistedTab==1,"the controller captures the shared selection after rendering");
+    check(activeWindow("##SharedCatalog")!=nullptr && activeWindow("##SchematicPlacements")==nullptr,
+        "the shared tab renders the shared catalog");
+    // Next frame the menu model is rebuilt from scratch, exactly as
+    // buildStructureMenuModel does; the selection must survive that rebuild.
+    MenuModel rebuilt;
+    frame(rebuilt);
+    check(rebuilt.schematicsTab==1,"a freshly rebuilt model keeps the shared tab");
+    check(activeWindow("##SharedCatalog")!=nullptr && activeWindow("##SchematicPlacements")==nullptr,
+        "the rebuilt model still renders the shared catalog");
+    activateTab(lholo::i18n::TextKey::SharedTabLocal);frame(rebuilt);
+    check(rebuilt.schematicsTab==0 && persistedTab==0,"switching back to Local is captured");
+    MenuModel localAgain;
+    frame(localAgain);
+    check(localAgain.schematicsTab==0,"a rebuilt model keeps the local tab");
+    check(activeWindow("##SchematicPlacements")!=nullptr && activeWindow("##SharedCatalog")==nullptr,
+        "the rebuilt model renders the local list again");
+    // Page/world churn must not reset the tab: rebuilding for another page keeps
+    // the controller value, so returning to the Schematics page shows the shared tab.
+    persistedTab=1;
+    MenuModel otherPage;
+    otherPage.page=MenuPage::Render;
+    frame(otherPage);
+    check(otherPage.schematicsTab==1 && persistedTab==1,"page churn preserves the selected tab");
+    resetFluentTheme();ImGui::DestroyContext(context);
+}
+
+
 int main() {
     try {
         testMissingOptionalFonts();
         lholo::i18n::initLanguageStore();
+        testSharedEditDraftModel();
+        testSharedEditPanel();
+        testSchematicsTabSelectionPersists();
         testVerifierMouseRows();
         for(float scale:{1.f,2.f,5.f})testVerifierMouseRows(scale,true);
         testComparisonControls();

@@ -12,6 +12,7 @@
 #include "structure/MaterialTracker.h"
 #include "structure/ClientOnlyGrab.h"
 #include "structure/StructureSession.h"
+#include "sync/client/SyncClient.h"
 #include "structure/StructureUiState.h"
 #include "structure/capture/StructureCapture.h"
 #include "structure/formats/StructureFormatLoaders.h"
@@ -48,8 +49,10 @@ auto& uiState() {
 std::array<char, StructurePathUtf8Capacity> gPathBuffer{};
 bool                   gPathInitialized{};
 MenuPage               gActivePage{MenuPage::Projection};
+int                    gSchematicsTab{0};
 auto gVerifierView = std::make_shared<VerifierViewState>();
 auto gMaterialsView = std::make_shared<MaterialsViewState>();
+auto gSharedEditView = std::make_shared<SharedEditViewState>();
 
 struct HotkeyDefinition { HotkeyId id; i18n::TextKey label; };
 constexpr std::array<HotkeyDefinition, input::kHotkeyCount> kHotkeyDefinitions{{
@@ -106,6 +109,25 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.layerAxis = structure::toInt(sessionSnapshot.transform.layerAxis);
     model.status = sessionSnapshot.status;
     model.schematic = structure::schematic::snapshot();
+    {
+        auto const syncSession = sync::SyncClient::instance().snapshot();
+        model.syncAvailable = syncSession.available;
+        model.syncRole = static_cast<int>(syncSession.role);
+        model.syncServerVersion = syncSession.serverVersion;
+        model.sharedItems = sync::SyncClient::instance().catalogItems();
+        // The tab and the page are controller-owned UI state: re-apply them to
+        // every freshly built per-frame model (captured back after rendering).
+        model.schematicsTab = gSchematicsTab;
+        model.sharedEditView = gSharedEditView;
+        model.syncEditPhase = static_cast<int>(syncSession.editPhase);
+        model.syncEditPlacementId = syncSession.editPlacementId.toString();
+        model.syncEditMessage = syncSession.editMessage;
+        // Keep the draft only while the editor is open on the same placement;
+        // reaching idle/applied or retargeting discards it.
+        if (!keepDraft(*gSharedEditView, syncSession.editPhase, syncSession.editPlacementId)) {
+            gSharedEditView->clear();
+        }
+    }
     if(sessionSnapshot.loaded) { model.sizeX=sessionSnapshot.loaded->sizeX;model.sizeY=sessionSnapshot.loaded->sizeY;model.sizeZ=sessionSnapshot.loaded->sizeZ; }
     model.hasLoadedStructure = static_cast<bool>(sessionSnapshot.loaded);
     model.hasSavedProjection = sessionSnapshot.saved.available;
@@ -319,6 +341,79 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
 MenuActions buildStructureMenuActions(bool& refreshModel, std::uint64_t captureRevision) {
     MenuActions actions;
     actions.refreshSchematics = [&refreshModel] { structure::schematic::refreshFiles(); refreshModel=true; };
+    actions.refreshShared = [] { sync::SyncClient::instance().enqueueRefresh(); };
+    actions.loadShared = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            std::string status;
+            auto& client = sync::SyncClient::instance();
+            if (!client.selectSharedPlacement(id, status)) {
+                client.requestDownload(id, status);
+            }
+        });
+    };
+    actions.downloadShared = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            std::string status;
+            sync::SyncClient::instance().requestDownload(id, status);
+        });
+    };
+    actions.editShared = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            std::string status;
+            auto& client = sync::SyncClient::instance();
+            for (auto const& item : client.catalogItems()) {
+                if (item.placementId == id) {
+                    // Seed the draft only when the request is accepted so the
+                    // panel never shows values the server refused to lock.
+                    if (client.requestEdit(id, item.revision, status)) {
+                        gSharedEditView->beginFrom(item);
+                    }
+                    return;
+                }
+            }
+        });
+    };
+    actions.deleteShared = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            std::string status;
+            auto& client = sync::SyncClient::instance();
+            for (auto const& item : client.catalogItems()) {
+                if (item.placementId == id) {
+                    client.requestDelete(id, item.revision, status);
+                    return;
+                }
+            }
+        });
+    };
+    actions.commitSharedEdit = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            std::string status;
+            auto const items = sync::SyncClient::instance().catalogItems();
+            auto const found = std::find_if(items.begin(), items.end(), [&](auto const& item) {
+                return item.placementId == id;
+            });
+            if (found == items.end() || !gSharedEditView->editing(id)) {
+                return;
+            }
+            // The catalog entry supplies the fields the draft does not own.
+            sync::SyncClient::instance().commitEdit(id, gSharedEditView->applyTo(*found), status);
+        });
+    };
+    actions.cancelSharedEdit = [](sync::Uuid const& id) {
+        sync::SyncClient::instance().enqueueUi([id] {
+            sync::SyncClient::instance().cancelEdit(id);
+            gSharedEditView->clear();
+        });
+    };
+    actions.shareLocalPlacement = [] {
+        sync::SyncClient::instance().enqueueUi([] {
+            std::string status;
+            auto const snapshot = structure::schematic::snapshot();
+            if (snapshot.session.document.selected != 0) {
+                sync::SyncClient::instance().requestShare(snapshot.session.document.selected, status);
+            }
+        });
+    };
     actions.importSavedSchematic = [&refreshModel] { structure::schematic::importSavedProjection(); refreshModel=true; };
     actions.placeSchematic = [&refreshModel](auto const& file) { structure::schematic::place(file); refreshModel=true; };
     actions.selectPlacement = [&refreshModel](auto id) { structure::schematic::select(id); refreshModel=true; };
@@ -489,6 +584,7 @@ void renderStructureMenu() {
     if(model.page==MenuPage::Materials && previousPage!=MenuPage::Materials)structure::requestMaterialList();
     uiState().setUiInteractionBlocked(ImGui::GetIO().WantTextInput || ImGui::IsAnyItemActive());
     gActivePage = model.page;
+    gSchematicsTab = model.schematicsTab;
     if (!refreshModel) applyStructureMenuModel(model, effectiveScale);
     uiState().consumeOpeningInputBlockFrame();
     if (model.closeRequested) {

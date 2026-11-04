@@ -12,7 +12,7 @@
 [**ダウンロード**](https://github.com/rometet/LHolo/releases) · [**導入方法**](#導入方法) · [**基本操作**](#基本操作) · [English](docs/README_EN.md) · [简体中文](docs/README_ZH_CN.md)
 
 > [!IMPORTANT]
-> 公開中の最新プレリリースは **`v26.51.2-ja.12-rc.1`** です。対応環境は **Minecraft Bedrock 1.26.51.01 / LeviLamina Client 26.51.5 / Windows x64**。この公開ビルドは Minecraft 26.60 向けではありません。
+> 安定利用向けの従来版と、共有機能を含む開発版は区別して配布しています。対応環境は **Minecraft Bedrock 1.26.51.01 / LeviLamina Client 26.51.5 / Windows x64**。このブランチのSync機能は Minecraft 26.60 向けではありません。バージョンごとの内容は [Releases](https://github.com/rometet/LHolo/releases) を参照してください。
 
 ## 主な機能
 
@@ -71,6 +71,18 @@
 
 **詳しい操作方法:** [日本語ガイド](docs/README_JA.md) · [Praxis / LHolo 操作ガイド](docs/OPERATION_GUIDE_JA.md)
 
+## 共有同期（LHolo Integrated Sync / 実験版）
+
+同じBDSに参加する複数のプレイヤーで、設計図の**共有・ダウンロード・配置座標／回転／反転の同期**ができます。Java版Syncmaticaと目的は近いものの、Java版の通信プロトコルとは互換ではありません。
+
+- **プレイヤー**: Sync対応クライアント版LHoloを導入し、ワールドで `Insert` → **配置 → 共有**。設計図を読み込んで **共有する**、または共有一覧の項目から **読み込む／再取得** を選びます。
+- **サーバー管理者**: 同じ26.51系のBDS + LeviLamina Serverへ `LHoloSyncServer` を導入します。新規参加者は原則 `viewer` のため、アップロードには `member` または `admin` 権限が必要です。
+- **編集**: 共有一覧の **編集** でロックを取得し、座標・回転などを変更して **適用**。**キャンセル**でロックを解放します。他の人が編集中ならロック取得は拒否されます。
+
+**導入・使い方・権限・管理者コマンド・既知の制限:** [LHolo Integrated Sync 日本語ガイド](docs/LHoloSync.md)
+
+> [!WARNING]
+> 共有同期は開発版です。別々のXboxアカウントの2台でファイル転送、双方向の座標・回転同期、編集ロックと競合拒否までは確認済みですが、バニラクライアント共存、権限変更・切断時の例外処理、大容量転送などは未検証です。**サブリージョン単位の独立した変形はV1に含まれません**。重要なワールドはバックアップしてください。
 ## 実験的機能について
 
 設置支援などの実験的機能は、内容を確認してから有効にしてください。サーバーのルールや保護機能に抵触する場合があります。
@@ -90,11 +102,13 @@
 - このフォークは日本語を初期言語とし、中央パネル形式の UI を採用しています。他の言語への切り替えも可能です。
 - プレリリースには動作未確認の組み合わせや既知の制約があります。重要なワールドやインベントリはバックアップしてから試してください。
 - 旧バージョンのスクリーンショットや技術検証の記録は、現行 UI・現行バージョンでの動作保証ではありません。
+- **共有同期（LHolo Integrated Sync）は任意機能です。** LHolo 自体は従来どおりサーバー不要で動作します。共有を使う場合のみ、対応する BDS に管理者が `LHoloSyncServer` プラグインを導入します。プレイヤーは通常の LHolo を更新するだけで、追加 Mod は不要です。詳しくは [docs/LHoloSync.md](docs/LHoloSync.md) を参照してください。
 
 ## ドキュメント
 
 - [更新履歴](CHANGELOG.md) / [リリース一覧](https://github.com/rometet/LHolo/releases)
 - [日本語の操作ガイド](docs/README_JA.md)
+- [共有同期（LHolo Integrated Sync）の導入と互換性](docs/LHoloSync.md)
 - [ビルド・ソース情報](SOURCE_BUILD.md) / [開発者向けドキュメント](DEVELOPMENT.md)
 - [ライセンス](LICENSE) / [サードパーティの通知](THIRD_PARTY_NOTICES.md)
 

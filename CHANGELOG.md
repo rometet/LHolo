@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — LHolo Integrated Sync V1 (client + optional server plugin)
+
+- Adds optional server-shared schematics: players publish a local `.litematic`/`.mcstructure` placement to a compatible BDS and others load it at the same world position, rotation, mirror and dimension. LHolo stays a single client mod; only server administrators add `LHoloSyncServer`.
+- Protocol `LHolo Sync Protocol 1.0` over a single LeviLamina runtime packet: HELLO/HELLO_ACK, paged catalog + deltas, content-addressed SHA-256 file transfer (48 KiB chunks, windowed ACK, resume), placement create/update/delete with revisions, and lease-based edit locks.
+- Client: verified content cache with atomic publish and long-path support, shared catalog, project-on-select bridge to the existing single active projection, and a "共有 / Shared" tab in the Schematics page with localized strings (ja/en/zh_CN/zh_TW/ru).
+- Server: SQLite metadata (WAL) with tombstone deletes, content-addressed object store, quotas/limits, config/identity persistence, and `/lholosync status|role|delete|unlock|gc|reload` administrator commands.
+- Shared-tab editing: a placement edit takes a server lease (commit stays disabled until it is granted), auto-renews while held, and releases on cancel or failure. Commit sends `PLACEMENT_UPDATE` with the edited name/position/rotation/mirror and refreshes the catalog for every client; pending/locked/committing/failed/timeout states are shown in place.
+- Verified: real client (LeviLauncher 1.26.51.01 + LeviLamina 26.51.5 + LHolo) joined an isolated BDS with `LHoloSyncServer` and completed HELLO/HELLO_ACK; a LeviLamina-only client also joined. Unit suites: protocol 108, storage 90, client logic 53, existing logic 1,254,103, UI frames clean. File transfer, catalog UI, edit locks and vanilla-client coexistence still require end-to-end runtime verification.
+- See `docs/LHoloSync.md`.
+
 ## Unreleased — upstream verifier state fixes (2026-11-02)
 
 - Port four narrowly scoped upstream comparison fixes for scaffolding stability markers, daylight detector output, leaf persistence/update bits, and native door/trapdoor property gating.

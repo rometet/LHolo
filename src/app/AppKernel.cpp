@@ -18,6 +18,8 @@
 #include "structure/capture/StructureCapture.h"
 #include "structure/MaterialTracker.h"
 #include "structure/StructureLoader.h"
+#include "sync/client/ClientPacketAdapter.h"
+#include "sync/client/SyncClient.h"
 
 #include "ll/api/mod/NativeMod.h"
 
@@ -84,6 +86,11 @@ bool AppKernel::enable() {
             logger.warn("GUI overlay hotkey hooks are not ready; lholo will retry initialization");
         }
         if(!resourcepacks::state().enable(owner))return false;
+        if (!sync::SyncClient::instance().install()) {
+            // Server sync is an optional capability: a transport/registration
+            // failure must not break the core client projection feature.
+            logger.warn("LHolo sync transport unavailable; continuing without server sync");
+        }
         logger.info("LHolo enabled. Type lholo to open the projection menu.");
         // Glass R5 remains the authoritative transparency path.
         logger.info("LHoloGlassR5 build=private-projection-blend-depthwrite0 test-only");
@@ -171,6 +178,11 @@ bool AppKernel::disable() {
     // Cancellation alone is not enough: std::async may still be executing code
     // in this DLL. Join it before releasing structure or mapper state.
     structure::shutdownPendingStructureLoad();
+
+    // Detach sync listeners and mark the session disabled before any state is
+    // released. The statically registered packet handler of LL cannot be
+    // unregistered on 26.51.x; it becomes inert once the session is disabled.
+    sync::SyncClient::instance().uninstall();
 
     structure::saveSettings();
     structure::detail::shutdownMaterialTracker();

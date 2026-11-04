@@ -25,6 +25,8 @@ add_requires("levibuildscript 0.6.1")
 add_requires("imgui v1.91.9", {configs = {shared = false, win32 = true, dx11 = true, no_demo_windows = true}})
 add_requires("minhook v1.3.4", {configs = {shared = false}})
 add_requires("zlib v1.3.2")
+add_requires("nlohmann_json")
+add_requires("sqlite3")
 
 if not has_config("vs_runtime") then
     set_runtimes("MD")
@@ -119,6 +121,15 @@ rule("lholo.i18n.resources")
         target:add("files", manifest)
     end)
 rule_end()
+
+-- The client mod and the dedicated-server plugin share this repository but are
+-- built against different LeviLamina SDKs selected by `--target_type`. A single
+-- xmake configuration resolves exactly one SDK, so only the matching target
+-- group is defined here. Build the client with `--target_type=client` (default)
+-- and the server plugin with `--target_type=server`.
+local lholo_server_build = (get_config("target_type") or "client") == "server"
+
+if not lholo_server_build then
 
 target("LHolo")
     if has_config("waterlogged_geometry_probe") then
@@ -256,6 +267,7 @@ target("LHoloUiBench")
     add_includedirs("src")
     add_files("src/i18n/**.cpp")
     add_files("src/ui/MenuPages.cpp", "src/ui/VerifierPage.cpp", "src/ui/MaterialsPage.cpp", "src/ui/MenuWidgets.cpp", "src/ui/FluentTheme.cpp")
+    add_files("src/sync/common/SharedTypes.cpp")
     add_files("tests/bench_ui/**.cpp")
     add_files("src/structure/StructureUiState.cpp")
     add_cxflags("/utf-8")
@@ -279,6 +291,7 @@ target("LHoloUiTests")
     add_includedirs("src")
     add_files("src/i18n/**.cpp")
     add_files("src/ui/LHoloMenu.cpp", "src/ui/MenuPages.cpp", "src/ui/VerifierPage.cpp", "src/ui/MaterialsPage.cpp", "src/ui/MenuWidgets.cpp")
+    add_files("src/sync/common/SharedTypes.cpp")
     add_files("src/ui/ManualPlacementSettings.cpp", "src/ui/FluentTheme.cpp")
     add_files("src/overlay/OverlayFonts.cpp")
     add_files("tests/ui/UiRenderTests.cpp")
@@ -339,6 +352,7 @@ target("LHoloVerifierRenderTests")
     add_includedirs("src")
     add_files("src/i18n/**.cpp")
     add_files("src/ui/LHoloMenu.cpp", "src/ui/MenuPages.cpp", "src/ui/VerifierPage.cpp", "src/ui/MaterialsPage.cpp", "src/ui/MenuWidgets.cpp")
+    add_files("src/sync/common/SharedTypes.cpp")
     add_files("src/ui/ManualPlacementSettings.cpp", "src/ui/FluentTheme.cpp")
     add_files("src/overlay/OverlayFonts.cpp", "src/vendor/imgui_impl_dx11.cpp")
     add_files("tests/ui/VerifierRenderTests.cpp")
@@ -356,6 +370,7 @@ target("LHoloMaterialsTests")
     add_files("src/i18n/**.cpp", "src/io/AtomicOutput.cpp", "src/io/MaterialExport.cpp")
     add_files("src/structure/StructureUiState.cpp", "src/ui/HotkeyFormat.cpp")
     add_files("src/ui/MenuPages.cpp", "src/ui/MaterialsPage.cpp", "src/ui/MenuWidgets.cpp", "src/ui/FluentTheme.cpp")
+    add_files("src/sync/common/SharedTypes.cpp")
     add_files("tests/materials/**.cpp")
     add_cxflags("/utf-8")
     add_syslinks("user32")
@@ -407,3 +422,128 @@ target("LHoloWorldPackReloadTests")
     add_defines("NOMINMAX", "UNICODE")
     add_syslinks("d3d11", "d3d12", "dxgi")
     add_packages("imgui")
+
+-- LHolo Integrated Sync shared protocol layer tests (§12.1): frame codec,
+-- SHA-256, validation and control-message codecs. No Minecraft runtime needed.
+target("LHoloSyncTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src")
+    add_files("tests/sync/SyncProtocolTests.cpp")
+    add_files("src/sync/common/*.cpp")
+    add_cxflags("/utf-8", "/W4")
+    add_packages("nlohmann_json")
+
+-- LHolo Integrated Sync shared-placement edit completion rules (section 4.5):
+-- reply correlation and the catalog-based confirmation of a commit whose RESULT
+-- was never observed.
+target("LHoloSyncEditTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src")
+    add_files("tests/sync/EditCompletionTests.cpp")
+    add_files("src/sync/common/*.cpp")
+    add_cxflags("/utf-8", "/W4")
+    add_packages("nlohmann_json")
+
+-- LHolo Integrated Sync server storage tests (§12.1): content-addressed file
+-- store and the SQLite placement repository (dedupe, revisions, tombstones,
+-- paging, permissions, client-operation idempotency, restart persistence).
+target("LHoloSyncStoreTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src", "server")
+    add_files("tests/sync/StoreTests.cpp")
+    add_files("src/sync/common/*.cpp")
+    add_files("server/FileStore.cpp", "server/PlacementRepository.cpp", "server/TransferReceiver.cpp")
+    add_cxflags("/utf-8", "/W4")
+    add_packages("nlohmann_json", "sqlite3")
+
+-- LHolo Integrated Sync client-side logic tests: content cache and catalog
+-- sequence/gap handling.
+target("LHoloSyncClientTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src")
+    add_files("tests/sync/ClientLogicTests.cpp")
+    add_files("src/sync/common/*.cpp")
+    add_files("src/sync/client/ClientCache.cpp", "src/sync/client/SharedCatalog.cpp")
+    add_cxflags("/utf-8", "/W4")
+    add_packages("nlohmann_json")
+
+-- LHolo Integrated Sync integration test: server components (FileStore,
+-- repository, transfer receiver) and client components (cache, catalog,
+-- chunk assembly) driven through the real payload codecs.
+target("LHoloSyncIntegrationTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src", "server")
+    add_files("tests/sync/IntegrationTests.cpp")
+    add_files("src/sync/common/*.cpp")
+    add_files("src/sync/client/ClientCache.cpp", "src/sync/client/SharedCatalog.cpp")
+    add_files("server/FileStore.cpp", "server/PlacementRepository.cpp", "server/TransferReceiver.cpp")
+    add_cxflags("/utf-8", "/W4")
+    add_packages("nlohmann_json", "sqlite3")
+
+end -- if not lholo_server_build
+
+if lholo_server_build then
+
+-- LHoloSyncServer — the only artifact a BDS server administrator installs. It
+-- links the LeviLamina server SDK plus the shared (Minecraft-free) sync protocol
+-- layer. It must NOT link imgui / minhook / DX11 or any client-only header.
+target("LHoloSyncServer")
+    set_kind("shared")
+    set_languages("c++20")
+    set_symbols("debug")
+    add_shflags("/OPT:REF", "/OPT:ICF", {force = true})
+    add_rules("@levibuildscript/linkrule")
+    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.5-1.0.0"})
+    add_cxflags(
+        "/utf-8",
+        "/W4",
+        "/w44265",
+        "/w44289",
+        "/w44296",
+        "/w45263",
+        "/w44738",
+        "/w45204"
+    )
+    add_cxflags(
+        "/EHs",
+        "-Wno-microsoft-cast",
+        "-Wno-invalid-offsetof",
+        "-Wno-c++2b-extensions",
+        "-Wno-microsoft-include",
+        "-Wno-overloaded-virtual",
+        "-Wno-missing-field-initializers",
+        {tools = {"clang_cl"}}
+    )
+    add_defines("NOMINMAX", "UNICODE")
+    add_syslinks("user32")
+    add_packages("levilamina", "sqlite3")
+    add_includedirs("src", "server")
+    add_files("server/**.cpp")
+    add_files("src/sync/common/*.cpp")
+    after_build(function (target)
+        -- The modpacker rule substitutes the shared root manifest template; give
+        -- the server plugin its own accurate manifest (entry/name/description).
+        local outputdir = path.join(os.projectdir(), "bin", target:name())
+        local manifestfile = path.join(outputdir, "manifest.json")
+        local manifest = [[{
+  "name": "LHoloSyncServer",
+  "entry": "LHoloSyncServer.dll",
+  "version": "26.51.5-1.0.0",
+  "type": "native",
+  "platform": "server",
+  "description": "LHolo Integrated Sync dedicated-server plugin for BDS + LeviLamina. Server administrators install only this plugin; players update the regular LHolo client mod."
+}]]
+        io.writefile(manifestfile, manifest)
+    end)
+
+end -- if lholo_server_build
