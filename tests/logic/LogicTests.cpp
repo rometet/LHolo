@@ -38,6 +38,7 @@
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/LiquidReplayRules.h"
@@ -869,7 +870,20 @@ void testPraxisCompatLiquidColor() {
     LHOLO_CHECK(!lavaResult.waterSeedApplied);
     LHOLO_CHECK(lavaResult.packed == nativeWhite);
     auto const lavaDerived = applyPraxisCompatMissingAbgr(lavaResult.packed);
-    LHOLO_CHECK(applyPraxisCompatLiquidAlpha(lavaDerived, false) == lavaDerived);
+    auto const lavaFinal = applyPraxisCompatLiquidAlpha(lavaDerived, false);
+    LHOLO_CHECK(PraxisLavaDerivedAlpha == 176);
+    LHOLO_CHECK(unpackAbgr(lavaFinal).alpha == PraxisLavaDerivedAlpha);
+    LHOLO_CHECK((lavaFinal & 0x00FFFFFFU) == (lavaDerived & 0x00FFFFFFU));
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.5F)).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.F)).alpha == 0);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 1.F)).alpha == 176);
+    // Proxy and native replay share the same fluid-specific alpha contract.
+    auto const fallbackLava = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFF1080FFU, false), 0.5F);
+    auto const fallbackWater = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFFE6B333U, true), 0.5F);
+    LHOLO_CHECK(unpackAbgr(fallbackLava).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(fallbackWater).alpha == 80);
 }
 
 void testNativeLiquidInternalFaceCull() {

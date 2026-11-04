@@ -1990,9 +1990,6 @@ void buildLiquidProxySectionMesh(
             static_cast<int>(liquidProxyIndices.size() * 24),
             false
         );
-        auto const alpha = static_cast<uint>(std::lround(
-            normalizedLiquidProjectionOpacity(structureOpacity) * 255.0f
-        ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
             auto const* expectedLiquid = transformExpectedBlock(
@@ -2125,9 +2122,13 @@ void buildLiquidProxySectionMesh(
                 return count > 0 ? sum / static_cast<float>(count) : surface;
             };
 
-            auto const tint = isLava
-                ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
-                : (LiquidWaterTintAbgrRgb | (alpha << 24U));
+            // Native UV/face tint stays unchanged. Derive the same base
+            // alpha used by Exact Replay, then apply structure opacity.
+            auto const baseTint = (isLava ? LiquidLavaTintAbgrRgb : LiquidWaterTintAbgrRgb)
+                | 0xFF000000U;
+            auto const tint = applyLiquidProjectionOpacity(
+                applyPraxisCompatLiquidAlpha(baseTint, !isLava),
+                structureOpacity);
             auto const topColor = liquidProxyFaceColor(tint, LiquidProxyFace::Top);
             auto const bottomColor = liquidProxyFaceColor(tint, LiquidProxyFace::Bottom);
             auto const nsColor = liquidProxyFaceColor(tint, LiquidProxyFace::NorthSouth);

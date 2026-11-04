@@ -546,8 +546,9 @@ void renderProjection(
                 praxisCompatLiquidSections
             );
             logger().info(
-                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} waterSeedVertices={} lavaNativeVertices={}",
+                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} lavaAlpha={} waterSeedVertices={} lavaNativeVertices={}",
                 PraxisWaterDerivedAlpha,
+                PraxisLavaDerivedAlpha,
                 telemetry.praxisCompatWaterSeedVertices,
                 telemetry.praxisCompatLavaNativeVertices
             );

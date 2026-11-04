@@ -1235,7 +1235,7 @@ void submitProjectionMeshPass(
                                 std::memory_order_acq_rel
                             )) {
                             logger().info(
-                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha=255 projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha={} projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
                                         == PraxisLiquidMaterialCandidate::BlendBlock
                                     ? "mMatBlendBlock"
@@ -1243,6 +1243,7 @@ void submitProjectionMeshPass(
                                 signTextReady ? 1 : 0,
                                 blendMaterialReady ? 1 : 0,
                                 PraxisWaterDerivedAlpha,
+                                PraxisLavaDerivedAlpha,
                                 unpackAbgr(data.derivedColors.front()).alpha,
                                 telemetry.praxisCompatImmediateSubmitsPerFrame
                             );
