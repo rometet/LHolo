@@ -28,7 +28,7 @@ namespace lholo::overlay {
 namespace {
 
 Vec3 renderCameraPosition(BaseActorRenderContext const& renderContext) {
-    auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
+    auto const camera = render::readRenderCameraPosition(renderContext);
     return camera ? Vec3{camera->x, camera->y, camera->z} : Vec3{};
 }
 

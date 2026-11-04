@@ -25,6 +25,7 @@
 #include "mc/world/level/block/NeighborDirection.h"
 #include "mc/world/level/block/VanillaStates.h"
 #include "mc/world/level/block/actor/BlockActorType.h"
+#include "mc/world/level/block/components/BlockConnectionComponent.h"
 #include "mc/world/level/block/states/VanillaBlockStateTransformUtils.h"
 #include "mc/world/level/levelgen/structure/LegacyStructureSettings.h"
 
@@ -100,37 +101,20 @@ Block const* transformExpectedBlock(Block const* block, Rotation rotation, Mirro
 }
 
 Block const& withFlattenedConnections(
-    Block const&    block,
-    BlockSource&    region,
-    BlockPos const& position
+    Block const& block, BlockSource& region, BlockPos const& position
 ) {
-    // LeviLamina 26.60 client headers expose BlockType::connectionUpdate only
-    // for server builds. Preserve the original state rather than using an
-    // unavailable engine function or touching the real client world.
-#if defined(LL_PLAT_C)
-    (void)region;
-    (void)position;
-    return block;
-#else    auto const& blockType = block.getBlockType();
-    if (!blockType.isFenceBlock() && !blockType.isThinFenceBlock()) return block;
-    // The vanilla connection update knows every family's connection rules,
-    // including the data-driven ones (glass panes, iron bars) whose arms are
-    // not stored in the builtin Connection states, so deriving states by hand
-    // cannot cover them. It also APPLIES the recomputed block to the region
-    // it is given — that filled the real world with ghost blocks — so run it
-    // with region writes suppressed and use only its return value. Neighbor
-    // reads still answer with the projected blocks while a tessellation scope
-    // is active, and with the real world during correction.
+    // Bedrock client 26.60 exposes the block connection component, rather than
+    // the server-only BlockType::connectionUpdate entry point. This preserves
+    // native neighbor-dependent stairs, fences, panes and bars.
+    auto const* connections = block.tryGetComponent<BlockConnectionComponent>();
+    if (!connections) return block;
     ScopedRegionWriteSuppression suppression;
-    NeighborBlockDirections      directions{};
-    auto&                        directionSet = directions.mDirections.get();
-    for (int direction = 0; direction < static_cast<int>(NeighborDirection::Count); ++direction) {
+    NeighborBlockDirections directions{};
+    auto& directionSet = directions.mDirections.get();
+    for (int direction = 0; direction < static_cast<int>(NeighborDirection::Count); ++direction)
         directionSet.insert(static_cast<NeighborDirection>(direction));
-    }
-    return blockType.connectionUpdate(region, block, position, directions);
-#endif
+    return connections->handleConnectionUpdate(region, block, position, directions);
 }
-
 bool projectionStatesMatch(Block const& expected, Block const& actual) {
     if (expected == actual) return true;
     auto const& typeName = expected.getTypeName();
