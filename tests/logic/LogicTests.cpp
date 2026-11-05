@@ -39,6 +39,7 @@
 #include "place/PlacementState.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/LiquidReplayRules.h"
@@ -820,6 +821,28 @@ void testNativeLiquidUvRemap() {
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
 }
 
+void testGlassLiquidFaceOrder() {
+    using namespace lholo::projection::detail;
+    // This is the original upstream ed9944f failure: the back glass, water
+    // and front glass must interleave, not submit as two material families.
+    std::vector<ProjectionTransparentFaceKey> faces{
+        {{0,0,-1},0},{{0,0,-3},1},{{0,0,-2},2}
+    };
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,2,0}));
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,1})
+        == (std::vector<std::uint32_t>{0,2,1}));
+    faces={{{0,0,-1},2},{{0,0,-1},1}};
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,0}));
+    std::array<std::array<float,3>,4> fullFace{{
+        {1,0,0},{1,1,0},{1,1,1},{1,0,1}
+    }};
+    LHOLO_CHECK(projectionUnitFaceNeighbor(fullFace,{0,0,0})
+        == (std::array<int,3>{1,0,0}));
+    fullFace[2][2]=0.5f;
+    LHOLO_CHECK(!projectionUnitFaceNeighbor(fullFace,{0,0,0}));
+}
 void testPraxisCompatLiquidColor() {
     auto const expect = [](std::uint32_t source, PraxisCompatRgba8 expected) {
         auto const derived = applyPraxisCompatMissingAbgr(source);
@@ -2591,6 +2614,7 @@ int main() {
     lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
+    testGlassLiquidFaceOrder();
     testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();

@@ -51,6 +51,19 @@ namespace lholo::projection::detail {
 using TextureVariant =
     std::variant<std::monostate, mce::TexturePtr, mce::ClientTexture, mce::ServerTexture>;
 
+struct MixedGlassLiquidMesh {
+    // A source can disappear on any accepted section upload, world reload or
+    // placement mutation. Use typed source identities + revision as the key;
+    // native GPU buffers never outlive their matching section owners.
+    void const* glassSource{};
+    void const* liquidSource{};
+    std::uint64_t uploadedRevision{};
+    std::size_t vertexCount{};
+    std::array<float, 3> axis{};
+    bool axisValid{};
+    std::vector<std::uint32_t> order;
+    std::unique_ptr<mce::Mesh> mesh;
+};
 struct SectionState {
     // Conservative geometry AABB; fallback visibility stays true until layout
     // and camera matrices are ready.
@@ -80,6 +93,7 @@ struct SectionState {
     // Mesh::mMeshData while creating GPU buffers, so the renderer must never
     // use the uploaded Mesh as the source for a later camera sort.
     std::unique_ptr<mce::MeshData> blendSource;
+    std::unique_ptr<MixedGlassLiquidMesh> mixedGlassLiquid;
 };
 
 struct ProjectionAnimatedBubbleCell {
@@ -113,6 +127,7 @@ struct RegionMeshRetention {
 };
 
 struct ProjectionState {
+    std::size_t mixedGlassLiquidCursor{};
     std::unique_ptr<RegionMeshRetention> pendingRegionReuse;
     // R11 animated schematic particles. Only the render callback reads/writes
     // this bounded cache, never the async section-build worker. All positions

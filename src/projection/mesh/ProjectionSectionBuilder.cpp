@@ -23,6 +23,7 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
@@ -405,6 +406,46 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     return outcome;
 }
 
+template<class T>
+void compactMissingGlassQuadStream(std::vector<T>& field, std::span<std::uint8_t const> remove) {
+    if (field.empty()) return;
+    std::size_t written{};
+    for (std::size_t quad = 0; quad < remove.size(); ++quad) {
+        if (remove[quad]) continue;
+        for (std::size_t corner = 0; corner < 4; ++corner)
+            field[written++] = std::move(field[quad * 4 + corner]);
+    }
+    field.resize(written);
+}
+
+// Only compact a complete unindexed QuadList with entirely compatible
+// native vertex streams. No user-space byte copies or guesses about the SDK.
+bool cullMissingGlassQuads(mce::MeshData& data, std::span<std::uint8_t const> remove) {
+    auto const count = data.mPositions.get().size();
+    if (data.mMode != mce::PrimitiveMode::QuadList || !data.mIndices.get().empty()
+        || count != remove.size() * 4 || count == 0)
+        return false;
+    std::array<std::size_t, 10> const fieldSizes{
+        data.mNormals.get().size(), data.mTangents.get().size(),
+        data.mColors.get().size(), data.mBoneId0s.get().size(),
+        data.mTextureUVs[0].get().size(), data.mTextureUVs[1].get().size(),
+        data.mTextureUVs[2].get().size(), data.mPBRTextureIndices.get().size(),
+        data.mMERS.get().size(), data.mGeoType.get().size()
+    };
+    if (!nativeLiquidPerVertexFieldCountsMatch(count, fieldSizes)) return false;
+    compactMissingGlassQuadStream(data.mPositions.get(), remove);
+    compactMissingGlassQuadStream(data.mNormals.get(), remove);
+    compactMissingGlassQuadStream(data.mTangents.get(), remove);
+    compactMissingGlassQuadStream(data.mColors.get(), remove);
+    compactMissingGlassQuadStream(data.mBoneId0s.get(), remove);
+    for (std::size_t uv = 0; uv < 3; ++uv)
+        compactMissingGlassQuadStream(data.mTextureUVs[uv].get(), remove);
+    compactMissingGlassQuadStream(data.mPBRTextureIndices.get(), remove);
+    compactMissingGlassQuadStream(data.mMERS.get(), remove);
+    compactMissingGlassQuadStream(data.mGeoType.get(), remove);
+    // AABB and UV AABB stay conservatively larger than the new geometry.
+    return true;
+}
 } // namespace
 
 void buildCorrectionSectionMeshes(
@@ -745,6 +786,14 @@ void buildProjectionSection(
             std::max(128, static_cast<int>(bucketBlocks.size() * 24)),
             false
         );
+        // Keep exact source ownership for complete native Glass cubes.
+        // Only full faces may be hidden against an identical Missing cube.
+        struct GlassRange {
+            std::size_t first{}, last{}, structureIndex{};
+            BlockPos position;
+            Block const* block{};
+        };
+        std::vector<GlassRange> glassRanges;
         bool bucketTessellated{};
         if (bucket == RenderBucket::Blend) {
             state.sections[section].blendSortKeyValid = false;
@@ -952,6 +1001,17 @@ void buildProjectionSection(
                     colors[colorIndex], structureOpacity
                 );
             }
+            if (bucket == RenderBucket::Blend && geometryAdded
+                && renderBlock.getBlockType().mMaterial.get().mType
+                    == SharedTypes::v1_26_20::MaterialType::Glass) {
+                auto const* glassGraphics = BlockGraphics::getForBlock(renderBlock);
+                if (glassGraphics && glassGraphics->mBlockShape == BlockShape::Block) {
+                    glassRanges.push_back({
+                        firstPosition, tessellator.mMeshData->mPositions.get().size(),
+                        layered.structureIndex, layered.position, &renderBlock
+                    });
+                }
+            }
             bucketTessellated = true;
         }
         auto& destination = state.sections[section].meshes[bucketIndex];
@@ -972,7 +1032,93 @@ void buildProjectionSection(
             vertex.y -= static_cast<float>(origin.y);
             vertex.z -= static_cast<float>(origin.z);
         }
-        // Tessellator::end() can auto-generate supplementary vertex streams.
+        // Backport of upstream ed9944f glass visibility: adjacent identical,
+        // unplaced full glass cubes must not expose duplicate interior faces.
+        // Keep stained colors, partial panes, non-Missing neighbors, and all
+        // liquid geometry unchanged. The native Blend source remains the GPU
+        // authority for everything else.
+        std::vector<std::uint8_t> hiddenGlassFaces;
+        if (bucket == RenderBucket::Blend && !glassRanges.empty()) {
+            auto const& data = tessellator.mMeshData.get();
+            auto const& positions = data.mPositions.get();
+            if (data.mMode == mce::PrimitiveMode::QuadList
+                && data.mIndices.get().empty() && positions.size() % 4 == 0) {
+                hiddenGlassFaces.assign(positions.size() / 4, 0);
+                for (auto const& glass : glassRanges) {
+                    if (state.buildCorrectionState(glass.structureIndex) != CorrectionState::Missing)
+                        continue;
+                    std::array<float, 3> const cell{
+                        static_cast<float>(glass.position.x - origin.x),
+                        static_cast<float>(glass.position.y - origin.y),
+                        static_cast<float>(glass.position.z - origin.z)
+                    };
+                    for (std::size_t face = glass.first / 4; face < glass.last / 4
+                        && face < hiddenGlassFaces.size(); ++face) {
+                        std::array<std::array<float, 3>, 4> vertices{};
+                        for (std::size_t corner = 0; corner < 4; ++corner) {
+                            auto const& pos = positions[face * 4 + corner];
+                            vertices[corner] = {pos.x, pos.y, pos.z};
+                        }
+                        auto const neighborDelta = projectionUnitFaceNeighbor(vertices, cell);
+                        if (!neighborDelta) continue;
+                        auto const neighbor = std::tuple{
+                            glass.position.x + (*neighborDelta)[0],
+                            glass.position.y + (*neighborDelta)[1],
+                            glass.position.z + (*neighborDelta)[2]
+                        };
+                        auto const found = state.expectedWorldBlocks->find(neighbor);
+                        auto const index = state.expectedWorldBlockIndices->find(neighbor);
+                        if (found != state.expectedWorldBlocks->end()
+                            && found->second == glass.block
+                            && index != state.expectedWorldBlockIndices->end()
+                            && state.buildCorrectionState(index->second) == CorrectionState::Missing)
+                            hiddenGlassFaces[face] = 1;
+                    }
+                }
+            }
+        }
+        auto const hiddenGlassCount = static_cast<std::size_t>(
+            std::count(hiddenGlassFaces.begin(), hiddenGlassFaces.end(), std::uint8_t{1}));
+        if (hiddenGlassCount != 0) {
+            // Finalize native bookkeeping before removing source quads. Mesh
+            // construction from the typed CPU fields handles the 26.60 SDK.
+            auto native = tessellator.end(
+                Tessellator::UploadMode::Never,
+                meshNames[bucketIndex], SupplementaryFieldAutoGenerationMode{1});
+            auto& data = native.mMeshData.get();
+            if (cullMissingGlassQuads(data, hiddenGlassFaces)) {
+                auto& glassSection = state.sections[section];
+                glassSection.blendSource.reset();
+                if (data.mPositions.get().empty()) {
+                    destination.reset();
+                } else {
+                    state.sections[section].blendSource = cloneNativeMeshData(data);
+                    if (uploadMode == Tessellator::UploadMode::Never) {
+                        destination = std::make_unique<mce::Mesh>(std::move(native));
+                    } else {
+                        auto service = tessellator.mBufferResourceService.lock();
+                        if (!service) throw std::runtime_error("Native glass mesh GPU service expired");
+                        destination = std::make_unique<mce::Mesh>(
+                            service, std::move(data), false, meshNames[bucketIndex]);
+                        if (!destination->isValid())
+                            throw std::runtime_error("Glass face-cull GPU upload invalid");
+                    }
+                }
+                continue;
+            }
+            // Incompatible native stream: upload the original finalized mesh
+            // unchanged rather than ever risking missing glass geometry.
+            state.sections[section].blendSource = cloneNativeMeshData(data);
+            if (uploadMode == Tessellator::UploadMode::Never)
+                destination = std::make_unique<mce::Mesh>(std::move(native));
+            else {
+                auto service = tessellator.mBufferResourceService.lock();
+                if (!service) throw std::runtime_error("Glass original GPU service expired");
+                destination = std::make_unique<mce::Mesh>(
+                    service, std::move(data), false, meshNames[bucketIndex]);
+            }
+            continue;
+        }        // Tessellator::end() can auto-generate supplementary vertex streams.
         // Prefer its finalized CPU MeshData when available. Buffered mode may
         // consume the source during upload, so keep a pre-end safety copy.
         std::unique_ptr<mce::MeshData> originalSource;

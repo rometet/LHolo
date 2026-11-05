@@ -135,7 +135,7 @@ target("LHolo")
     add_shflags("/OPT:REF", "/OPT:ICF", {force = true})
     add_rules("lholo.i18n.resources")
     add_rules("@levibuildscript/linkrule")
-    add_rules("@levibuildscript/modpacker", {modVersion = "26.60.0-port.4"})
+    add_rules("@levibuildscript/modpacker", {modVersion = "26.60.0-port.5"})
     add_shflags("/DELAYLOAD:bedrock_runtime.dll", {force = true})
     add_cxflags(
         "/utf-8",

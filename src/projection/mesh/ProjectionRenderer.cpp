@@ -18,6 +18,7 @@
 #include "structure/StructureLoader.h"
 #include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/mesh/ProjectionGlassLiquidMerge.h"
 #include "projection/core/ProjectionCachedDistanceSort.h"
 #include "projection/mesh/ProjectionAnimatedBubblePass.h"
 #include "projection/core/ProjectedPistonAppearance.h"
@@ -1047,6 +1048,8 @@ void submitProjectionMeshPass(
         ? projectionPrivateBlendMaterial(state, blendMaterial)
         : blendMaterial;
 
+    // Interleave native glass and Exact Replay liquid faces in mixed sections.
+    prepareMixedGlassLiquidMeshes(state, renderContext);
     auto worldCenter = [&](std::size_t section) {
         return Vec3{
             static_cast<float>(renderOrigin.x) + state.sections[section].center.x,
@@ -1100,7 +1103,8 @@ void submitProjectionMeshPass(
             state.nativeLiquidCandidateCacheValid = true;
         }
         for (auto const section : state.nativeLiquidCandidateSections) {
-            if (state.sections[section].renderVisible)
+            if (state.sections[section].renderVisible
+                && !glassLiquidMergedReady(state, section))
                 nativeLiquidSections.push_back(section);
         }
         std::sort(
@@ -1320,6 +1324,34 @@ void submitProjectionMeshPass(
         }
     }
 
+    if (renderAlphaLayer) {
+        // Mixed sections are submitted once with all visible glass/liquid
+        // faces in stable back-to-front order. The other sections retain
+        // the native Exact Replay and transparent GPU batching paths.
+        std::vector<std::size_t> merged;
+        for (std::size_t i=0; i<state.sections.size(); ++i)
+            if (state.sections[i].renderVisible && glassLiquidMergedReady(state,i))
+                merged.push_back(i);
+        std::sort(merged.begin(),merged.end(),[&](std::size_t a,std::size_t b) {
+            return distanceSquared(worldCenter(a)) > distanceSquared(worldCenter(b));
+        });
+        if (!merged.empty()) {
+            if (auto* player=client.getLocalPlayer()) {
+                ActorShaderManager::setupShaderParameters(
+                    renderContext.mScreenContext,renderContext,*player,
+                    mce::Color{1.0f,1.0f,1.0f,0.0f},1.0f,Brightness::MAX(),std::nullopt);
+            }
+            render::ScopedShaderColor shaderWhite{
+                renderContext.mScreenContext.currentShaderColor};
+            for (auto const i:merged) {
+                auto& mesh=*state.sections[i].mixedGlassLiquid->mesh;
+                mesh.renderMesh(renderContext.mScreenContext,projectedBlendMaterial,
+                    *state.terrainTextureVariant,0,
+                    mesh.mVertexCount.get().value_or(0u),
+                    emptyOffscreenCaptureDescription(),nullptr);
+            }
+        }
+    }
     // The ItemInHand/Entity materials used for ghost blocks drive their
     // diffuse lighting from TileLightColor in constant buffer CB0. When
     // looking down at the ground with no block entities in the view frustum
@@ -1361,6 +1393,8 @@ void submitProjectionMeshPass(
     };
     auto submitRetainedMesh = [&](std::size_t section, std::size_t bucket,
                                   mce::MaterialPtr const& material, bool isBlend) {
+        if (bucket == static_cast<std::size_t>(RenderBucket::Blend)
+            && glassLiquidMergedReady(state,section)) return;
         auto& mesh = *state.sections[section].meshes[bucket];
         mesh.renderMesh(
             renderContext.mScreenContext, material, *state.terrainTextureVariant,
@@ -1799,6 +1833,9 @@ void submitProjectionMeshPass(
                     : (materialExists(alphaMaterial) ? alphaMaterial : blendMaterial));
         } else {
             auto transparentMeshes = collectBucket(blendBucket);
+            std::erase_if(transparentMeshes,[&](VisibleMesh const& mesh) {
+                return glassLiquidMergedReady(state,mesh.section);
+            });
             sortBackToFront(transparentMeshes);
             prepareSortedBlendMeshes();
             renderBatchedBlend(transparentMeshes, projectedBlendMaterial);
