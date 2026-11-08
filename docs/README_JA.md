@@ -2,7 +2,7 @@
 
 [トップページ](../README.md) · [English](README_EN.md) · [简体中文](README_ZH_CN.md) · [Releases](https://github.com/rometet/LHolo/releases)
 
-LHolo は、Minecraft Bedrock（Windows）で設計図を表示できる LeviLamina Client 用 Mod です。`.mcstructure` と `.litematic` に対応しています。現在の公開プレリリースの対象は **Minecraft 1.26.51.01 / LeviLamina Client 26.51.5** です。
+LHolo は、Minecraft Bedrock（Windows）で設計図を表示できる LeviLamina Client 用 Mod です。`.mcstructure` と `.litematic` に対応しています。現在の公開プレリリースの対象は **Minecraft 1.26.60.05 / LeviLamina Client 26.60系** です。
 
 ## まず使ってみる
 
@@ -52,6 +52,6 @@ LHolo は、Minecraft Bedrock（Windows）で設計図を表示できる LeviLam
 - Vibrant Visuals（鮮やかなビジュアル）は投影描画と競合する場合があり、OFF を推奨します。
 - 投影自体はクライアント側のみですが、設置支援によるブロック設置は実際のワールドを変更します。
 - 実験的な操作はサーバー規約を確認し、許可された場所でのみ使用してください。
-- 公開中の 26.51 向けビルドは Minecraft 26.60 に対応していません。
+- Minecraft 1.26.51 向けの旧ビルド（ja.x 系）は 26.60 では動作しません。対象の Minecraft バージョンに合うビルドを選んでください。
 
 より詳しい配置・検証・材料・HUD の使い方は [Praxis / LHolo 操作ガイド](OPERATION_GUIDE_JA.md) を参照してください。
