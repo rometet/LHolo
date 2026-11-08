@@ -74,7 +74,7 @@ namespace lholo::projection::detail {
 namespace {
 
 std::optional<Vec3> renderCameraPosition(BaseActorRenderContext const& renderContext) {
-    auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
+    auto const camera = render::readRenderCameraPosition(renderContext);
     if (!camera) return std::nullopt;
     return Vec3{camera->x, camera->y, camera->z};
 }
@@ -546,8 +546,9 @@ void renderProjection(
                 praxisCompatLiquidSections
             );
             logger().info(
-                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} waterSeedVertices={} lavaNativeVertices={}",
+                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} lavaAlpha={} waterSeedVertices={} lavaNativeVertices={}",
                 PraxisWaterDerivedAlpha,
+                PraxisLavaDerivedAlpha,
                 telemetry.praxisCompatWaterSeedVertices,
                 telemetry.praxisCompatLavaNativeVertices
             );

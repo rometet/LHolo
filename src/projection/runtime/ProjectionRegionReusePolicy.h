@@ -9,11 +9,12 @@ namespace lholo::projection::detail {
 // Compare sorted source-local cells and return 16^3 section keys affected by
 // an edit, including the conservative one-section neighbor halo. No GPU or
 // world references are needed, making this safe to regression test.
-template<class Cell, class SameCell>
+template<class OldCells, class NextCells, class SameCell>
 std::set<std::tuple<int,int,int>> changedRegionSectionHalo(
-    std::vector<Cell> const& oldCells,
-    std::vector<Cell> const& nextCells,
+    OldCells const& oldCells,
+    NextCells const& nextCells,
     SameCell sameCell) {
+    using Cell=typename OldCells::value_type;
     std::set<std::tuple<int,int,int>> changed;
     std::set<std::tuple<int,int,int>> sourceSectionsAlreadyMarked;
     auto const mark=[&](Cell const& cell) {

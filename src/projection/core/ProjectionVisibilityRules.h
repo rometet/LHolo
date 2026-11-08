@@ -58,6 +58,54 @@ inline bool projectionBoundsVisible(ProjectionFrustum const &frustum, Projection
                                  bounds.maximum.z + origin.z + padding});
 }
 
+inline bool projectionBoundsWithinDistance(
+    ProjectionBounds const& bounds, Vec3 const& origin,float radius) noexcept {
+    if(!bounds.valid || !std::isfinite(radius))return true;
+    if(radius<0.0f)return false;
+    float const x0=bounds.minimum.x+origin.x,x1=bounds.maximum.x+origin.x;
+    float const z0=bounds.minimum.z+origin.z,z1=bounds.maximum.z+origin.z;
+    float const dx=std::max({0.0f,x0,-x1});
+    float const dz=std::max({0.0f,z0,-z1});
+    return static_cast<double>(dx)*dx+static_cast<double>(dz)*dz
+        <=static_cast<double>(radius)*radius;
+}
+struct ProjectionSectionVisibility {
+    bool renderVisible{},buildVisible{},prefetchVisible{};
+    bool withinBuildDistance{true},withinRetentionDistance{true};
+};
+// Native camera far clip is a conservative limit for CPU mesh streaming;
+// invalid/unknown clip planes must never hide projection geometry.
+inline ProjectionSectionVisibility classifyProjectionSection(
+    ProjectionFrustum const& frustum,ProjectionBounds const& bounds,
+    Vec3 const& origin,float farClip) {
+    ProjectionSectionVisibility result;
+    auto const eligible=std::isfinite(farClip) && farClip>=32.0f && farClip<=8192.0f;
+    auto const radius=eligible?farClip:std::numeric_limits<float>::infinity();
+    // The frustum intentionally contains only SIDE planes. Native mZFar
+    // is not a safe HARD cutoff for schematics: the game's projection can
+    // still be visible past it, leaving Missing comparison colors blank
+    // at the far ends of large structures.
+    //
+    // Use the side frustum as the authority for drawing and mesh builds.
+    // Distance is a hint ONLY for unseen prefetch and GPU residency. A
+    // visible/fringe section must not have its transparent source retired.
+    auto const inView=projectionBoundsVisible(frustum,bounds,origin,2.0f);
+    auto const inPrefetchView=projectionBoundsVisible(frustum,bounds,origin,16.0f);
+    result.renderVisible=inView;
+    result.buildVisible=inView;
+    result.prefetchVisible=inPrefetchView;
+    result.withinBuildDistance=inPrefetchView
+        || projectionBoundsWithinDistance(bounds,origin,radius+16.0f);
+    result.withinRetentionDistance=inPrefetchView
+        || projectionBoundsWithinDistance(bounds,origin,radius+32.0f);
+    return result;
+}
+inline bool shouldRetireDistantTransparentMesh(
+    bool withinRetentionDistance,bool dirty,bool inFlight,
+    bool hasBlendSource,bool worldMutationActive) noexcept {
+    return !withinRetentionDistance && !dirty && !inFlight
+        && hasBlendSource && !worldMutationActive;
+}
 // Shared selection for compatibility liquid proxy draw calls. Bound all
 // parallel section arrays before reading their elements; visibility is derived
 // from the same fail-open frustum classification as regular block meshes.

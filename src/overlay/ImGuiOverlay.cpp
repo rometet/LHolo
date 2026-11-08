@@ -622,6 +622,7 @@ LRESULT consumeMenuInputMessage(HWND window, UINT message, WPARAM wParam, LPARAM
 std::optional<LRESULT> handleWindowMessage(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     // Shutdown must still be able to return its ShowCursor increments on this
     // owning thread before restoring the original window procedure.
+    input::observeNativeWindowMessage(message,static_cast<std::uintptr_t>(wParam));
     if (message == kMsgRestoreNativeCursor) {
         releaseMenuCursor();
         ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));

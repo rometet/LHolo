@@ -11,6 +11,7 @@
 #include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/core/ProjectionDrawCache.h"
 #include "projection/mesh/ProjectionCorrectionBatchCache.h"
+#include "projection/mesh/ProjectionTransparentBatchCache.h"
 #include "projection/ProjectionTypes.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
 #include "projection/mesh/SectionMissingLayerSnapshot.h"
@@ -50,6 +51,19 @@ namespace lholo::projection::detail {
 using TextureVariant =
     std::variant<std::monostate, mce::TexturePtr, mce::ClientTexture, mce::ServerTexture>;
 
+struct MixedGlassLiquidMesh {
+    // A source can disappear on any accepted section upload, world reload or
+    // placement mutation. Use typed source identities + revision as the key;
+    // native GPU buffers never outlive their matching section owners.
+    void const* glassSource{};
+    void const* liquidSource{};
+    std::uint64_t uploadedRevision{};
+    std::size_t vertexCount{};
+    std::array<float, 3> axis{};
+    bool axisValid{};
+    std::vector<std::uint32_t> order;
+    std::unique_ptr<mce::Mesh> mesh;
+};
 struct SectionState {
     // Conservative geometry AABB; fallback visibility stays true until layout
     // and camera matrices are ready.
@@ -57,6 +71,8 @@ struct SectionState {
     bool renderVisible{true};
     bool buildVisible{true};
     bool prefetchVisible{true};
+    bool withinBuildDistance{true};
+    bool withinRetentionDistance{true};
     Vec3    center{};
     bool    dirty{};
     bool    incrementalDirty{};
@@ -71,11 +87,13 @@ struct SectionState {
     // Last successfully uploaded primitive ordering, not a second MeshData.
     // Allows camera movement without GPU re-upload if order did not change.
     std::vector<std::size_t>    blendSortOrder;
+    std::uint64_t               blendSortUploadGeneration{};
     std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)> meshes;
     // Immutable pre-upload source for the Blend bucket. The engine consumes
     // Mesh::mMeshData while creating GPU buffers, so the renderer must never
     // use the uploaded Mesh as the source for a later camera sort.
     std::unique_ptr<mce::MeshData> blendSource;
+    std::unique_ptr<MixedGlassLiquidMesh> mixedGlassLiquid;
 };
 
 struct ProjectionAnimatedBubbleCell {
@@ -109,6 +127,7 @@ struct RegionMeshRetention {
 };
 
 struct ProjectionState {
+    std::size_t mixedGlassLiquidCursor{};
     std::unique_ptr<RegionMeshRetention> pendingRegionReuse;
     // R11 animated schematic particles. Only the render callback reads/writes
     // this bounded cache, never the async section-build worker. All positions
@@ -138,6 +157,7 @@ struct ProjectionState {
     // From MarmieQi 26.51.4: cache draw slots independently of heavy per-frame
     // geometry and use view-prioritized, starvation-free section scheduling.
     ProjectionDrawCache drawCache;
+    ProjectionTransparentBatchCache transparentDrawBatches;
     std::uint64_t meshUploadRevision{};
     std::uint64_t visibilityRevision{};
     std::uint64_t meshBuildSelections{};

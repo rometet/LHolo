@@ -38,6 +38,8 @@
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidAppearance.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/LiquidReplayRules.h"
@@ -301,35 +303,18 @@ void testStructureTransformConcurrency() {
 }
 
 void testRenderCameraRead() {
-    using lholo::render::readRenderCameraPosition;
-    LHOLO_CHECK(!readRenderCameraPosition(nullptr));
-    SYSTEM_INFO system{};
-    GetSystemInfo(&system);
-    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(nullptr, system.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    LHOLO_CHECK(allocation != nullptr);
-    if (!allocation) return;
-    struct ReleasePage {
-        void* page;
-        ~ReleasePage() { VirtualFree(page, 0, MEM_RELEASE); }
-    } release{allocation};
-    std::array<float, 3> expected{-1.5f, 20.25f, 1000.5f};
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    auto const camera = readRenderCameraPosition(allocation);
-    LHOLO_CHECK(camera && camera->x == expected[0] && camera->y == expected[1] && camera->z == expected[2]);
-    LHOLO_CHECK(!readRenderCameraPosition(allocation + system.dwPageSize - 12));
-    DWORD previous{};
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READONLY, &previous));
-    LHOLO_CHECK(readRenderCameraPosition(allocation).has_value());
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_EXECUTE, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_NOACCESS, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READWRITE, &previous));
-    expected[1] = std::numeric_limits<float>::quiet_NaN();
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+    // 26.60 uses the typed SDK camera target, not an ABI offset.
+    using lholo::render::validateCameraTarget;
+    auto target=validateCameraTarget(Vec3{-1.5f,20.25f,1000.5f});
+    LHOLO_CHECK(target && target->x==-1.5f
+        && target->y==20.25f && target->z==1000.5f);
+    LHOLO_CHECK(validateCameraTarget(Vec3{0.0f,0.0f,0.0f}).has_value());
+    auto const nan=std::numeric_limits<float>::quiet_NaN();
+    auto const inf=std::numeric_limits<float>::infinity();
+    LHOLO_CHECK(!validateCameraTarget(Vec3{nan,0.0f,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,inf,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,0.0f,-inf}));
 }
-
 void testProjectionActivationRequests() {
     ProjectionActivationRequests requests;
     LHOLO_CHECK(!requests.consumeAnchor());
@@ -836,6 +821,28 @@ void testNativeLiquidUvRemap() {
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
 }
 
+void testGlassLiquidFaceOrder() {
+    using namespace lholo::projection::detail;
+    // This is the original upstream ed9944f failure: the back glass, water
+    // and front glass must interleave, not submit as two material families.
+    std::vector<ProjectionTransparentFaceKey> faces{
+        {{0,0,-1},0},{{0,0,-3},1},{{0,0,-2},2}
+    };
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,2,0}));
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,1})
+        == (std::vector<std::uint32_t>{0,2,1}));
+    faces={{{0,0,-1},2},{{0,0,-1},1}};
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,0}));
+    std::array<std::array<float,3>,4> fullFace{{
+        {1,0,0},{1,1,0},{1,1,1},{1,0,1}
+    }};
+    LHOLO_CHECK(projectionUnitFaceNeighbor(fullFace,{0,0,0})
+        == (std::array<int,3>{1,0,0}));
+    fullFace[2][2]=0.5f;
+    LHOLO_CHECK(!projectionUnitFaceNeighbor(fullFace,{0,0,0}));
+}
 void testPraxisCompatLiquidColor() {
     auto const expect = [](std::uint32_t source, PraxisCompatRgba8 expected) {
         auto const derived = applyPraxisCompatMissingAbgr(source);
@@ -886,7 +893,20 @@ void testPraxisCompatLiquidColor() {
     LHOLO_CHECK(!lavaResult.waterSeedApplied);
     LHOLO_CHECK(lavaResult.packed == nativeWhite);
     auto const lavaDerived = applyPraxisCompatMissingAbgr(lavaResult.packed);
-    LHOLO_CHECK(applyPraxisCompatLiquidAlpha(lavaDerived, false) == lavaDerived);
+    auto const lavaFinal = applyPraxisCompatLiquidAlpha(lavaDerived, false);
+    LHOLO_CHECK(PraxisLavaDerivedAlpha == 176);
+    LHOLO_CHECK(unpackAbgr(lavaFinal).alpha == PraxisLavaDerivedAlpha);
+    LHOLO_CHECK((lavaFinal & 0x00FFFFFFU) == (lavaDerived & 0x00FFFFFFU));
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.5F)).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.F)).alpha == 0);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 1.F)).alpha == 176);
+    // Proxy and native replay share the same fluid-specific alpha contract.
+    auto const fallbackLava = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFF1080FFU, false), 0.5F);
+    auto const fallbackWater = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFFE6B333U, true), 0.5F);
+    LHOLO_CHECK(unpackAbgr(fallbackLava).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(fallbackWater).alpha == 80);
 }
 
 void testNativeLiquidInternalFaceCull() {
@@ -2541,6 +2561,8 @@ void testRedstoneNativeRenderPass() {
     }
 }
 
+int runMcstructureInputTests();
+int runStructureBlocksCompactTests();
 int main() {
     try {
     testRedstoneNativeRenderPass();
@@ -2592,6 +2614,7 @@ int main() {
     lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
+    testGlassLiquidFaceOrder();
     testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();
@@ -2608,6 +2631,8 @@ int main() {
     testBlockPlacementRules();
     testJavaTextComponents();
     testI18n();
+    LHOLO_CHECK(runMcstructureInputTests() == 0);
+    LHOLO_CHECK(runStructureBlocksCompactTests() == 0);
     lholo::tests::runHudControlChecks([](bool ok) { LHOLO_CHECK(ok); });
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;

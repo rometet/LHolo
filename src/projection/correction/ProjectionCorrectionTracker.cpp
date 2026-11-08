@@ -407,21 +407,10 @@ CorrectionProgressChanges updateCorrectionTracker(
     };
 
     auto const hasExpectedLocalCell = [&](BlockPos const& localPosition) {
-        auto const found = std::lower_bound(
-            state.structure->renderBlocks.begin(),
-            state.structure->renderBlocks.end(),
-            localPosition,
-            [](structure::LoadedStructure::RenderBlock const& entry, BlockPos const& position) {
-                return std::tie(entry.x, entry.y, entry.z)
-                    < std::tie(position.x, position.y, position.z);
-            }
-        );
-        return found != state.structure->renderBlocks.end()
-            && found->x == localPosition.x
-            && found->y == localPosition.y
-            && found->z == localPosition.z;
+        // Packed large-structure storage has an exact coordinate index.
+        return state.structure->renderBlocks.find(
+            localPosition.x,localPosition.y,localPosition.z).has_value();
     };
-
     auto const updateExtra = [&](
         BlockPos const& localPosition,
         BlockPos const& worldPosition,

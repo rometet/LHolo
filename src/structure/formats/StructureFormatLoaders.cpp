@@ -19,6 +19,7 @@
 #include "structure/formats/JavaNbtReader.h"
 #include "structure/formats/LitematicFormatRules.h"
 #include "structure/formats/McstructureIndices.h"
+#include "structure/formats/McstructureInput.h"
 #include "structure/StructureLoader.h"
 #include "structure/PlacementSession.h"
 #include "block/BlockPlacementRules.h"
@@ -54,6 +55,7 @@
 #include "ll/api/service/Bedrock.h"
 #include "mc/client/game/ClientInstance.h"
 #include "mc/deps/nbt/CompoundTag.h"
+#include "mc/deps/nbt/ByteArrayTag.h"
 #include "mc/deps/nbt/IntArrayTag.h"
 #include "mc/deps/nbt/IntTag.h"
 #include "mc/deps/nbt/ListTag.h"
@@ -64,6 +66,7 @@
 #include "mc/world/level/material/Material.h"
 #include "mc/world/level/levelgen/structure/StructureBlockPalette.h"
 #include "mc/world/level/levelgen/structure/StructureTemplate.h"
+#include "mc/world/level/levelgen/structure/StructureCompression.h"
 #include "mc/world/level/Level.h"
 
 namespace lholo::structure::detail {
@@ -141,7 +144,7 @@ void assignMaterialIndices(LoadedStructure& loaded) {
             liquidKeys[index], static_cast<int>(bodyKeys.size() + index)
         );
     }
-    for (auto& entry : loaded.renderBlocks) {
+    for (auto& entry : loaded.renderBlocks.mutableValues()) {
         if (auto const found = bodyIndices.find(keyFor(entry.block)); found != bodyIndices.end()) {
             entry.materialIndex = found->second;
         }
@@ -466,6 +469,40 @@ std::shared_ptr<PreparedStructureLoad> prepareMcstructure(
     // the staged result instead of deep-copying every block-index tag.
     prepared->root = std::make_shared<CompoundTag>(std::move(*root));
 
+    // Compressed 26.60 native format: structure is a zlib ByteArray.
+    auto const* compressionTag = findTag(*prepared->root, "compression");
+    auto compression = StructureCompression::None;
+    if (compressionTag) {
+        if (!compressionTag->hold<IntTag>()) {
+            error = "mcstructure compression must be an integer";
+            return nullptr;
+        }
+        compression = static_cast<StructureCompression>(static_cast<int>(compressionTag->get<IntTag>()));
+    }
+    if (compression == StructureCompression::Zlib) {
+        auto const* tag = findTag(*prepared->root, "structure");
+        if (!tag || !tag->hold<ByteArrayTag>()) {
+            error = "compressed mcstructure must contain a structure ByteArray";
+            return nullptr;
+        }
+        auto const& payload = tag->get<ByteArrayTag>();
+        auto decodedBytes = inflateMcstructureTag(
+            {reinterpret_cast<char const*>(payload.data()), payload.size()},
+            kMaximumInflatedFileSize,error);
+        if (!decodedBytes) return nullptr;
+        auto decoded = CompoundTag::fromBinaryNbt(*decodedBytes,true);
+        if (!decoded) {
+            error = "decompressed mcstructure invalid NBT: " + decoded.error().message();
+            return nullptr;
+        }
+        prepared->root->mTags["structure"] = std::move(*decoded);
+        // Retain the intact compressed envelope for vanilla fallback.
+        if (!prepared->fallbackOriginalBytes)
+            prepared->fallbackOriginalBytes=std::make_shared<std::string>(std::move(*bytes));
+    } else if (compression != StructureCompression::None) {
+        error="unsupported mcstructure compression value";
+        return nullptr;
+    }
     auto const* size = findList(*prepared->root, "size");
     auto const* structure = findCompound(*prepared->root, "structure");
     if (!size || !structure) {
@@ -673,9 +710,49 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
         ? prepared->blockIndexLayers.size()
         : (stagedBlockIndices ? stagedBlockIndices->size() : 0);
     if (stagedLayerCount != 0) {
-        StructureBlockPalette stagedPalette;
-        if (stagedPalette._parseBlockPalette(*defaultPalette)
-            == StructureBlockPaletteLoadResult::Success) {
+        // Native block-palette parse/destructors are not exported on 26.60.
+        // Construct a 1-cell test structure that keeps the exact palette, then
+        // use MCAPI StructureTemplate::load. The real index streams remain in
+        // prepared->blockIndexLayers and never enter the native parser.
+        std::unique_ptr<StructureTemplate> paletteTemplate;
+        try {
+            CompoundTag paletteProbe{*prepared->root};
+            auto& probeSize = paletteProbe.at("size").get<ListTag>();
+            auto& probeStructure = paletteProbe.at("structure").get<CompoundTag>();
+            auto& probeLayers = probeStructure.at("block_indices").get<ListTag>();
+            if (probeSize.size() == 3
+                && probeSize[0]->getId() == Tag::Int
+                && probeSize[1]->getId() == Tag::Int
+                && probeSize[2]->getId() == Tag::Int) {
+                for (auto& component : probeSize) component->as<IntTag>().data = 1;
+                probeLayers.clear();
+                probeLayers.mType = Tag::IntArray;
+                probeLayers.emplace_back(std::make_unique<IntArrayTag>(std::vector<int>{0}));
+                probeLayers.emplace_back(std::make_unique<IntArrayTag>(std::vector<int>{-1}));
+                auto& probeDefault = probeStructure.at("palette").get<CompoundTag>()
+                    .at("default").get<CompoundTag>();
+                // Keep the native tag schema, but omit all unrelated data.
+                // A 1-cell palette probe must not deserialize the full list
+                // of block entities or world actors from a giant schematic.
+                probeDefault.mTags["block_position_data"] = CompoundTag{};
+                if (auto entity = probeStructure.mTags.find("entities");
+                    entity != probeStructure.mTags.end()
+                    && entity->second.hold<ListTag>()) {
+                    entity->second.get<ListTag>().clear();
+                }
+                paletteTemplate = std::make_unique<StructureTemplate>(
+                    "lholo:palette_only", clientLevel->getUnknownBlockTypeRegistry()
+                );
+                if (!paletteTemplate->load(paletteProbe)) paletteTemplate.reset();
+            }
+        } catch (...) {
+            paletteTemplate.reset();
+        }
+        auto const* stagedPalette = paletteTemplate
+            ? paletteTemplate->mStructureTemplateData.get().getPalette(
+                StructureTemplateData::DEFAULT_PALETTE_NAME())
+            : nullptr;
+        if (stagedPalette) {
             auto const unknownRegistry = clientLevel->getUnknownBlockTypeRegistry();
             std::vector<Block const*> resolvedPalette(
                 static_cast<std::size_t>(prepared->paletteEntries), nullptr
@@ -683,7 +760,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
             for (std::size_t paletteIndex = 0;
                  paletteIndex < resolvedPalette.size();
                  ++paletteIndex) {
-                auto const* resolved = stagedPalette.tryGetBlock(
+                auto const* resolved = stagedPalette->tryGetBlock(
                     static_cast<std::uint64_t>(paletteIndex), unknownRegistry
                 );
                 if (resolved && !resolved->isAir()) {
@@ -735,18 +812,18 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
                 Block const* liquid{};
                 auto const assign = [&](Block const* value) {
                     if (!value) return;
-                    if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+                    if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
                     else if (!block) block = value;
                 };
                 assign(primary);
                 assign(secondary);
                 if (primary && primary->getTypeName() == "minecraft:bubble_column") {
                     block = primary;
-                    liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+                    liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                         ? secondary : nullptr;
                 } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
                     block = secondary;
-                    liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+                    liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                         ? primary : nullptr;
                 }
                 if (!block && !liquid) continue;
@@ -881,18 +958,18 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
         Block const* liquid{};
         auto const assign = [&](Block const* value) {
             if (!value) return;
-            if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+            if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
             else if (!block) block = value;
         };
         assign(primary);
         assign(secondary);
         if (primary && primary->getTypeName() == "minecraft:bubble_column") {
             block = primary;
-            liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+            liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                 ? secondary : nullptr;
         } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
             block = secondary;
-            liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+            liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                 ? primary : nullptr;
         }
         if (!block && !liquid) continue;
@@ -925,6 +1002,7 @@ std::shared_ptr<LoadedStructure> finalizeMcstructure(
     }
 
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = prepared->path;
     return loaded;
@@ -1087,18 +1165,18 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         Block const* liquid{};
         auto const assign = [&](Block const* value) {
             if (!value) return;
-            if (value->getBlockType().mMaterial.mLiquid) liquid = value;
+            if (value->getBlockType().mMaterial.get().mLiquid) liquid = value;
             else if (!block) block = value;
         };
         assign(primary);
         assign(secondary);
         if (primary && primary->getTypeName() == "minecraft:bubble_column") {
             block = primary;
-            liquid = (secondary && secondary->getBlockType().mMaterial.mLiquid)
+            liquid = (secondary && secondary->getBlockType().mMaterial.get().mLiquid)
                 ? secondary : nullptr;
         } else if (secondary && secondary->getTypeName() == "minecraft:bubble_column") {
             block = secondary;
-            liquid = (primary && primary->getBlockType().mMaterial.mLiquid)
+            liquid = (primary && primary->getBlockType().mMaterial.get().mLiquid)
                 ? primary : nullptr;
         }
         if (!block && !liquid) continue;
@@ -1119,6 +1197,7 @@ std::shared_ptr<LoadedStructure> loadMcstructure(std::filesystem::path const& pa
         });
     }
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = path;
     return loaded;
@@ -1390,11 +1469,12 @@ std::shared_ptr<LoadedStructure> loadLitematic(std::filesystem::path const& path
             cell.block.block, cell.block.liquid, std::move(cell.blockEntityNbt)
         });
     }
-    std::sort(loaded->renderBlocks.begin(), loaded->renderBlocks.end(), [](auto const& left, auto const& right) {
+    std::sort(loaded->renderBlocks.mutableValues().begin(), loaded->renderBlocks.mutableValues().end(), [](auto const& left, auto const& right) {
         return std::tie(left.x, left.y, left.z) < std::tie(right.x, right.y, right.z);
     });
     loaded->primaryBlocks = loaded->renderBlocks.size();
     assignMaterialIndices(*loaded);
+    loaded->renderBlocks.packFromValues(loaded->sizeX,loaded->sizeY,loaded->sizeZ);
     loaded->generation = gGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     loaded->sourcePath = path;
     return loaded;
@@ -1498,11 +1578,12 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
             }
         loaded.regions=std::move(tiles);
         if(loaded.sourceBacking)loaded.renderBlocks=source.renderBlocks;
-        std::erase_if(loaded.renderBlocks,[&](LoadedStructure::RenderBlock const& b){
+        std::erase_if(loaded.renderBlocks.mutableValues(),[&](LoadedStructure::RenderBlock const& b){
             return !enabled(ownerAt(b.x,b.y,b.z));
         });
         loaded.primaryBlocks=loaded.renderBlocks.size();
         assignMaterialIndices(loaded);
+        loaded.renderBlocks.packFromValues(loaded.sizeX,loaded.sizeY,loaded.sizeZ);
         return;
     }
     // File-native subregions: preserve the original source order and original
@@ -1540,6 +1621,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
                 loaded.renderBlocks.push_back(source.renderBlocks[i]);
         loaded.primaryBlocks=loaded.renderBlocks.size();
         assignMaterialIndices(loaded);
+        loaded.renderBlocks.packFromValues(loaded.sizeX,loaded.sizeY,loaded.sizeZ);
         return;
     }
     auto const& regionCells=source.regionRenderBlocks;
@@ -1567,7 +1649,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
     if(disjoint) {
         for(std::size_t i=0;i<loaded.sourceRegions.size();++i) {
             if(!enabled(loaded.sourceRegions[i].name))continue;
-            loaded.renderBlocks.insert(loaded.renderBlocks.end(),
+            loaded.renderBlocks.mutableValues().insert(loaded.renderBlocks.mutableValues().end(),
                 regionCells[i].begin(),regionCells[i].end());
         }
     }else {
@@ -1585,7 +1667,7 @@ void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> cons
         for(auto& [key,cell]:merged)
             loaded.renderBlocks.push_back(std::move(cell));
     }
-    std::sort(loaded.renderBlocks.begin(),loaded.renderBlocks.end(),[](auto const& a,auto const& b){
+    std::sort(loaded.renderBlocks.mutableValues().begin(),loaded.renderBlocks.mutableValues().end(),[](auto const& a,auto const& b){
         return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
     });
     loaded.primaryBlocks=loaded.renderBlocks.size();
@@ -1687,7 +1769,7 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
         result->paletteEntries+=loaded->paletteEntries;
         result->secondaryBlocks+=loaded->secondaryBlocks;
         auto& records=result->regionRenderBlocks.emplace_back(
-            std::move(loaded->renderBlocks));
+            std::move(loaded->renderBlocks.mutableValues()));
         for(auto& block:records){
             block.x+=offsets[0];
             block.y+=offsets[1];
@@ -1709,8 +1791,8 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
     if(!anyOverlap) {
         result->renderBlocks.reserve(totalBlocks);
         for(auto const& region:result->regionRenderBlocks)
-            result->renderBlocks.insert(
-                result->renderBlocks.end(),region.begin(),region.end());
+            result->renderBlocks.mutableValues().insert(
+                result->renderBlocks.mutableValues().end(),region.begin(),region.end());
     }else{
         // File order is authoritative when two region bounds overlap.
         std::unordered_map<std::uint64_t,LoadedStructure::RenderBlock> latest;
@@ -1726,7 +1808,7 @@ std::shared_ptr<LoadedStructure> finalizeCompositeMcstructure(
         for(auto& [key,value]:latest)
             result->renderBlocks.push_back(std::move(value));
     }
-    std::sort(result->renderBlocks.begin(),result->renderBlocks.end(),
+    std::sort(result->renderBlocks.mutableValues().begin(),result->renderBlocks.mutableValues().end(),
         [](auto const& a,auto const& b){
             return std::tie(a.x,a.y,a.z)<std::tie(b.x,b.y,b.z);
         });

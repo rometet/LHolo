@@ -18,9 +18,15 @@ option("target_type")
     set_values("server", "client")
 option_end()
 
+-- Local builds may override the official package resolver with a validated
+-- locally built LeviLamina SDK. Normal builds use the upstream recipe.
+local offlineRepo = os.getenv("LHOLO_LOCAL_XMAKE_REPO")
+if offlineRepo and #offlineRepo > 0 then
+    add_repositories("lholo-local " .. offlineRepo)
+end
 add_repositories("levimc-repo " .. (get_config("levimc_repo") or "https://github.com/LiteLDev/xmake-repo.git"))
 
-add_requires("levilamina 26.51.5", {configs = {target_type = get_config("target_type") or "client"}})
+add_requires("levilamina 26.60.0", {configs = {target_type = get_config("target_type") or "client"}})
 add_requires("levibuildscript 0.6.1")
 add_requires("imgui v1.91.9", {configs = {shared = false, win32 = true, dx11 = true, no_demo_windows = true}})
 add_requires("minhook v1.3.4", {configs = {shared = false}})
@@ -30,7 +36,7 @@ if not has_config("vs_runtime") then
     set_runtimes("MD")
 end
 
--- LeviLamina 26.51 is built with clang-cl (LLVM 22); the generated Minecraft
+-- LeviLamina 26.60 is built with clang-cl (LLVM 22); the generated Minecraft
 -- headers rely on the clang frontend, so the mod must use the same toolchain.
 set_toolchains("clang-cl")
 
@@ -129,7 +135,7 @@ target("LHolo")
     add_shflags("/OPT:REF", "/OPT:ICF", {force = true})
     add_rules("lholo.i18n.resources")
     add_rules("@levibuildscript/linkrule")
-    add_rules("@levibuildscript/modpacker", {modVersion = "26.51.2-ja.12-rc.1"})
+    add_rules("@levibuildscript/modpacker", {modVersion = "26.60.0-port.5"})
     add_shflags("/DELAYLOAD:bedrock_runtime.dll", {force = true})
     add_cxflags(
         "/utf-8",
@@ -193,7 +199,7 @@ target("LHoloLogicTests")
     add_files("tests/logic/**.cpp")
     add_cxflags("/utf-8")
     add_syslinks("user32")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloNbtTests")
     set_kind("binary")
@@ -215,7 +221,7 @@ target("LHoloHudControlApiTests")
     add_files("src/i18n/**.cpp", "tests/hud_control/**.cpp")
     add_cxflags("/utf-8")
     add_syslinks("user32")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloGraphicsTests")
     set_kind("binary")
@@ -259,7 +265,7 @@ target("LHoloUiBench")
     add_files("tests/bench_ui/**.cpp")
     add_files("src/structure/StructureUiState.cpp")
     add_cxflags("/utf-8")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloLanguageStoreTests")
     add_rules("lholo.i18n.resources")
@@ -283,7 +289,7 @@ target("LHoloUiTests")
     add_files("src/overlay/OverlayFonts.cpp")
     add_files("tests/ui/UiRenderTests.cpp")
     add_cxflags("/utf-8")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloRenderContractTests")
     set_kind("binary")
@@ -345,7 +351,7 @@ target("LHoloVerifierRenderTests")
     add_cxflags("/utf-8")
     add_defines("NOMINMAX", "UNICODE")
     add_syslinks("d3d11", "dxgi", "user32")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloMaterialsTests")
     add_rules("lholo.i18n.resources")
@@ -359,7 +365,7 @@ target("LHoloMaterialsTests")
     add_files("tests/materials/**.cpp")
     add_cxflags("/utf-8")
     add_syslinks("user32")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 target("LHoloExportDialogFixture")
     set_kind("shared")
@@ -394,7 +400,7 @@ target("LHoloBlockIconTests")
     add_cxflags("/utf-8")
     add_defines("NOMINMAX", "UNICODE")
     add_syslinks("d3d11", "dxgi")
-    add_packages("levilamina", "imgui")
+    add_packages("levilamina", "imgui", "zlib")
 
 -- Native resource reload ABI v4 and GPU/owner-lifecycle tests.
 target("LHoloWorldPackReloadTests")

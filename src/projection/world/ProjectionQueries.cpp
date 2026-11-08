@@ -35,7 +35,7 @@ ProjectionQuery queryProjectionCell(
         ? nullptr
         : foundBlock->second;
     // Liquids have no normal block item, so they are never a valid place target.
-    if (block && block->getBlockType().mMaterial.mLiquid) block = nullptr;
+    if (block && block->getBlockType().mMaterial.get().mLiquid) block = nullptr;
     bool const missing = state.correctionStates[foundIndex->second] == CorrectionState::Missing;
     return {block, missing};
 }
@@ -74,7 +74,7 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
                     ? nullptr
                     : foundBlock->second;
                 // Liquids have no normal block item, so they are never a valid place target.
-                if (block && block->getBlockType().mMaterial.mLiquid) block = nullptr;
+                if (block && block->getBlockType().mMaterial.get().mLiquid) block = nullptr;
                 if (!block) continue;
                 result.push_back({static_cast<int>(x), static_cast<int>(y), static_cast<int>(z), block});
             }

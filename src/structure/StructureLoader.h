@@ -19,6 +19,7 @@
 #include "i18n/Message.h"
 #include "input/MenuRoute.h"
 #include "structure/LayerDisplayTypes.h"
+#include "structure/StructureBlocks.h"
 
 #include <array>
 #include <cstdint>
@@ -63,18 +64,10 @@ struct LoadedStructure {
     // litematic contributes one per region so gaps between regions are not
     // mistaken for schematic air by projection correction.
     std::vector<RegionBox>               regions;
-    struct RenderBlock {
-        int          x{};
-        int          y{};
-        int          z{};
-        Block const* block{};
-        Block const* liquid{};
-        std::shared_ptr<CompoundTag const> blockEntityNbt;
-        int          materialIndex{-1};
-        int          liquidMaterialIndex{-1};
-    };
-    std::vector<RenderBlock>              renderBlocks;
-    // Source-side definitions survive enable/disable and filtered world views.
+    using RenderBlock = StructureBlock;
+    // Compact palette/coordinate representation for large published sources.
+    // Small structures keep vector semantics without packed lookup overhead.
+    StructureBlocks                        renderBlocks;    // Source-side definitions survive enable/disable and filtered world views.
     std::vector<RegionBox>                sourceRegions;
     // Original per-region non-air cells preserve overlap ownership and permit
     // revealing an older region after a later region is switched off.

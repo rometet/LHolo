@@ -200,7 +200,7 @@ bool stillValid(PendingRotation const& p,ClientInstance& client) {
     auto const& item=p.player->getInventory().getItem(p.slot);
     if (state.manualMode() && state.manualPlacementItemAllowed(item.getTypeName())) return false;
     if (item.isNull() || item.getIdAux()!=p.item.getIdAux() || item.mCount!=p.item.mCount
-        || !item.matchesNetIdVariant(p.item)) return false;
+        || !(item.mNetIdVariant.get() == p.item.mNetIdVariant.get())) return false;
     auto const& region=p.player->getDimensionBlockSource();
     if (!region.getBlock(p.cell).isAir()) return false;
     auto const* tx=std::get_if<ItemUseInventoryTransaction>(&p.payload->mVariantTransaction.get());
@@ -575,7 +575,7 @@ bool queueExternalRotationPlacement(LocalPlayer& player, BlockPos const& cell,
         || player.getSelectedItemSlot() != slot
         || static_cast<int>(player.getDimensionId()) != dimension) return false;
     auto const& current = player.getInventory().getItem(slot);
-    if (current.isNull() || !current.matchesNetIdVariant(item)) return false;
+    if (current.isNull() || !(current.mNetIdVariant.get() == item.mNetIdVariant.get())) return false;
     auto& region = player.getDimensionBlockSource();
     bool const airTarget = (flags & lholo::flexible_placement_abi::RequestAirTarget) != 0;
     if (!region.getBlock(cell).isAir()) return false;

@@ -6,6 +6,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
 
 #include "plugin/LHolo.h"
@@ -210,7 +211,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 // Never let the engine's upload consume the only CPU source
                 // used by the later transparent sorter.
                 if (originalSource && !*originalSource) {
-                    *originalSource = std::make_unique<mce::MeshData>(
+                    *originalSource = cloneNativeMeshData(
                         cpuMesh->mMeshData.get()
                     );
                 }
@@ -244,7 +245,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 auto captureCorrectionCpu = [](std::unique_ptr<mce::Mesh> const& mesh)
                     -> std::unique_ptr<mce::MeshData> {
                     if (!mesh || mesh->mMeshData.get().size() == 0) return nullptr;
-                    return std::make_unique<mce::MeshData>(mesh->mMeshData.get());
+                    return cloneNativeMeshData(mesh->mMeshData.get());
                 };
                 auto missingFillSource = captureCorrectionCpu(result.warningFillMesh);
                 auto missingOutlineSource = captureCorrectionCpu(result.correctionOutlineMesh);
@@ -271,6 +272,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.sections[section].blendSortKeyValid = false;
                 state.sections[section].blendSortUnsupported = false;
                 state.sections[section].blendSortOrder.clear();
+                ++state.sections[section].blendSortUploadGeneration;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);

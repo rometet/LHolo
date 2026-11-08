@@ -6,6 +6,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionSectionBuilder.h"
 #include "projection/mesh/WaterloggedNativeStreamClip.h"
 #include "projection/mesh/LocalCorrectionPriorityGrid.h"
@@ -22,6 +23,7 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
@@ -404,6 +406,46 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     return outcome;
 }
 
+template<class T>
+void compactMissingGlassQuadStream(std::vector<T>& field, std::span<std::uint8_t const> remove) {
+    if (field.empty()) return;
+    std::size_t written{};
+    for (std::size_t quad = 0; quad < remove.size(); ++quad) {
+        if (remove[quad]) continue;
+        for (std::size_t corner = 0; corner < 4; ++corner)
+            field[written++] = std::move(field[quad * 4 + corner]);
+    }
+    field.resize(written);
+}
+
+// Only compact a complete unindexed QuadList with entirely compatible
+// native vertex streams. No user-space byte copies or guesses about the SDK.
+bool cullMissingGlassQuads(mce::MeshData& data, std::span<std::uint8_t const> remove) {
+    auto const count = data.mPositions.get().size();
+    if (data.mMode != mce::PrimitiveMode::QuadList || !data.mIndices.get().empty()
+        || count != remove.size() * 4 || count == 0)
+        return false;
+    std::array<std::size_t, 10> const fieldSizes{
+        data.mNormals.get().size(), data.mTangents.get().size(),
+        data.mColors.get().size(), data.mBoneId0s.get().size(),
+        data.mTextureUVs[0].get().size(), data.mTextureUVs[1].get().size(),
+        data.mTextureUVs[2].get().size(), data.mPBRTextureIndices.get().size(),
+        data.mMERS.get().size(), data.mGeoType.get().size()
+    };
+    if (!nativeLiquidPerVertexFieldCountsMatch(count, fieldSizes)) return false;
+    compactMissingGlassQuadStream(data.mPositions.get(), remove);
+    compactMissingGlassQuadStream(data.mNormals.get(), remove);
+    compactMissingGlassQuadStream(data.mTangents.get(), remove);
+    compactMissingGlassQuadStream(data.mColors.get(), remove);
+    compactMissingGlassQuadStream(data.mBoneId0s.get(), remove);
+    for (std::size_t uv = 0; uv < 3; ++uv)
+        compactMissingGlassQuadStream(data.mTextureUVs[uv].get(), remove);
+    compactMissingGlassQuadStream(data.mPBRTextureIndices.get(), remove);
+    compactMissingGlassQuadStream(data.mMERS.get(), remove);
+    compactMissingGlassQuadStream(data.mGeoType.get(), remove);
+    // AABB and UV AABB stay conservatively larger than the new geometry.
+    return true;
+}
 } // namespace
 
 void buildCorrectionSectionMeshes(
@@ -744,6 +786,14 @@ void buildProjectionSection(
             std::max(128, static_cast<int>(bucketBlocks.size() * 24)),
             false
         );
+        // Keep exact source ownership for complete native Glass cubes.
+        // Only full faces may be hidden against an identical Missing cube.
+        struct GlassRange {
+            std::size_t first{}, last{}, structureIndex{};
+            BlockPos position;
+            Block const* block{};
+        };
+        std::vector<GlassRange> glassRanges;
         bool bucketTessellated{};
         if (bucket == RenderBucket::Blend) {
             state.sections[section].blendSortKeyValid = false;
@@ -951,6 +1001,17 @@ void buildProjectionSection(
                     colors[colorIndex], structureOpacity
                 );
             }
+            if (bucket == RenderBucket::Blend && geometryAdded
+                && renderBlock.getBlockType().mMaterial.get().mType
+                    == SharedTypes::v1_26_20::MaterialType::Glass) {
+                auto const* glassGraphics = BlockGraphics::getForBlock(renderBlock);
+                if (glassGraphics && glassGraphics->mBlockShape == BlockShape::Block) {
+                    glassRanges.push_back({
+                        firstPosition, tessellator.mMeshData->mPositions.get().size(),
+                        layered.structureIndex, layered.position, &renderBlock
+                    });
+                }
+            }
             bucketTessellated = true;
         }
         auto& destination = state.sections[section].meshes[bucketIndex];
@@ -971,13 +1032,99 @@ void buildProjectionSection(
             vertex.y -= static_cast<float>(origin.y);
             vertex.z -= static_cast<float>(origin.z);
         }
-        // Tessellator::end() can auto-generate supplementary vertex streams.
+        // Backport of upstream ed9944f glass visibility: adjacent identical,
+        // unplaced full glass cubes must not expose duplicate interior faces.
+        // Keep stained colors, partial panes, non-Missing neighbors, and all
+        // liquid geometry unchanged. The native Blend source remains the GPU
+        // authority for everything else.
+        std::vector<std::uint8_t> hiddenGlassFaces;
+        if (bucket == RenderBucket::Blend && !glassRanges.empty()) {
+            auto const& data = tessellator.mMeshData.get();
+            auto const& positions = data.mPositions.get();
+            if (data.mMode == mce::PrimitiveMode::QuadList
+                && data.mIndices.get().empty() && positions.size() % 4 == 0) {
+                hiddenGlassFaces.assign(positions.size() / 4, 0);
+                for (auto const& glass : glassRanges) {
+                    if (state.buildCorrectionState(glass.structureIndex) != CorrectionState::Missing)
+                        continue;
+                    std::array<float, 3> const cell{
+                        static_cast<float>(glass.position.x - origin.x),
+                        static_cast<float>(glass.position.y - origin.y),
+                        static_cast<float>(glass.position.z - origin.z)
+                    };
+                    for (std::size_t face = glass.first / 4; face < glass.last / 4
+                        && face < hiddenGlassFaces.size(); ++face) {
+                        std::array<std::array<float, 3>, 4> vertices{};
+                        for (std::size_t corner = 0; corner < 4; ++corner) {
+                            auto const& pos = positions[face * 4 + corner];
+                            vertices[corner] = {pos.x, pos.y, pos.z};
+                        }
+                        auto const neighborDelta = projectionUnitFaceNeighbor(vertices, cell);
+                        if (!neighborDelta) continue;
+                        auto const neighbor = std::tuple{
+                            glass.position.x + (*neighborDelta)[0],
+                            glass.position.y + (*neighborDelta)[1],
+                            glass.position.z + (*neighborDelta)[2]
+                        };
+                        auto const found = state.expectedWorldBlocks->find(neighbor);
+                        auto const index = state.expectedWorldBlockIndices->find(neighbor);
+                        if (found != state.expectedWorldBlocks->end()
+                            && found->second == glass.block
+                            && index != state.expectedWorldBlockIndices->end()
+                            && state.buildCorrectionState(index->second) == CorrectionState::Missing)
+                            hiddenGlassFaces[face] = 1;
+                    }
+                }
+            }
+        }
+        auto const hiddenGlassCount = static_cast<std::size_t>(
+            std::count(hiddenGlassFaces.begin(), hiddenGlassFaces.end(), std::uint8_t{1}));
+        if (hiddenGlassCount != 0) {
+            // Finalize native bookkeeping before removing source quads. Mesh
+            // construction from the typed CPU fields handles the 26.60 SDK.
+            auto native = tessellator.end(
+                Tessellator::UploadMode::Never,
+                meshNames[bucketIndex], SupplementaryFieldAutoGenerationMode{1});
+            auto& data = native.mMeshData.get();
+            if (cullMissingGlassQuads(data, hiddenGlassFaces)) {
+                auto& glassSection = state.sections[section];
+                glassSection.blendSource.reset();
+                if (data.mPositions.get().empty()) {
+                    destination.reset();
+                } else {
+                    state.sections[section].blendSource = cloneNativeMeshData(data);
+                    if (uploadMode == Tessellator::UploadMode::Never) {
+                        destination = std::make_unique<mce::Mesh>(std::move(native));
+                    } else {
+                        auto service = tessellator.mBufferResourceService.lock();
+                        if (!service) throw std::runtime_error("Native glass mesh GPU service expired");
+                        destination = std::make_unique<mce::Mesh>(
+                            service, std::move(data), false, meshNames[bucketIndex]);
+                        if (!destination->isValid())
+                            throw std::runtime_error("Glass face-cull GPU upload invalid");
+                    }
+                }
+                continue;
+            }
+            // Incompatible native stream: upload the original finalized mesh
+            // unchanged rather than ever risking missing glass geometry.
+            state.sections[section].blendSource = cloneNativeMeshData(data);
+            if (uploadMode == Tessellator::UploadMode::Never)
+                destination = std::make_unique<mce::Mesh>(std::move(native));
+            else {
+                auto service = tessellator.mBufferResourceService.lock();
+                if (!service) throw std::runtime_error("Glass original GPU service expired");
+                destination = std::make_unique<mce::Mesh>(
+                    service, std::move(data), false, meshNames[bucketIndex]);
+            }
+            continue;
+        }        // Tessellator::end() can auto-generate supplementary vertex streams.
         // Prefer its finalized CPU MeshData when available. Buffered mode may
         // consume the source during upload, so keep a pre-end safety copy.
         std::unique_ptr<mce::MeshData> originalSource;
         if (bucket == RenderBucket::Blend
             && uploadMode != Tessellator::UploadMode::Never) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 tessellator.mMeshData.get()
             );
         }
@@ -988,7 +1135,7 @@ void buildProjectionSection(
         ));
         if (bucket == RenderBucket::Blend
             && !builtMesh->mMeshData.get().mPositions.get().empty()) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 builtMesh->mMeshData.get()
             );
         }
@@ -1398,7 +1545,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
             }
             cellVertices += added;
             liquidKinds.insert(liquidKinds.end(), added,
-                expectedLiquid->getBlockType().mMaterial.mSuperHot
+                expectedLiquid->getBlockType().mMaterial.get().mSuperHot
                     ? PraxisCompatLiquidKind::Lava : PraxisCompatLiquidKind::Water);
             cellUvVertices += addedUvs;
             cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
@@ -1692,7 +1839,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
-        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
+        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.get().mSuperHot
             ? PraxisCompatLiquidKind::Lava
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
@@ -1723,7 +1870,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         std::size_t waterCells{}, lavaCells{}, bubbleCells{};
         for (auto const index : succeeded) {
             auto const& entry = state.structure->renderBlocks[index];
-            if (entry.liquid && entry.liquid->getBlockType().mMaterial.mSuperHot)
+            if (entry.liquid && entry.liquid->getBlockType().mMaterial.get().mSuperHot)
                 ++lavaCells;
             else ++waterCells;
             if (entry.block && entry.block->getTypeName() == "minecraft:bubble_column")
@@ -1863,7 +2010,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         += waterSeedVertices;
     state.nativeLiquidTelemetry.praxisCompatLavaNativeVertices
         += lavaNativeVertices;
-    compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
+    compat->nativeStream = cloneNativeMeshData(meshData);
     compat->tessellatorState = {
         .isFormatFixed        = tessellator.mIsFormatFixed,
         .hasNormals           = tessellator.mHasNormals,
@@ -1989,9 +2136,6 @@ void buildLiquidProxySectionMesh(
             static_cast<int>(liquidProxyIndices.size() * 24),
             false
         );
-        auto const alpha = static_cast<uint>(std::lround(
-            normalizedLiquidProjectionOpacity(structureOpacity) * 255.0f
-        ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
             auto const* expectedLiquid = transformExpectedBlock(
@@ -2000,7 +2144,7 @@ void buildLiquidProxySectionMesh(
             if (!expectedLiquid) continue;
 
             bool const isLava = expectedLiquid->getTypeName().find("lava") != std::string::npos
-                || expectedLiquid->getBlockType().mMaterial.mSuperHot;
+                || expectedLiquid->getBlockType().mMaterial.get().mSuperHot;
             auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
             auto const* uvSetStill = graphics ? &graphics->getTexture(0, 0) : nullptr;
             auto const* uvSetFlow = graphics ? &graphics->getTexture(2, 0) : nullptr;
@@ -2044,17 +2188,16 @@ void buildLiquidProxySectionMesh(
                 state.anchor.y + offsetY + p.y,
                 state.anchor.z + offsetZ + p.z
             };
-            auto const neighborEntry = [&](int dx, int dy, int dz)
-                -> structure::LoadedStructure::RenderBlock const* {
-                auto const found = state.expectedWorldBlockIndices->find(std::tuple{
-                    worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
+            auto const neighborEntry = [&](int dx,int dy,int dz)
+                -> std::optional<structure::LoadedStructure::RenderBlock> {
+                auto const found=state.expectedWorldBlockIndices->find(std::tuple{
+                    worldPosition.x+dx,worldPosition.y+dy,worldPosition.z+dz
                 });
-                return found == state.expectedWorldBlockIndices->end()
-                        || found->second >= state.structure->renderBlocks.size()
-                    ? nullptr : &state.structure->renderBlocks[found->second];
-            };
-            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                if(found==state.expectedWorldBlockIndices->end()
+                    || found->second>=state.structure->renderBlocks.size())return {};
+                return state.structure->renderBlocks[found->second];
+            };            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
+                auto const neighbor = neighborEntry(dx, dy, dz);
                 if (!neighbor || !neighbor->liquid) return false;
                 auto const* transformed = transformExpectedBlock(
                     neighbor->liquid, sectionTransformSettings, identityTransform
@@ -2062,11 +2205,11 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return false;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 return neighborIsLava == isLava;
             };
             auto const neighborOccludesFace = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                auto const neighbor = neighborEntry(dx, dy, dz);
                 auto const opaqueFullBlock = neighbor && neighbor->block
                     && !neighbor->block->isAir()
                     && neighbor->block->getBlockType().mIsOpaqueFullBlock;
@@ -2095,8 +2238,8 @@ void buildLiquidProxySectionMesh(
                 return (8.0f - static_cast<float>(depth)) / 9.0f;
             };
             auto const columnHeight = [&](int dx, int dz) -> float {
-                auto const* n = (dx == 0 && dz == 0)
-                    ? &entry : neighborEntry(dx, 0, dz);
+                auto const neighbor=neighborEntry(dx,0,dz);
+                auto const* n=(dx==0 && dz==0) ? &entry : (neighbor ? &*neighbor : nullptr);
                 if (!n) return 0.0f;
                 if (!n->liquid) return -1.0f;
                 auto const* transformed = transformExpectedBlock(
@@ -2105,7 +2248,7 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return -1.0f;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 if (neighborIsLava != isLava) return -1.0f;
                 if (neighborIsSameLiquid(dx, 1, dz)) return 1.0f;
                 return fluidHeight(liquidDepth(*transformed));
@@ -2125,9 +2268,13 @@ void buildLiquidProxySectionMesh(
                 return count > 0 ? sum / static_cast<float>(count) : surface;
             };
 
-            auto const tint = isLava
-                ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
-                : (LiquidWaterTintAbgrRgb | (alpha << 24U));
+            // Native UV/face tint stays unchanged. Derive the same base
+            // alpha used by Exact Replay, then apply structure opacity.
+            auto const baseTint = (isLava ? LiquidLavaTintAbgrRgb : LiquidWaterTintAbgrRgb)
+                | 0xFF000000U;
+            auto const tint = applyLiquidProjectionOpacity(
+                applyPraxisCompatLiquidAlpha(baseTint, !isLava),
+                structureOpacity);
             auto const topColor = liquidProxyFaceColor(tint, LiquidProxyFace::Top);
             auto const bottomColor = liquidProxyFaceColor(tint, LiquidProxyFace::Bottom);
             auto const nsColor = liquidProxyFaceColor(tint, LiquidProxyFace::NorthSouth);
