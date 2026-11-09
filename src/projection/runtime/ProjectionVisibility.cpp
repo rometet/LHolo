@@ -55,12 +55,13 @@ void updateProjectionVisibility(ProjectionState& state, BaseActorRenderContext& 
     for(auto& sec:state.sections) {
         auto const view=classifyProjectionSection(frustum,sec.buildBounds,origin,farClip);
         if(sec.withinRetentionDistance!=view.withinRetentionDistance)retentionFlipped=true;
-        if(sec.renderVisible!=view.renderVisible
+        bool const renderVisible = view.renderVisible && !sec.layerStale;
+        if(sec.renderVisible!=renderVisible
             || sec.buildVisible!=view.buildVisible
             || sec.prefetchVisible!=view.prefetchVisible
             || sec.withinBuildDistance!=view.withinBuildDistance
             || sec.withinRetentionDistance!=view.withinRetentionDistance)changed=true;
-        sec.renderVisible=view.renderVisible;
+        sec.renderVisible=renderVisible;
         sec.buildVisible=view.buildVisible;
         sec.prefetchVisible=view.prefetchVisible;
         sec.withinBuildDistance=view.withinBuildDistance;

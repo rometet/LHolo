@@ -85,6 +85,10 @@ struct SectionState {
     bool withinRetentionDistance{true};
     Vec3    center{};
     bool    dirty{};
+    // A layer change invalidates the previous GPU mesh immediately. Hide it
+    // until a matching revision uploads; unrelated correction updates keep
+    // showing the existing mesh to avoid visual flicker.
+    bool    layerStale{};
     bool    modelDirty{true};
     bool    incrementalDirty{};
     bool    interactiveDirty{};

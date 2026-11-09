@@ -83,6 +83,27 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
 
 } // namespace
 
+bool refreshProjectionLayerView(
+    ProjectionState& state, BlockSource& region,
+    structure::LayerAxis axis, structure::LayerDisplayMode mode, int layer
+) {
+    if (!state.worldLookup || !state.blockTessellator || state.placementBuildActive)
+        return false;
+    // Publish a new immutable view so an already-running async tessellator
+    // continues using its own captured layer. Palette transforms and actors
+    // remain owned by the current placement; no full rebuild is needed.
+    auto lookup = std::make_shared<ProjectionWorldLookup>(
+        state.worldLookup->withLayer(axis, mode, layer));
+    state.blockTessellator->mCachedGetBlock.get()
+        = [lookup, regionAddress = &region](BlockPos const& position) -> Block const& {
+            auto const* found = lookup->blockAt(
+                std::tuple{position.x, position.y, position.z});
+            return found ? *found : regionAddress->getBlock(position);
+        };
+    state.worldLookup = std::move(lookup);
+    return true;
+}
+
 bool rebuildProjectionPlacement(
     ProjectionState&                   state,
     BlockSource&                       region,
@@ -188,16 +209,16 @@ bool rebuildProjectionPlacement(
             break;
         }
         auto const& entry = state.structure->renderBlocks[index];
-        if (!isLayerVisible(
-                projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
-                settings.layerDisplayMode,
-                settings.displayLayer,
-                entry.materialIndex,
-                entry.liquidMaterialIndex,
-                settings.layerAxis
-            )) {
-            // Hidden layers behave like completed cells for mesh generation,
-            // but are excluded from the world lookup below.
+        bool const visible = isLayerVisible(
+            projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
+            settings.layerDisplayMode, settings.displayLayer,
+            entry.materialIndex, entry.liquidMaterialIndex, settings.layerAxis);
+        // Retain native actors for *all* layers. A later layer-only switch
+        // changes just the immutable lookup view and visibility bitmask; it
+        // cannot safely construct native actors from the mesh worker.
+        bool const mayHaveActor = !visible && entry.block
+            && entry.block->getBlockType().getBlockEntityType() != BlockActorType::Undefined;
+        if (!visible && !mayHaveActor) {
             state.correctionStates.set(index, CorrectionState::Correct);
             state.placementBuildCursor = index + 1;
             continue;
@@ -260,6 +281,13 @@ bool rebuildProjectionPlacement(
             }
         }
 
+        if (!visible) {
+            // Retain the actor for future layer toggles, but keep hidden
+            // cells out of placement centers and correction rendering.
+            state.correctionStates.set(index, CorrectionState::Correct);
+            state.placementBuildCursor = index + 1;
+            continue;
+        }
         auto const section = state.blockToSection[index];
         if (section < state.placementCenterSums.size()) {
             state.placementCenterSums[section] += Vec3{

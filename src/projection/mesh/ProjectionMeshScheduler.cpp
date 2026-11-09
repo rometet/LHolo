@@ -575,6 +575,7 @@ void buildNextProjectionSectionSynchronously(
             );
         });
         state.sections[section].modelDirty = false;
+        state.sections[section].layerStale = false;
         state.sections[section].interactiveDirty = false;
         ++state.meshUploadRevision;
         state.drawCache.noteMeshUpload(section);

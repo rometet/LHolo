@@ -40,6 +40,22 @@ public:
         }
         mProbe = mFair = mSelections = 0;
     }
+    // Rescan only sections affected by a layer visibility change. Preserve
+    // the old pending work and its fair cursor; do not restart an entire
+    // million-cell correction pass for a one-layer toggle.
+    void revisitSections(std::span<std::vector<std::size_t> const> sections,
+                         std::span<std::uint8_t const> changed) {
+        auto const count = std::min({sections.size(), changed.size(), mOffsets.size()});
+        for (std::size_t section = 0; section < count; ++section) {
+            if (!changed[section] || sections[section].empty()) continue;
+            mOffsets[section] = 0;
+            auto const position = mPositions[section];
+            if (position >= mPending.size() || mPending[position] != section) {
+                mPositions[section] = mPending.size();
+                mPending.push_back(section);
+            }
+        }
+    }
     bool empty() const { return mPending.empty(); }
     std::size_t offset(std::size_t section) const { return mOffsets[section]; }
     template <class Priority>

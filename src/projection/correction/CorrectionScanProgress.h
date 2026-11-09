@@ -25,6 +25,10 @@ public:
             ++mChecked;
         }
     }
+    bool visited(std::size_t index) const noexcept {
+        return index < mTotal && (mVisited[index / 64]
+            & (std::uint64_t{1} << (index % 64))) != 0;
+    }
     bool complete() const { return mChecked == mTotal; }
 
 private:

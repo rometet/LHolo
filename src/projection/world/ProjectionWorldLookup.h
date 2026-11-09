@@ -26,7 +26,20 @@ public:
                           int layer,
                           BlockTransforms blocks)
         : mSource(std::move(source)), mOrigin(origin), mMirror(mirror), mRotation(rotation),
-          mAxis(axis), mMode(mode), mLayer(layer), mBlocks(std::move(blocks)) {}
+          mAxis(axis), mMode(mode), mLayer(layer),
+          mBlocks(std::make_shared<BlockTransforms const>(std::move(blocks))) {}
+
+    // The resolved palette is independent of layer visibility. Reuse it when
+    // changing only the visible layer, keeping in-flight workers' old views
+    // immutable and avoiding a million-cell placement rebuild.
+    ProjectionWorldLookup withLayer(structure::LayerAxis axis,
+                                    structure::LayerDisplayMode mode, int layer) const {
+        auto view = *this;
+        view.mAxis = axis;
+        view.mMode = mode;
+        view.mLayer = layer;
+        return view;
+    }
 
     std::optional<std::size_t> indexAt(Key const& key) const {
         if (!mSource) return {};
@@ -62,7 +75,7 @@ private:
         if (!value) return nullptr;
         // Placement resolves every source palette state before publication.
         // A missing transform is an invariant failure, never schematic air.
-        return mBlocks.at(value);
+        return mBlocks->at(value);
     }
     std::shared_ptr<structure::LoadedStructure const> mSource;
     std::array<long long, 3> mOrigin{};
@@ -70,6 +83,6 @@ private:
     structure::LayerAxis mAxis{structure::LayerAxis::Y};
     structure::LayerDisplayMode mMode{};
     int mLayer{};
-    BlockTransforms mBlocks;
+    std::shared_ptr<BlockTransforms const> mBlocks;
 };
 } // namespace lholo::projection::detail

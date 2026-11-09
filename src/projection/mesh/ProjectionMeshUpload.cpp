@@ -314,6 +314,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);
                 state.wrongOutlineSectionMeshes[section] = std::move(wrongOutline);
                 state.sections[section].uploadedRevision = result.revision;
+                state.sections[section].layerStale = false;
                 state.sections[section].meshBounds = result.meshBounds;
                 // Only a successfully uploaded original can contribute to a
                 // batch. An invalid GPU mesh must never be resurrected by

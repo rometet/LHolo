@@ -917,6 +917,14 @@ void submitProjectedBlockActorPass(
             || projected.structureIndex >= state.missingLayers.size()) {
             continue;
         }
+        // Old projected actors obey the same layer upload barrier as meshes.
+        // Retaining actors across layer changes must never show a hidden one
+        // before its section's matching GPU revision is ready.
+        if (projected.structureIndex < state.blockToSection.size()) {
+            auto const section = state.blockToSection[projected.structureIndex];
+            if (section < state.sections.size() && state.sections[section].layerStale)
+                continue;
+        }
         // Phase 16: only piston models receive conservative 16-block-expanded
         // frustum culling. Unlike the reverted Phase 13 optimization, this
         // never changes regular meshes, comparison colors or other actors.

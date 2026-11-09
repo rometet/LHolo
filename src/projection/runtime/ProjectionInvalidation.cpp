@@ -82,7 +82,8 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     // A placement/layer/rotation change marks sections below, after its
     // correction/progress invalidation. Do not issue two revision bumps in the
     // same reconcile call; an XYZ move still requires fresh world corrections.
-    if (!result.placementViewChanged() && (opacityChanged || correctionStyleChanged)) {
+    if ((!result.placementViewChanged() || result.layerOnlyChanged())
+        && (opacityChanged || correctionStyleChanged)) {
         // Opacity is baked into model vertex colors, so only it requires full
         // model rebuilds; correction-style changes rebuild overlays only.
         markAllSectionsDirty(state, false, opacityChanged);
@@ -106,8 +107,11 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         // Coalesce section dirtiness: incrementing revisions once per cell
         // caused unnecessary rebuild churn for large schematics.
         std::vector<std::uint8_t> visibilityChangedSections;
-        if (!result.geometryTransformChanged)
+        std::vector<std::uint8_t> newlyVisibleSections;
+        if (!result.geometryTransformChanged) {
             visibilityChangedSections.resize(state.sections.size());
+            newlyVisibleSections.resize(state.sections.size());
+        }
         auto const oldLayerVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
             if (!state.cachedLayerDisplayMode || !state.cachedLayerAxis) return false;
             auto const layer = projectionLayer(*state.structure, entry, *state.cachedLayerAxis, state.cachedMirror, state.cachedRotation);
@@ -125,8 +129,29 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             if (!result.geometryTransformChanged && oldLayerVisible(entry) == visible) continue;
             if (!result.geometryTransformChanged) {
                 auto const section = state.correctionStates.section(index);
-                if (section < visibilityChangedSections.size())
+                if (section < visibilityChangedSections.size()) {
                     visibilityChangedSections[section] = 1;
+                    if (visible) newlyVisibleSections[section] = 1;
+                }
+                // A cell hidden during initial placement was marked Correct
+                // solely to suppress its ghost. If never scanned, restore
+                // conservative Missing truth before exposing it to the mesh.
+                if (visible && !state.initialCorrectionScan.visited(index)) {
+                    state.correctionStates.set(index, CorrectionState::Missing);
+                    state.missingLayers[index] = MissingLayerBoth;
+                }
+                auto const oldError = state.progressErrorKind[index];
+                auto const truth = state.correctionStates.get(index);
+                std::uint8_t const newError = !visible ? 0
+                    : truth == CorrectionState::WrongType ? 1
+                    : truth == CorrectionState::WrongState ? 2 : 0;
+                if (oldError != newError) {
+                    if (oldError == 1 && state.progressWrongTypeCount) --state.progressWrongTypeCount;
+                    if (oldError == 2 && state.progressWrongStateCount) --state.progressWrongStateCount;
+                    if (newError == 1) ++state.progressWrongTypeCount;
+                    if (newError == 2) ++state.progressWrongStateCount;
+                    state.progressErrorKind[index] = newError;
+                }
             }
             state.correctionStates.setVisible(index, visible);
         }
@@ -142,6 +167,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             for (std::size_t section = 0; section < visibilityChangedSections.size(); ++section) {
                 if (!visibilityChangedSections[section]) continue;
                 markSectionDirty(state, section, false);
+                state.sections[section].layerStale = true;
                 if (section >= state.localSectionKeys.size()) continue;
                 auto const [x, y, z] = state.localSectionKeys[section];
                 for (auto const& delta : neighborOffsets) {
@@ -153,9 +179,18 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
                 }
             }
             for (std::size_t section = 0; section < overlayNeighbors.size(); ++section) {
-                if (overlayNeighbors[section] && !visibilityChangedSections[section])
-                    markSectionDirty(state, section, false, false);
+                if (overlayNeighbors[section] && !visibilityChangedSections[section]) {
+                    // Native model faces can be occluded by a neighbor's
+                    // newly hidden block, not just the correction overlay.
+                    markSectionDirty(state, section, false, true);
+                    state.sections[section].layerStale = true;
+                }
             }
+            // Already-scanned hidden cells keep their real-world truth.
+            // Only newly exposed sections need fresh comparisons; hiding a
+            // layer is a pure render-mask change, not a new correction scan.
+            state.correctionScan.revisitSections(state.sectionBlockIndices,
+                newlyVisibleSections);
         }
     }
 
@@ -174,7 +209,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     state.cachedComparisonStrength = settings.comparisonStrength;
     state.cachedCorrectionOutlineWidth = settings.correctionOutlineWidth;
 
-    if (result.placementViewChanged()) {
+    if (result.geometryTransformChanged || result.placementMoved) {
         state.detectedExtraBlockPositions.clear();
         state.detectedExtraSectionCounts.clear();
         state.extraBlockPositions.clear();
@@ -190,6 +225,24 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             state.progressWrongStateCount,
             0
         );
+    } else if (result.layerChanged) {
+        // Extra world cells are layer-dependent. Invalidate their old overlay
+        // sections, then rescan empty cells in the new visible range. Existing
+        // block truth, GPU meshes in unaffected sections and native actors stay.
+        for (std::size_t section = 0; section < state.sectionExtraBlockPositions.size(); ++section) {
+            if (!state.sectionExtraBlockPositions[section].empty()) {
+                markSectionDirty(state, section, false, false);
+                state.sections[section].layerStale = true;
+            }
+            state.sectionExtraBlockPositions[section].clear();
+        }
+        state.detectedExtraBlockPositions.clear();
+        state.detectedExtraSectionCounts.clear();
+        state.extraBlockPositions.clear();
+        state.progressExtraCount = 0;
+        state.extraScan.reset();
+        publishErrorProgress(state.progressWrongTypeCount,
+            state.progressWrongStateCount, 0);
     }
 
     // Rotation/mirror alter local block models, so only those require throwing

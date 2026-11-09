@@ -3,6 +3,9 @@
 #include "projection/correction/CorrectionCellClassification.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionMissingLayers.h"
+#include "projection/correction/CorrectionScanScheduler.h"
+#include "projection/correction/CorrectionScanProgress.h"
+#include "projection/runtime/ProjectionInvalidation.h"
 
 #include <chrono>
 #include <cstdio>
@@ -127,6 +130,49 @@ int runCorrectionBulkEventTests() {
         check(!projectionLiquidShouldRender(hiddenSnapshot.renderState(0), MissingLayerBoth));
         check(projectionBodyShouldRender(visibleSnapshot.renderState(0), MissingLayerBoth));
         check(projectionLiquidShouldRender(visibleSnapshot.renderState(0), MissingLayerBoth));
+    }
+
+    // A layer-only switch must not restart every schematic section. Revisit
+    // changed sections only, retaining previous pending corrections.
+    {
+        CorrectionScanProgress coverage;
+        coverage.reset(4);
+        check(!coverage.visited(0));
+        check(!coverage.visited(3));
+        coverage.record(1);
+        check(coverage.visited(1));
+        check(!coverage.visited(2));
+
+        std::vector<std::vector<std::size_t>> pages{{0, 1}, {2}, {3}};
+        CorrectionScanScheduler scan;
+        scan.reset(pages);
+        scan.advance(0, 2, 2);
+        scan.advance(1, 1, 1);
+        check(scan.offset(0) == 2 && scan.offset(1) == 1);
+        std::array<std::uint8_t, 3> changed{1, 0, 0};
+        scan.revisitSections(pages, changed);
+        check(scan.offset(0) == 0 && scan.offset(1) == 1);
+        auto choose = [&]() {
+            return scan.select([](std::size_t) { return CorrectionPriority{0, 0}; }, std::nullopt);
+        };
+        check(choose().has_value());
+        scan.advance(0, 2, 2);
+        scan.advance(2, 1, 1);
+        check(scan.empty());
+        changed = {0, 1, 0};
+        scan.revisitSections(pages, changed);
+        check(!scan.empty() && scan.offset(1) == 0);
+        scan.advance(1, 1, 1);
+        check(scan.empty());
+
+        ProjectionInvalidationResult layer{};
+        layer.layerChanged = true;
+        check(layer.layerOnlyChanged());
+        layer.placementMoved = true;
+        check(!layer.layerOnlyChanged());
+        layer.placementMoved = false;
+        layer.geometryTransformChanged = true;
+        check(!layer.layerOnlyChanged());
     }
 
     // Compare mixed enqueue/consume/transfer operations with an independent
