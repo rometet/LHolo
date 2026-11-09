@@ -42,8 +42,32 @@ jobs:
       - run: |
           xmake repo -u
 
-      - run: |
-          xmake f -a x64 -m release -p windows -v --target_type=client -y
+      - name: Resolve client dependencies (retry transient download errors)
+        shell: pwsh
+        run: |
+          # Xmake's release asset downloads can intermittently return HTTP 5xx.
+          # Retry *only* recognized transient network errors; compilation and
+          # package/configuration errors must still fail immediately.
+          $ErrorActionPreference = 'Continue'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Xmake dependency resolution attempt $attempt/$maxAttempts"
+            $configOutput = @()
+            & xmake f -a x64 -m release -p windows -v --target_type=client -y 2>&1 |
+              Tee-Object -Variable configOutput
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) { exit 0 }
+
+            $combined = $configOutput -join "`n"
+            $transient = $combined -match '(?i)(status=(429|500|502|503|504)|timed out|timeout|connection reset|failed to connect|could not resolve host|SSL connect error)'
+            if (-not $transient -or $attempt -eq $maxAttempts) {
+              Write-Error "Xmake failed (exit $exitCode). Transient network failure: $transient."
+              exit $exitCode
+            }
+            $delay = 25 * $attempt
+            Write-Warning "Transient package download failure; retrying in $delay seconds."
+            Start-Sleep -Seconds $delay
+          }
 
       - run: |
           xmake -v -y
