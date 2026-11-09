@@ -122,7 +122,9 @@ struct RegionMeshRetention {
     std::vector<std::vector<std::size_t>> sectionBlockIndices;
     std::vector<std::set<SubChunkKey>> sectionExtraBlocks;
     std::vector<SectionState> sections;
-    std::vector<CorrectionState> corrections;
+    // Region transfer owns the paged correction store without flattening
+    // millions of cells into a second transient array.
+    CorrectionStateStore corrections;
     std::vector<std::uint8_t> missingLayers;
     std::vector<std::uint8_t> actorRendererAvailable;
     std::vector<std::unique_ptr<mce::Mesh>> warningFill, correctionOutline,
