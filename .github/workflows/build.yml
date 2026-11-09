@@ -25,7 +25,21 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installer = Join-Path $env:RUNNER_TEMP 'LLVM-22.1.8-win64.exe'
           $llvmRoot = Join-Path $env:RUNNER_TEMP 'llvm-22.1.8'
-          Invoke-WebRequest 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' -OutFile $installer
+          $llvmUrl = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe'
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $llvmUrl -OutFile $installer -ErrorAction Stop
+              break
+            } catch {
+              $detail = $_.Exception.Message
+              $transient = $detail -match '(?i)(429|50[0234]|gateway time-out|timed out|timeout|connection reset|connection closed|failed to connect)'
+              if (-not $transient -or $attempt -eq 4) { throw }
+              Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+              $delay = 25 * $attempt
+              Write-Warning "LLVM download transient failure (attempt $attempt): $detail; retry in $delay seconds."
+              Start-Sleep -Seconds $delay
+            }
+          }
           $expected = '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
           if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
             throw 'LLVM installer checksum mismatch'
