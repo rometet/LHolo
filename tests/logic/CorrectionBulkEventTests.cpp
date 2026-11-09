@@ -2,6 +2,7 @@
 #include "projection/correction/CorrectionStateStore.h"
 #include "projection/correction/CorrectionCellClassification.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionMissingLayers.h"
 
 #include <chrono>
 #include <cstdio>
@@ -91,6 +92,41 @@ int runCorrectionBulkEventTests() {
         states.setVisible(1, false);
         check(states.renderState(1) == CorrectionState::Correct);
         check(snapshot.renderState(1) == CorrectionState::Missing);
+    }
+
+    // Regression: layer selection must gate both body and waterlogged liquid
+    // meshes, not just the missing/wrong correction overlay. The raw truth
+    // remains Missing/Unknown for progress while the render view is Correct.
+    // Exercise both the synchronous store and the immutable worker snapshot.
+    {
+        std::vector<std::vector<std::size_t>> pages{{0, 1, 2}};
+        CorrectionStateStore states;
+        states.initialize(pages, 3);
+        states.set(1, CorrectionState::Unknown);
+        states.setVisible(0, false);
+        states.setVisible(1, false);
+        std::array<std::size_t, 1> section{0};
+        auto hiddenSnapshot = states.capture(section);
+        check(states.get(0) == CorrectionState::Missing);
+        check(states.get(1) == CorrectionState::Unknown);
+        check(states.renderState(0) == CorrectionState::Correct);
+        check(states.renderState(1) == CorrectionState::Correct);
+        check(!projectionBodyShouldRender(states.renderState(0), MissingLayerBoth));
+        check(!projectionLiquidShouldRender(states.renderState(0), MissingLayerBoth));
+        check(!projectionBodyShouldRender(states.renderState(1), MissingLayerBoth));
+        check(!projectionBodyShouldRender(hiddenSnapshot.renderState(0), MissingLayerBoth));
+        check(!projectionLiquidShouldRender(hiddenSnapshot.renderState(0), MissingLayerBoth));
+        check(!projectionBodyShouldRender(hiddenSnapshot.renderState(1), MissingLayerBoth));
+        states.setVisible(0, true);
+        states.setVisible(1, true);
+        auto visibleSnapshot = states.capture(section);
+        check(projectionBodyShouldRender(states.renderState(0), MissingLayerBoth));
+        check(projectionLiquidShouldRender(states.renderState(0), MissingLayerBoth));
+        check(projectionBodyShouldRender(states.renderState(1), MissingLayerBoth));
+        check(!projectionBodyShouldRender(hiddenSnapshot.renderState(0), MissingLayerBoth));
+        check(!projectionLiquidShouldRender(hiddenSnapshot.renderState(0), MissingLayerBoth));
+        check(projectionBodyShouldRender(visibleSnapshot.renderState(0), MissingLayerBoth));
+        check(projectionLiquidShouldRender(visibleSnapshot.renderState(0), MissingLayerBoth));
     }
 
     // Compare mixed enqueue/consume/transfer operations with an independent

@@ -224,10 +224,14 @@ struct ProjectionState {
         return *value;
     }
     bool buildBodyShouldRender(std::size_t index) const {
-        return projectionBodyShouldRender(buildCorrectionState(index), buildMissingLayers(index));
+        // The model stream must honor the same layer visibility mask as
+        // correction outlines. buildCorrectionState() reads the raw truth
+        // (including hidden cells); renderCorrectionState() maps hidden
+        // cells to Correct in both synchronous and worker snapshots.
+        return projectionBodyShouldRender(renderCorrectionState(index), buildMissingLayers(index));
     }
     bool buildLiquidShouldRender(std::size_t index) const {
-        return projectionLiquidShouldRender(buildCorrectionState(index), buildMissingLayers(index));
+        return projectionLiquidShouldRender(renderCorrectionState(index), buildMissingLayers(index));
     }
     // One byte per structure block. This is updated by the existing bounded
     // correction scan, so the HUD never performs its own world-block queries.
