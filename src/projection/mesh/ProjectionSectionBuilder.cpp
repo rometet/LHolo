@@ -2253,9 +2253,24 @@ void buildLiquidProxySectionMesh(
             };
             auto const neighborOccludesFace = [&](int dx, int dy, int dz) {
                 auto const neighbor = neighborEntry(dx, dy, dz);
+                // Upstream 467d7ed: only cells with a projected model may hide
+                // this face (Missing/Unknown). Correct/WrongType/WrongState
+                // neighbors do not occlude by expectation; real-world
+                // occlusion remains handled by the depth test.
+                auto const neighborCorrection = [&]() -> std::optional<CorrectionState> {
+                    auto const found = state.worldLookup->indexAt(std::tuple{
+                        worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
+                    });
+                    if (!found || *found >= state.structure->renderBlocks.size()) return {};
+                    return state.renderCorrectionState(*found);
+                }();
+                auto const occludingCorrection = neighborCorrection
+                    && (*neighborCorrection == CorrectionState::Missing
+                        || *neighborCorrection == CorrectionState::Unknown);
                 auto const opaqueFullBlock = neighbor && neighbor->block
                     && !neighbor->block->isAir()
-                    && neighbor->block->getBlockType().mIsOpaqueFullBlock;
+                    && neighbor->block->getBlockType().mIsOpaqueFullBlock
+                    && occludingCorrection;
                 return liquidProxyFaceOccluded(
                     opaqueFullBlock,
                     neighborIsSameLiquid(dx, dy, dz)
