@@ -851,7 +851,7 @@ void buildProjectionSection(
             // from Bedrock, and palettes can omit derived connection states.
             // This scope supplies projected blocks to native reads; region
             // writes attempted by the update are suppressed.
-            Block const& renderBlock = withNeighborConnections(
+            Block const& renderBlock = withFlattenedConnections(
                 *layered.block, region, layered.position
             );
             auto const firstPosition = tessellator.mMeshData->mPositions.get().size();
