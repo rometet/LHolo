@@ -4,6 +4,7 @@
 #include "projection/runtime/ProjectionRegionMeshReuse.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/correction/CorrectionCellClassification.h"
 #include "projection/runtime/ProjectionRegionReusePolicy.h"
 #include "structure/StructureLoader.h"
 
@@ -180,21 +181,19 @@ std::size_t restoreUnchangedRegionMeshes(ProjectionState& now) noexcept {
                 // These HUD counters must agree with the restored state before
                 // the initial recheck runs, or a subsequent Correct->Missing
                 // transition would underflow progressCorrectCount.
+                auto const& cell = now.structure->renderBlocks[current];
+                auto const axis = now.cachedLayerAxis.value_or(structure::LayerAxis::Y);
+                auto const mode = now.cachedLayerDisplayMode.value_or(structure::LayerDisplayMode::All);
+                bool const visible = isLayerVisible(
+                    projectionLayer(*now.structure, cell, axis, now.cachedMirror, now.cachedRotation),
+                    mode, now.cachedDisplayLayer, cell.materialIndex,
+                    cell.liquidMaterialIndex, axis);
                 if (correction == CorrectionState::Correct) {
                     now.progressCorrect[current] = 1;
                     ++now.progressCorrectCount;
-                    auto const& cell = now.structure->renderBlocks[current];
-                    auto const axis = now.cachedLayerAxis.value_or(structure::LayerAxis::Y);
-                    auto const mode = now.cachedLayerDisplayMode.value_or(structure::LayerDisplayMode::All);
-                    if (isLayerVisible(
-                            projectionLayer(*now.structure, cell, axis, now.cachedMirror, now.cachedRotation),
-                            mode, now.cachedDisplayLayer, cell.materialIndex,
-                            cell.liquidMaterialIndex, axis))
-                        ++now.progressVisibleCorrectCount;
+                    if (visible) ++now.progressVisibleCorrectCount;
                 }
-                auto const errorKind = correction == CorrectionState::WrongType ? std::uint8_t{1}
-                                     : correction == CorrectionState::WrongState ? std::uint8_t{2}
-                                     : std::uint8_t{0};
+                auto const errorKind = correctionProgressErrorKind(correction, visible);
                 now.progressErrorKind[current] = errorKind;
                 if (errorKind == 1) ++now.progressWrongTypeCount;
                 else if (errorKind == 2) ++now.progressWrongStateCount;

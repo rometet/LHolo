@@ -60,6 +60,20 @@ int runCorrectionBulkEventTests() {
         check(classifyCorrectionCell(f).materialPresent == 0);
     }
 
+    // Region reuse and normal correction updates must agree on visible HUD
+    // error counters. Hidden wrong-state/type cells remain tracked as world
+    // truth, but may not inflate the error HUD before the initial rescan.
+    for (auto state : {CorrectionState::Unknown, CorrectionState::Missing,
+                       CorrectionState::Correct, CorrectionState::WrongType,
+                       CorrectionState::WrongState}) {
+        check(correctionProgressErrorKind(state, false) == 0);
+    }
+    check(correctionProgressErrorKind(CorrectionState::Correct, true) == 0);
+    check(correctionProgressErrorKind(CorrectionState::Missing, true) == 0);
+    check(correctionProgressErrorKind(CorrectionState::Unknown, true) == 0);
+    check(correctionProgressErrorKind(CorrectionState::WrongType, true) == 1);
+    check(correctionProgressErrorKind(CorrectionState::WrongState, true) == 2);
+
     // The immutable worker view survives COW updates, and queries outside its
     // captured neighbor pages are conservatively Unknown rather than UB.
     {

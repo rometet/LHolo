@@ -54,4 +54,13 @@ struct ClassifiedCorrectionCell {
                         : MissingLayerBoth};
 }
 
+// Error HUD counters exclude hidden cells. Region-mesh reuse must apply the
+// same visibility gate as ordinary world correction updates.
+[[nodiscard]] constexpr std::uint8_t correctionProgressErrorKind(
+    CorrectionState correction, bool visible) noexcept {
+    if (!visible) return 0;
+    return correction == CorrectionState::WrongType ? 1
+         : correction == CorrectionState::WrongState ? 2 : 0;
+}
+
 } // namespace lholo::projection::detail

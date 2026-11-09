@@ -284,9 +284,7 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
                 changes.visible = true;
             }
         }
-        auto const nextErrorKind = !visible ? uchar{0}
-            : nextState == CorrectionState::WrongType ? uchar{1}
-            : nextState == CorrectionState::WrongState ? uchar{2} : uchar{0};
+        auto const nextErrorKind = correctionProgressErrorKind(nextState, visible);
         auto const previousErrorKind = state.progressErrorKind[index];
         if (nextErrorKind != previousErrorKind) {
             if (previousErrorKind == 1 && state.progressWrongTypeCount != 0)
