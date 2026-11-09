@@ -6,6 +6,9 @@
 
 #include "projection/correction/ProjectionCorrectionTracker.h"
 #include "projection/correction/CorrectionUpdate.h"
+#include "projection/correction/CorrectionFrameBudget.h"
+#include "projection/correction/CorrectionScanScheduler.h"
+#include "projection/correction/CorrectionWorkQueues.h"
 #include "projection/mesh/ProjectionMeshScheduler.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
@@ -15,6 +18,11 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/core/ProjectionState.h"
 #include "structure/StructureLoader.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <optional>
 
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/block/BlockTessellator.h"
@@ -50,36 +58,145 @@ void processProjectionOpaqueFrame(
     auto& blockTessellator = *state.blockTessellator;
     blockTessellator.setRegion(region);
 
-    auto const correctionChanges = runCorrectionUpdate(
-        [&] {
-            return updateCorrectionTracker(
-                state,
-                region,
-                transformSettings,
-                buildSettings.mirrorMode,
-                buildSettings.rotationTurns,
-                buildSettings.offsetX,
-                buildSettings.offsetY,
-                buildSettings.offsetZ,
-                layerDisplayMode,
-                displayLayer,
-                layerAxis
-            );
-        },
-        []() noexcept { markProjectionWorldEventsFailed(); }
-    );
-    if (correctionChanges.overall) {
-        publishPlacedProgress(state.progressCorrectCount);
+    CorrectionFrameBudget budget;
+    auto started = CorrectionFrameBudget::Clock::now();
+    // Intake is bounded too. Leave most of the frame slice for actual
+    // comparisons when world notifications arrive continuously.
+    for (int batch = 0; batch < 8 && budget.available(); ++batch) {
+        if (batch && CorrectionFrameBudget::Clock::now() - started >= CorrectionFrameBudget::DefaultDuration / 4)
+            break;
+        auto events = takePendingBlockChanges(32);
+        auto chunks = takePendingLoadedSubChunks(2);
+        if (events.empty() && chunks.empty())
+            break;
+        // The single-file fork has no ProjectionWorldBounds helper; keep the
+        // same half-open structure AABB test inline. Structure cells occupy
+        // [origin, origin + size) per axis after the build transform.
+        bool const rotated = (buildSettings.rotationTurns & 1) != 0;
+        std::array<long long, 3> const origin{
+            static_cast<long long>(state.anchor.x) + buildSettings.offsetX,
+            static_cast<long long>(state.anchor.y) + buildSettings.offsetY,
+            static_cast<long long>(state.anchor.z) + buildSettings.offsetZ,
+        };
+        std::array<long long, 3> const structureMax{
+            origin[0] + (rotated ? state.structure->sizeZ : state.structure->sizeX),
+            origin[1] + state.structure->sizeY,
+            origin[2] + (rotated ? state.structure->sizeX : state.structure->sizeZ),
+        };
+        for (auto const& event : events) {
+            std::array<long long, 3> const position{
+                event.position.x, event.position.y, event.position.z
+            };
+            bool const inside = position[0] >= origin[0] && position[0] < structureMax[0]
+                && position[1] >= origin[1] && position[1] < structureMax[1]
+                && position[2] >= origin[2] && position[2] < structureMax[2];
+            if (inside)
+                state.correctionEvents.push(
+                    {event.position.x, event.position.y, event.position.z},
+                    event.destroyedAt
+                );
+        }
+        for (auto const& chunk : chunks) {
+            auto [x, y, z] = chunk;
+            std::array<long long, 3> const lo{
+                static_cast<long long>(x) * 16,
+                static_cast<long long>(y) * 16,
+                static_cast<long long>(z) * 16,
+            };
+            bool const overlaps = lo[0] < structureMax[0] && lo[0] + 16 > origin[0]
+                && lo[1] < structureMax[1] && lo[1] + 16 > origin[1]
+                && lo[2] < structureMax[2] && lo[2] + 16 > origin[2];
+            if (overlaps)
+                state.correctionSubChunks.push({x, y, z});
+        }
     }
-    if (correctionChanges.visible) {
-        publishVisiblePlacedProgress(state.progressVisibleCorrectCount);
-    }
-    if (correctionChanges.errors) {
-        publishErrorProgress(
-            state.progressWrongTypeCount,
-            state.progressWrongStateCount,
-            state.progressExtraCount
+    auto distance = [&](CorrectionPosition const& position, float scale) {
+        auto dx = position[0] * scale - cameraPosition.x;
+        auto dy = position[1] * scale - cameraPosition.y;
+        auto dz = position[2] * scale - cameraPosition.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    while (budget.available()) {
+        auto selected = selectCorrectionWork(
+            1, state.correctionWorkCursor,
+            [&](std::size_t, CorrectionWorkKind kind)
+                -> std::optional<CorrectionPriority> {
+                if (kind == CorrectionWorkKind::Event) {
+                    if (auto event = state.correctionEvents.front())
+                        return CorrectionPriority{0, distance(event->position, 1)};
+                } else if (kind == CorrectionWorkKind::Loaded) {
+                    if (auto chunk = state.correctionSubChunks.front())
+                        return CorrectionPriority{0, distance(chunk->position, 16)};
+                } else if (kind == CorrectionWorkKind::Initial) {
+                    if (!state.correctionScan.empty())
+                        return CorrectionPriority{0, 0.0f};
+                } else if (!state.extraScan.complete()) {
+                    return CorrectionPriority{0, 0.0f};
+                }
+                return std::nullopt;
+            }
         );
+        if (!selected)
+            break;
+        auto changes = runCorrectionUpdate(
+            [&] {
+                return updateCorrectionTracker(
+                    state,
+                    region,
+                    transformSettings,
+                    buildSettings.mirrorMode,
+                    buildSettings.rotationTurns,
+                    buildSettings.offsetX,
+                    buildSettings.offsetY,
+                    buildSettings.offsetZ,
+                    layerDisplayMode,
+                    displayLayer,
+                    layerAxis,
+                    cameraPosition,
+                    selected->kind,
+                    budget
+                );
+            },
+            []() noexcept { markProjectionWorldEventsFailed(); }
+        );
+        if (changes.overall) {
+            publishPlacedProgress(state.progressCorrectCount);
+        }
+        if (changes.visible) {
+            publishVisiblePlacedProgress(state.progressVisibleCorrectCount);
+        }
+        if (changes.errors) {
+            publishErrorProgress(
+                state.progressWrongTypeCount,
+                state.progressWrongStateCount,
+                state.progressExtraCount
+            );
+        }
+    }
+    auto const micros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            CorrectionFrameBudget::Clock::now() - started
+        ).count()
+    );
+    ++state.correctionFrames;
+    state.correctionMicros += micros;
+    state.correctionWork += budget.work();
+    state.correctionPeakMicros = std::max(state.correctionPeakMicros, micros);
+    if (state.correctionFrames % 120 == 0) {
+        auto const emptyCells = state.correctionEmptyFastCells;
+        auto const probes = state.correctionEmptyProbes;
+        state.correctionEmptyFastCells = state.correctionEmptyProbes = 0;
+        LHolo::getInstance().getSelf().getLogger().debug(
+            "Projection correction: average/peak {} / {} us, average {} work units, target {} us; empty fast-path {} cells / {} probes",
+            state.correctionMicros / state.correctionFrames,
+            state.correctionPeakMicros,
+            state.correctionWork / state.correctionFrames,
+            CorrectionFrameBudget::DefaultDuration.count(),
+            emptyCells,
+            probes
+        );
+        state.correctionFrames = state.correctionMicros = 0;
+        state.correctionPeakMicros = state.correctionWork = 0;
     }
 
     // Consume completed CPU data only in the opaque render pass.
