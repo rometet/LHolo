@@ -109,8 +109,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
 
     auto const updateCorrection = [&](std::size_t index) {
         auto const& entry = state.structure->renderBlocks[index];
-        auto const visible = isLayerVisible(layerAxis == structure::LayerAxis::X ? entry.x : entry.y, layerDisplayMode,
-                                            displayLayer, entry.materialIndex, entry.liquidMaterialIndex, layerAxis);
+        auto const visible = isLayerVisible(
+            projectionLayer(*state.structure, entry, layerAxis, mirrorMode, rotationTurns),
+            layerDisplayMode, displayLayer, entry.materialIndex, entry.liquidMaterialIndex, layerAxis);
         auto const transformed = transformStructurePosition(entry, *state.structure, mirrorMode, rotationTurns);
         BlockPos const position{state.anchor.x + offsetX + transformed.x, state.anchor.y + offsetY + transformed.y,
                                 state.anchor.z + offsetZ + transformed.z};
@@ -292,8 +293,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
                 state.pendingBrokenCells.push_back({world.x, world.y, world.z, destroyedAt});
             updateCorrection(*found);
         } else if (isStructureCellCovered(*state.structure, local)) {
-            bool visible = isLayerVisible(layerAxis == structure::LayerAxis::X ? local.x : local.y, layerDisplayMode,
-                                          displayLayer, -1, -1, layerAxis);
+            bool visible = isLayerVisible(
+                projectionLayer(*state.structure, local, layerAxis, mirrorMode, rotationTurns),
+                layerDisplayMode, displayLayer, -1, -1, layerAxis);
             updateExtra(local, world, visible);
         }
     };
@@ -378,8 +380,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
             auto transformed = transformStructurePosition(local, *state.structure, mirrorMode, rotationTurns);
             BlockPos world{state.anchor.x + offsetX + transformed.x, state.anchor.y + offsetY + transformed.y,
                            state.anchor.z + offsetZ + transformed.z};
-            bool visible = isLayerVisible(layerAxis == structure::LayerAxis::X ? local.x : local.y, layerDisplayMode,
-                                          displayLayer, -1, -1, layerAxis);
+            bool visible = isLayerVisible(
+                projectionLayer(*state.structure, local, layerAxis, mirrorMode, rotationTurns),
+                layerDisplayMode, displayLayer, -1, -1, layerAxis);
             updateExtra(local, world, visible);
             // A tile with previously detected extras must visit those cells to
             // remove their counts/meshes. Fresh empty tiles may skip in bulk.
