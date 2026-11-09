@@ -186,9 +186,10 @@ std::size_t restoreUnchangedRegionMeshes(ProjectionState& now) noexcept {
                     auto const& cell = now.structure->renderBlocks[current];
                     auto const axis = now.cachedLayerAxis.value_or(structure::LayerAxis::Y);
                     auto const mode = now.cachedLayerDisplayMode.value_or(structure::LayerDisplayMode::All);
-                    if (isLayerVisible(axis == structure::LayerAxis::X ? cell.x : cell.y,
-                                       mode, now.cachedDisplayLayer, cell.materialIndex,
-                                       cell.liquidMaterialIndex, axis))
+                    if (isLayerVisible(
+                            projectionLayer(*now.structure, cell, axis, now.cachedMirror, now.cachedRotation),
+                            mode, now.cachedDisplayLayer, cell.materialIndex,
+                            cell.liquidMaterialIndex, axis))
                         ++now.progressVisibleCorrectCount;
                 }
                 auto const errorKind = correction == CorrectionState::WrongType ? std::uint8_t{1}
