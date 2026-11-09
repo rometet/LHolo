@@ -51,6 +51,10 @@ struct MaterialPtr{int id{17};};struct TexturePtr{int id{23};};
 inline std::unique_ptr<mce::MeshData> cloneNativeMeshData(mce::MeshData const& source) {
     return std::make_unique<mce::MeshData>(source);
 }
+inline void swapNativeMeshDataFields(mce::MeshData& lhs, mce::MeshData& rhs) noexcept {
+    using std::swap;
+    swap(lhs, rhs);
+}
 namespace render {
 struct TextureVariant {
     mce::TexturePtr const* source;
