@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include <optional>
 #include "structure/StructureLoader.h"
 
 #include "mc/util/Mirror.h"
@@ -112,6 +113,13 @@ bool isStructureCellCovered(
     structure::LoadedStructure const& loaded,
     BlockPos const&                    position
 );
+
+struct ProjectionCellBox { std::array<int, 3> minimum{}, maximum{}; };
+// World subchunk intersected with the transformed structure, returned in local
+// cells (maximum exclusive). A local 16^3 tile need not align to the world grid.
+std::optional<ProjectionCellBox> projectionSectionLocalIntersection(
+    std::array<int, 3> const& section, structure::LoadedStructure const& loaded,
+    BlockPos const& origin, int mirror, int rotation);
 
 bool isLayerVisible(
     int layer,
