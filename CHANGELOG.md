@@ -1,5 +1,15 @@
 # Changelog
 
+## v26.60.0-port.6 - 2026-11-10
+
+- Port upstream correction state and bounded comparison work with bulk world events, stable progress counts and section-scoped snapshots.
+- Stream projection mesh residency and preserve large-schematic rendering when moving away and back.
+- Fix single-layer model, liquid and comparison face visibility, including face culling at section boundaries.
+- Fast layer switching: retain transformed palette and native block-actor ownership, rebuild changed/adjacent sections, refresh newly exposed correction sections, and hide stale meshes until upload.
+- Keep existing water, lava, glass transparency and Praxis integration behavior.
+- Target Minecraft Bedrock Windows 1.26.60.05 with LeviLamina Client 26.60.0. Release tests and user in-game coverage are specific to this environment.
+- Earlier stable release v26.60.0-port.5 remains available.
+
 ## Unreleased — upstream verifier state fixes (2026-11-02)
 
 - Port four narrowly scoped upstream comparison fixes for scaffolding stability markers, daylight detector output, leaf persistence/update bits, and native door/trapdoor property gating.

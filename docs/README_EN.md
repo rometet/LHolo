@@ -4,7 +4,7 @@
 
 **LHolo** is a client-side schematic projection and building-assistance mod for Minecraft Bedrock Edition on Windows, built on [LeviLamina Client](https://github.com/LiteLDev/LeviLamina). It supports Bedrock `.mcstructure` and Java Litematica `.litematic` files.
 
-> The current public prerelease is **`v26.60.0-port.5`**, intended for **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60.x / Windows x64**. Builds for Minecraft 1.26.51 (the `v26.51.2-ja.x` series) remain available under past release tags.
+> The current public prerelease is **`v26.60.0-port.6`**, intended for **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60.x / Windows x64**. Builds for Minecraft 1.26.51 (the `v26.51.2-ja.x` series) remain available under past release tags.
 
 ## Installation
 

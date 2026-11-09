@@ -12,7 +12,7 @@
 [**ダウンロード**](https://github.com/rometet/LHolo/releases) · [**導入方法**](#導入方法) · [**基本操作**](#基本操作) · [English](docs/README_EN.md) · [简体中文](docs/README_ZH_CN.md)
 
 > [!IMPORTANT]
-> 公開中の最新プレリリースは **`v26.60.0-port.5`** です。対応環境は **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60系 / Windows x64**。Minecraft 1.26.51 向けの旧ビルド（`v26.51.2-ja.x` 系）は [Releases](https://github.com/rometet/LHolo/releases) の過去タグから入手できます。
+> 公開中の最新プレリリースは **`v26.60.0-port.6`** です。対応環境は **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60系 / Windows x64**。Minecraft 1.26.51 向けの旧ビルド（`v26.51.2-ja.x` 系）は [Releases](https://github.com/rometet/LHolo/releases) の過去タグから入手できます。
 
 ## 主な機能
 

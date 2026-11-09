@@ -6,7 +6,7 @@
 
 支持读取 Bedrock `.mcstructure` 与 Java Litematica `.litematic` 文件。本分支默认使用**日语**和居中的 Praxis 风格菜单。
 
-> 当前公开预览版：`v26.60.0-port.5`。适用于 **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60.x / Windows x64**。面向 Minecraft 1.26.51 的旧版本（`v26.51.2-ja.x` 系列）可在历史标签中获取。
+> 当前公开预览版：`v26.60.0-port.6`。适用于 **Minecraft Bedrock 1.26.60.05 / LeviLamina Client 26.60.x / Windows x64**。面向 Minecraft 1.26.51 的旧版本（`v26.51.2-ja.x` 系列）可在历史标签中获取。
 
 ## 下载与安装
 
