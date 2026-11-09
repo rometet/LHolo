@@ -493,6 +493,32 @@ void buildBlockEntityPlaceholderSectionMesh(
     std::span<std::size_t const>
 );
 
+void buildProjectionCorrectionSection(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    std::size_t                           section,
+    Tessellator::UploadMode               uploadMode,
+    ProjectionSectionBuildSettings const& settings
+) {
+    detail::buildCorrectionSectionMeshes(state, tessellator, section, uploadMode, settings);
+    // Retain the previous complete bounds and only expand them. This is
+    // conservative when an old marker disappears and never clips kept models.
+    auto&           bounds = state.sections[section].meshBounds;
+    ProjectionBounds update;
+    bool            complete = true;
+    auto            include  = [&](std::unique_ptr<mce::Mesh> const& mesh) {
+        if (!mesh) return;
+        auto const& positions = mesh->mMeshData.get().mPositions.get();
+        if (positions.empty() && mesh->mVertexCount.get().value_or(0u) > 0) complete = false;
+        for (auto const& vertex : positions) update.include({vertex.x, vertex.y, vertex.z});
+    };
+    include(state.warningFillSectionMeshes[section]);
+    include(state.correctionOutlineSectionMeshes[section]);
+    include(state.wrongFillSectionMeshes[section]);
+    include(state.wrongOutlineSectionMeshes[section]);
+    bounds = mergeCorrectionBounds(bounds, update, complete);
+}
+
 void buildProjectionSection(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
@@ -552,6 +578,11 @@ void buildProjectionSection(
         }
     }
 
+    if (sectionBuildSettings.correctionOnly) {
+        buildProjectionCorrectionSection(state, tessellator, section, uploadMode, sectionBuildSettings);
+        return;
+    }
+    state.sections[section].meshBounds = {};
     auto const mirror                   = sectionBuildSettings.mirror;
     auto const rotation                 = sectionBuildSettings.rotation;
     auto const mirrorMode               = sectionBuildSettings.mirrorMode;
@@ -755,7 +786,7 @@ void buildProjectionSection(
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
     NativeGeometryProbe geometryProbe;
     if (std::any_of(compositeBodyOutcomes.begin(), compositeBodyOutcomes.end(), [&](auto const& cell) {
-            return state.buildCorrectionState(cell.structureIndex) == CorrectionState::Missing;
+            return state.renderCorrectionState(cell.structureIndex) == CorrectionState::Missing;
         })) {
         geometryProbe.batch = gGeometryProbeBuilds.fetch_add(1, std::memory_order_relaxed);
         geometryProbe.active = geometryProbe.batch < 16;
@@ -1042,7 +1073,7 @@ void buildProjectionSection(
                 && data.mIndices.get().empty() && positions.size() % 4 == 0) {
                 hiddenGlassFaces.assign(positions.size() / 4, 0);
                 for (auto const& glass : glassRanges) {
-                    if (state.buildCorrectionState(glass.structureIndex) != CorrectionState::Missing)
+                    if (state.renderCorrectionState(glass.structureIndex) != CorrectionState::Missing)
                         continue;
                     std::array<float, 3> const cell{
                         static_cast<float>(glass.position.x - origin.x),
@@ -1068,7 +1099,7 @@ void buildProjectionSection(
                         if (found != state.expectedWorldBlocks->end()
                             && found->second == glass.block
                             && index != state.expectedWorldBlockIndices->end()
-                            && state.buildCorrectionState(index->second) == CorrectionState::Missing)
+                            && state.renderCorrectionState(index->second) == CorrectionState::Missing)
                             hiddenGlassFaces[face] = 1;
                     }
                 }
@@ -1274,6 +1305,25 @@ void buildProjectionSection(
     detail::buildCorrectionSectionMeshes(
         state, tessellator, section, uploadMode, sectionBuildSettings
     );
+    auto& bounds = state.sections[section].meshBounds;
+    bool  completeBounds = true;
+    auto  includeMesh = [&](std::unique_ptr<mce::Mesh> const& mesh) {
+        if (!mesh) return;
+        auto const& positions = mesh->mMeshData.get().mPositions.get();
+        // Some synchronous upload paths release their CPU vertices. In that
+        // case visibility must fail open, never infer bounds from a subset.
+        if (positions.empty() && mesh->mVertexCount.get().value_or(0u) > 0) completeBounds = false;
+        for (auto const& v : positions) bounds.include({v.x, v.y, v.z});
+    };
+    for (auto const& mesh : state.sections[section].meshes) includeMesh(mesh);
+    includeMesh(state.warningFillSectionMeshes[section]);
+    includeMesh(state.correctionOutlineSectionMeshes[section]);
+    includeMesh(state.wrongFillSectionMeshes[section]);
+    includeMesh(state.wrongOutlineSectionMeshes[section]);
+    includeMesh(state.nativeLiquidSectionMeshes[section]);
+    includeMesh(state.liquidProxySectionMeshes[section]);
+    includeMesh(state.blockEntityPlaceholderSectionMeshes[section]);
+    if (!completeBounds) bounds.valid = false;
     auto micros = [](auto a, auto b) -> std::uint64_t {
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
@@ -2370,7 +2420,7 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.buildCorrectionState(index) != CorrectionState::Missing
+        if (state.renderCorrectionState(index) != CorrectionState::Missing
             || (state.buildMissingLayers(index) & MissingLayerBody) == 0) continue;
         if (state.buildActorRendererAvailable(index)) continue;
         blockEntityIndices.push_back(index);
@@ -2491,7 +2541,7 @@ void buildCorrectionSectionMeshes(
     std::vector<CorrectionCell> wrongCells;
     if (normalizeComparisonStrength(settings.comparisonStrength) != 0.0f) {
         for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.buildCorrectionState(index);
+            auto const correction = state.renderCorrectionState(index);
             if (correctionPriority(correction) == 0) continue;
             auto const& entry = state.structure->renderBlocks[index];
             if (correction == CorrectionState::Missing && !entry.block && entry.liquid) {
@@ -2760,7 +2810,7 @@ void buildCorrectionSectionMeshes(
             });
             auto priority = expected == state.expectedWorldBlockIndices->end()
                     || !state.hasBuildBlockState(expected->second)
-                ? 0 : correctionPriority(state.buildCorrectionState(expected->second));
+                ? 0 : correctionPriority(state.renderCorrectionState(expected->second));
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
                 *state.structure,

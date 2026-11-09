@@ -75,6 +75,7 @@ struct SectionState {
     // Conservative geometry AABB; fallback visibility stays true until layout
     // and camera matrices are ready.
     ProjectionBounds buildBounds{};
+    ProjectionBounds meshBounds{};
     bool renderVisible{true};
     bool buildVisible{true};
     bool prefetchVisible{true};
