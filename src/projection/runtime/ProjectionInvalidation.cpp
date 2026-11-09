@@ -100,7 +100,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     };
     // LayerRange changes only invalidate sections containing blocks whose
     // visibility crossed the old/new boundary.
-    if (result.layerChanged && !result.geometryTransformChanged) {
+    if (result.layerChanged || result.geometryTransformChanged) {
         auto const oldLayerVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
             if (!state.cachedLayerDisplayMode || !state.cachedLayerAxis) return false;
             auto const layer = projectionLayer(*state.structure, entry, *state.cachedLayerAxis, state.cachedMirror, state.cachedRotation);
@@ -112,10 +112,15 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
             auto const& entry = state.structure->renderBlocks[index];
             auto const visible = layerIsVisible(entry);
-            if (oldLayerVisible(entry) == visible) continue;
-            auto const section = state.correctionStates.section(index);
-            if (section < state.sections.size()) {
-                markSectionDirty(state, section, false);
+            // Rotation and initial placement also change which cells the paged
+            // correction store must expose. Never leave its default all-visible
+            // mask in place for a hidden layer.
+            if (!result.geometryTransformChanged && oldLayerVisible(entry) == visible) continue;
+            if (!result.geometryTransformChanged) {
+                auto const section = state.correctionStates.section(index);
+                if (section < state.sections.size()) {
+                    markSectionDirty(state, section, false);
+                }
             }
             state.correctionStates.setVisible(index, visible);
         }
