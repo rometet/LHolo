@@ -93,6 +93,10 @@ public:
         auto const location = (*mLayout)[index];
         return mPages[location.section]->states[location.slot];
     }
+    // Read-only compatibility for generic section-snapshot collectors that
+    // accept either std::vector<CorrectionState> or this paged store.
+    // Mutations must still go through set() to preserve copy-on-write.
+    CorrectionState operator[](std::size_t index) const { return get(index); }
     CorrectionState renderState(std::size_t index) const {
         auto const location = (*mLayout)[index];
         auto const& page = *mPages[location.section];
