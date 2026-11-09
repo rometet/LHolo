@@ -32,7 +32,7 @@ ProjectionQuery queryProjectionCell(
     Block const* block = state.worldLookup->blockAt(key);
     // Liquids have no normal block item, so they are never a valid place target.
     if (block && block->getBlockType().mMaterial.get().mLiquid) block = nullptr;
-    bool const missing = state.correctionStates[foundIndex->second] == CorrectionState::Missing;
+    bool const missing = state.correctionStates.get(*foundIndex) == CorrectionState::Missing;
     return {block, missing};
 }
 
@@ -59,7 +59,7 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
                 if (!foundIndex || *foundIndex >= state.correctionStates.size()) {
                     continue;
                 }
-                if (state.correctionStates[*foundIndex] != CorrectionState::Missing) continue;
+                if (state.correctionStates.get(*foundIndex) != CorrectionState::Missing) continue;
                 double const dx = static_cast<double>(x) + 0.5 - center.x;
                 double const dy = static_cast<double>(y) + 0.5 - center.y;
                 double const dz = static_cast<double>(z) + 0.5 - center.z;
