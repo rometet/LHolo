@@ -147,7 +147,7 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
                             // Normalize Java or unflattened palette states before
                             // comparing with the real world's current permutation.
                             withFlattenedConnections(*expected, region, position), actual)) ||
-                       (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid)) {
+                       (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid))) {
                 nextState = CorrectionState::WrongState;
             }
             return nextState;
