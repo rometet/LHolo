@@ -55,9 +55,23 @@ void trimProjectionMeshResidency(ProjectionState& state) {
         if (index < state.wrongFillSectionMeshes.size()) state.wrongFillSectionMeshes[index].reset();
         if (index < state.wrongOutlineSectionMeshes.size()) state.wrongOutlineSectionMeshes[index].reset();
         if (index < state.blockEntityPlaceholderSectionMeshes.size()) state.blockEntityPlaceholderSectionMeshes[index].reset();
+        // Evicting typed liquid streams must also retire their derived, cross-section
+        // aggregate and boundary mask; otherwise the aggregate retains evicted
+        // section data and can be reused after the section goes out of range.
+        bool const hadTypedLiquid =
+            (index < state.nativeLiquidSectionMeshes.size() && state.nativeLiquidSectionMeshes[index]) ||
+            (index < state.praxisCompatLiquidSections.size() && state.praxisCompatLiquidSections[index]);
         if (index < state.nativeLiquidSectionMeshes.size()) state.nativeLiquidSectionMeshes[index].reset();
         if (index < state.praxisCompatLiquidSections.size()) state.praxisCompatLiquidSections[index].reset();
         if (index < state.liquidProxySectionMeshes.size()) state.liquidProxySectionMeshes[index].reset();
+        if (index < state.nativeLiquidSectionCellCounts.size()) state.nativeLiquidSectionCellCounts[index] = 0;
+        if (index < state.liquidProxySectionCellCounts.size()) state.liquidProxySectionCellCounts[index] = 0;
+        if (hadTypedLiquid) {
+            state.praxisCompatLiquidAggregate.reset();
+            state.praxisCompatLiquidAggregateOrder.clear();
+            state.praxisCompatLiquidBoundaryMaskCache.clear();
+            state.praxisCompatLiquidAggregateDirty = true;
+        }
         // Batched CPU sources referenced the evicted meshes; the caches
         // rebuild lazily on the next draw, exactly like invalidation does.
         state.correctionDrawBatches.clear();
@@ -68,6 +82,9 @@ void trimProjectionMeshResidency(ProjectionState& state) {
         section.uploadedRevision = 0;
         ++section.requestedRevision;
         ++state.meshUploadRevision;
+        // Revision bumps must name the evicted section even when other sections
+        // uploaded this frame: otherwise incremental draw lists keep stale slots.
+        state.drawCache.noteMeshUpload(index);
         ++released;
     }
 }
