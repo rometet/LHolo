@@ -29,6 +29,8 @@ struct AsyncSectionBuildResult {
     std::uint64_t snapshotDataMicros{};
     std::uint64_t chunkViewMicros{};
     std::uint64_t workerBuildMicros{};
+    std::size_t   correctionSnapshotBytes{};
+    bool          correctionOnly{};
     std::uint64_t bodyClassifyMicros{};
     std::uint64_t bodyTessellateMicros{};
     std::uint64_t liquidMicros{};
