@@ -14,6 +14,7 @@
 #include "projection/correction/CorrectionAirScan.h"
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/world/ProjectionWorldLookup.h"
 #include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/core/ProjectionDrawCache.h"
@@ -87,6 +88,8 @@ struct SectionState {
     bool    incrementalDirty{};
     bool    interactiveDirty{};
     bool    buildInFlight{};
+    bool    residencyDeferred{};
+    std::size_t residentBytes{};
     std::uint64_t requestedRevision{};
     std::uint64_t uploadedRevision{};
     // The blend mesh is re-sorted only after the camera moves by a quarter
@@ -170,6 +173,12 @@ struct ProjectionState {
     ProjectionTransparentBatchCache transparentDrawBatches;
     std::uint64_t meshUploadRevision{};
     std::uint64_t visibilityRevision{};
+    // Bounded mesh residency: distant sections are evicted above the global
+    // geometry budget and deferred until the camera moves again.
+    std::uint64_t                           residencyTrimRevision{};
+    Vec3                                    residencyCamera{};
+    bool                                    hasResidencyCamera{};
+    std::optional<float>                    residencyDistanceLimit;
     std::uint64_t meshBuildSelections{};
     std::uint64_t visibilityBoundsGeneration{};
     std::size_t visibilityBoundsSections{};
@@ -370,18 +379,17 @@ struct ProjectionState {
     std::uint64_t                           meshWorkerFillRunOriginalFaces{};
     std::uint64_t                           meshWorkerFillRunQuads{};
     std::uint64_t                           meshWorkerPeakUploadMicros{};
-    std::shared_ptr<ExpectedBlockMap>        expectedWorldBlocks{std::make_shared<ExpectedBlockMap>()};
-    // Bedrock stores the solid/body layer and liquid layer independently.
-    // Keeping a separate immutable map preserves waterlogged cells instead of
-    // forcing one layer to overwrite the other at the same world coordinate.
-    std::shared_ptr<ExpectedLiquidMap>       expectedWorldLiquids{std::make_shared<ExpectedLiquidMap>()};
+    // One immutable placement view shared by the active projection and
+    // workers. Body and liquid layers resolve independently through the same
+    // on-demand coordinate inversion, preserving waterlogged two-layer cells
+    // (fork semantics previously provided by the separate liquid map).
+    std::shared_ptr<ProjectionWorldLookup const> worldLookup{
+        std::make_shared<ProjectionWorldLookup>()
+    };
     std::shared_ptr<ExpectedBlockActorMap>   expectedWorldBlockActors{
         std::make_shared<ExpectedBlockActorMap>()
     };
     std::vector<ProjectedBlockActor>         projectedBlockActors;
-    std::shared_ptr<ExpectedBlockIndexMap>   expectedWorldBlockIndices{
-        std::make_shared<ExpectedBlockIndexMap>()
-    };
 
     // Building the transformed virtual-world lookup is O(N) in structure
     // cells. Keep it incremental so a large projection never monopolizes one

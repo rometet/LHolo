@@ -191,17 +191,8 @@ struct ProjectedBlockActor {
     bool         pistonCandidate{}; // classified once during placement
 };
 
-using ExpectedBlockMap = std::unordered_map<
-    SubChunkKey, Block const*, SubChunkKeyHash
->;
-using ExpectedLiquidMap = std::unordered_map<
-    SubChunkKey, Block const*, SubChunkKeyHash
->;
 using ExpectedBlockActorMap = std::unordered_map<
     SubChunkKey, std::shared_ptr<BlockActor>, SubChunkKeyHash
->;
-using ExpectedBlockIndexMap = std::unordered_map<
-    SubChunkKey, std::size_t, SubChunkKeyHash
 >;
 
 } // namespace lholo::projection::detail
