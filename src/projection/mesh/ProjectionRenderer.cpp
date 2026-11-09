@@ -2060,6 +2060,7 @@ void submitProjectionMeshPass(
     struct MaterialStateRestore {
         mce::RenderMaterial* material{};
         std::optional<mce::BlendStateDescription> blend;
+        std::optional<mce::DepthWriteMask> depthWriteMask;
         mce::PrimitiveMode primitive{};
         float depthBias{};
         float slopeBias{};
@@ -2067,6 +2068,7 @@ void submitProjectionMeshPass(
         ~MaterialStateRestore() {
             if (!material || !blend) return;
             material->blendStateDescription.get() = *blend;
+            if (depthWriteMask) material->depthStencilStateDescription.get().depthWriteMask = *depthWriteMask;
             material->mDepthBias = depthBias;
             material->mSlopeScaledDepthBias = slopeBias;
             if (restorePrimitive) material->mPrimitiveMode = primitive;
@@ -2086,11 +2088,16 @@ void submitProjectionMeshPass(
             restore.depthBias = renderMaterial->mDepthBias;
             restore.slopeBias = renderMaterial->mSlopeScaledDepthBias;
             restore.restorePrimitive = true;
+            auto& depthState = renderMaterial->depthStencilStateDescription.get();
+            restore.depthWriteMask = depthState.depthWriteMask;
+            depthState.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
             renderMaterial->mPrimitiveMode = mce::PrimitiveMode::QuadList;
             renderMaterial->blendStateDescription.get()
                 = blendRenderMaterial->blendStateDescription.get();
             renderMaterial->mDepthBias = 100.0f;
             renderMaterial->mSlopeScaledDepthBias = 15.0f;
+            render::ScopedShaderColor fillColor{renderContext.mScreenContext.currentShaderColor,
+                mce::Color{1.f, 1.f, 1.f, std::clamp(state.cachedCorrectionFillOpacity, 0.f, 1.f)}};
             renderOverlayMeshes(state.warningFillSectionMeshes, outlineMaterial, missingSeeThrough, ProjectionDrawSlot::MissingFill);
             renderOverlayMeshes(state.wrongFillSectionMeshes, outlineMaterial, correctionSeeThrough, ProjectionDrawSlot::WrongFill);
         }
