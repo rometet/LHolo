@@ -1,4 +1,5 @@
 #include "projection/correction/CorrectionWorkQueues.h"
+#include "projection/correction/CorrectionStateStore.h"
 #include "projection/core/ProjectionRules.h"
 
 #include <chrono>
@@ -17,6 +18,25 @@ int runCorrectionBulkEventTests() {
             if (failures < 12) std::fprintf(stderr, "Correction bulk event check %d failed\n", checks);
         }
     };
+
+    // The immutable worker view survives COW updates, and queries outside its
+    // captured neighbor pages are conservatively Unknown rather than UB.
+    {
+        std::vector<std::vector<std::size_t>> pages{{0, 1}, {2, 3}};
+        CorrectionStateStore states;
+        states.initialize(pages, 4);
+        std::array<std::size_t, 1> selectedPage{0};
+        auto snapshot = states.capture(selectedPage);
+        check(snapshot.renderState(0) == CorrectionState::Missing);
+        check(snapshot.renderState(2) == CorrectionState::Unknown);
+        check(snapshot.renderState(123) == CorrectionState::Unknown);
+        states.set(0, CorrectionState::Correct);
+        check(snapshot.renderState(0) == CorrectionState::Missing);
+        check(states.renderState(0) == CorrectionState::Correct);
+        states.setVisible(1, false);
+        check(states.renderState(1) == CorrectionState::Correct);
+        check(snapshot.renderState(1) == CorrectionState::Missing);
+    }
 
     // Compare mixed enqueue/consume/transfer operations with an independent
     // coordinate map, including lower bits arriving after the cursor advanced.

@@ -46,6 +46,17 @@ struct MeshData {
 };
 struct MaterialPtr{int id{17};};struct TexturePtr{int id{23};};
 }
+// The production 26.60 renderer uses a native MeshData clone helper.
+// This CPU fixture preserves the allocation-failure behavior with its mock copy constructor.
+inline std::unique_ptr<mce::MeshData> cloneNativeMeshData(mce::MeshData const& source) {
+    return std::make_unique<mce::MeshData>(source);
+}
+namespace render {
+struct TextureVariant {
+    mce::TexturePtr const* source;
+    explicit TextureVariant(mce::TexturePtr const& texture) : source(&texture) {}
+};
+}
 struct QuadInfo {std::size_t id{};};
 struct TessState {
     bool isFormatFixed{},hasNormals{},indexPhase{},noColor{},buildFaceData{},quadTwoSided{};
@@ -78,9 +89,9 @@ struct Log{template<class...T>void warn(T const&...){}};
 inline Log& logger(){static Log l;return l;}
 struct MeshHelpers {
     static void renderMeshImmediately(ScreenContext&,Tessellator& t,mce::MaterialPtr const& m,
-        std::initializer_list<std::reference_wrapper<mce::TexturePtr const>> textures,int capture){
+        render::TextureVariant const& texture,int capture){
         WC(resourcepacks::notifications==submits+1); // missing/late/duplicate is rejected
-        WC(m.id==17);WC(textures.size()==1);WC(textures.begin()->get().id==23);WC(capture==0);WC(beginFlag);
+        WC(m.id==17);WC(texture.source && texture.source->id==23);WC(capture==0);WC(beginFlag);
         submitted=std::make_unique<mce::MeshData>(t.mMeshData.get());submittedMetadata=t.mQuadInfoList.get();submittedCount=t.mCount;++submits;
     }
 };

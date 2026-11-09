@@ -50,11 +50,18 @@ public:
 
     public:
         CorrectionState renderState(std::size_t index) const {
+            // A worker only snapshots its local neighborhood. An unexpected
+            // out-of-snapshot query must not dereference end() in Release;
+            // treating it as Unknown conservatively retains the ghost model.
+            if (!mLayout || index >= mLayout->size())
+                return CorrectionState::Unknown;
             auto const location = (*mLayout)[index];
             auto const found =
                 std::lower_bound(mPages.begin(), mPages.end(), location.section,
                                  [](Entry const& entry, std::size_t section) { return entry.section < section; });
-            assert(found != mPages.end() && found->section == location.section);
+            if (found == mPages.end() || found->section != location.section || !found->page
+                || location.slot >= found->page->states.size())
+                return CorrectionState::Unknown;
             return found->page->isVisible(location.slot) ? found->page->states[location.slot]
                                                          : CorrectionState::Correct;
         }

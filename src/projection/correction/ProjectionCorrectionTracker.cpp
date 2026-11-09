@@ -9,6 +9,7 @@
 #include "projection/correction/ProjectionCorrectionTracker.h"
 #include "projection/world/CorrectionWorldReader.h"
 #include "projection/correction/CorrectionMeshRules.h"
+#include "projection/correction/ExtraCellRegistration.h"
 #include <utility>
 
 #include "block/BlockPlacementRules.h"
@@ -16,6 +17,7 @@
 #include "projection/core/ProjectionState.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
+#include "structure/MaterialTypePresence.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -23,6 +25,7 @@
 #include <cmath>
 #include <array>
 #include <cassert>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
 
@@ -38,14 +41,41 @@ SubChunkKey localSectionKey(BlockPos const& position) {
     return correctionSectionKey(position.x, position.y, position.z);
 }
 
+// Extra-only correction sections share the same section index as every
+// renderer-owned stream. Publishing only a subset creates an out-of-range
+// section which cannot build and may crash downstream indexing.
+bool sectionStorageAligned(ProjectionState const& state) {
+    auto const count = state.sections.size();
+    return state.localSectionKeys.size() == count
+        && state.sectionBlockIndices.size() == count
+        && state.sectionExtraBlockPositions.size() == count
+        && state.warningFillSectionMeshes.size() == count
+        && state.correctionOutlineSectionMeshes.size() == count
+        && state.wrongFillSectionMeshes.size() == count
+        && state.wrongOutlineSectionMeshes.size() == count
+        && state.nativeLiquidSectionMeshes.size() == count
+        && state.praxisCompatLiquidSections.size() == count
+        && state.liquidProxySectionMeshes.size() == count
+        && state.nativeLiquidSectionCellCounts.size() == count
+        && state.liquidProxySectionCellCounts.size() == count
+        && state.blockEntityPlaceholderSectionMeshes.size() == count;
+}
+
 std::size_t ensureCorrectionSection(
     ProjectionState& state,
     BlockPos const&  position,
     BlockPos const&  transformedPosition
 ) {
+    // Do not extend a partially failed epoch. The correction callback boundary
+    // will invalidate it and request a clean projection reload.
+    if (!sectionStorageAligned(state))
+        throw std::runtime_error("correction section storage is not aligned");
+
     auto const key = localSectionKey(position);
     if (auto const found = state.localSectionIndices.find(key);
         found != state.localSectionIndices.end()) {
+        if (found->second >= state.sections.size())
+            throw std::out_of_range("correction section index is invalid");
         if (state.sectionBlockIndices[found->second].empty()) {
             state.sections[found->second].center = Vec3{
                 static_cast<float>(transformedPosition.x) + 0.5f,
@@ -55,11 +85,8 @@ std::size_t ensureCorrectionSection(
         }
         return found->second;
     }
+
     auto const section = state.sections.size();
-    state.localSectionIndices.emplace(key, section);
-    state.localSectionKeys.push_back(key);
-    state.sectionBlockIndices.emplace_back();
-    state.sectionExtraBlockPositions.emplace_back();
     SectionState sectionState;
     sectionState.buildBounds = projectionSectionBounds(
         key, *state.structure, state.cachedMirror, state.cachedRotation
@@ -71,14 +98,69 @@ std::size_t ensureCorrectionSection(
     };
     sectionState.dirty = true;
     sectionState.requestedRevision = 1;
-    state.sections.push_back(std::move(sectionState));
-    state.warningFillSectionMeshes.emplace_back();
-    state.correctionOutlineSectionMeshes.emplace_back();
-    state.wrongFillSectionMeshes.emplace_back();
-    state.wrongOutlineSectionMeshes.emplace_back();
-    state.liquidProxySectionMeshes.emplace_back();
-    state.blockEntityPlaceholderSectionMeshes.emplace_back();
-    return section;
+
+    auto rollback = [&] {
+        state.sections.resize(section);
+        state.localSectionKeys.resize(section);
+        state.sectionBlockIndices.resize(section);
+        state.sectionExtraBlockPositions.resize(section);
+        state.warningFillSectionMeshes.resize(section);
+        state.correctionOutlineSectionMeshes.resize(section);
+        state.wrongFillSectionMeshes.resize(section);
+        state.wrongOutlineSectionMeshes.resize(section);
+        state.nativeLiquidSectionMeshes.resize(section);
+        state.praxisCompatLiquidSections.resize(section);
+        state.liquidProxySectionMeshes.resize(section);
+        state.nativeLiquidSectionCellCounts.resize(section);
+        state.liquidProxySectionCellCounts.resize(section);
+        state.blockEntityPlaceholderSectionMeshes.resize(section);
+    };
+
+    try {
+        // Reserve every owner before appending to maintain the index invariant
+        // even when one of the native/standard allocations fails.
+        auto const size = section + 1;
+        state.sections.reserve(size);
+        state.localSectionKeys.reserve(size);
+        state.sectionBlockIndices.reserve(size);
+        state.sectionExtraBlockPositions.reserve(size);
+        state.warningFillSectionMeshes.reserve(size);
+        state.correctionOutlineSectionMeshes.reserve(size);
+        state.wrongFillSectionMeshes.reserve(size);
+        state.wrongOutlineSectionMeshes.reserve(size);
+        state.nativeLiquidSectionMeshes.reserve(size);
+        state.praxisCompatLiquidSections.reserve(size);
+        state.liquidProxySectionMeshes.reserve(size);
+        state.nativeLiquidSectionCellCounts.reserve(size);
+        state.liquidProxySectionCellCounts.reserve(size);
+        state.blockEntityPlaceholderSectionMeshes.reserve(size);
+
+        state.sections.push_back(std::move(sectionState));
+        state.localSectionKeys.push_back(key);
+        state.sectionBlockIndices.emplace_back();
+        state.sectionExtraBlockPositions.emplace_back();
+        state.warningFillSectionMeshes.emplace_back();
+        state.correctionOutlineSectionMeshes.emplace_back();
+        state.wrongFillSectionMeshes.emplace_back();
+        state.wrongOutlineSectionMeshes.emplace_back();
+        state.nativeLiquidSectionMeshes.emplace_back();
+        state.praxisCompatLiquidSections.emplace_back();
+        state.liquidProxySectionMeshes.emplace_back();
+        state.nativeLiquidSectionCellCounts.emplace_back();
+        state.liquidProxySectionCellCounts.emplace_back();
+        state.blockEntityPlaceholderSectionMeshes.emplace_back();
+
+        // The lookup becomes visible only after all parallel storage exists.
+        auto const [found, inserted] = state.localSectionIndices.emplace(key, section);
+        if (!inserted) {
+            rollback();
+            return found->second;
+        }
+        return section;
+    } catch (...) {
+        rollback();
+        throw;
+    }
 }
 
 } // namespace
@@ -217,7 +299,14 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
         bool empty = worldReader.empty(worldPosition);
         if (empty)
             ++state.correctionEmptyFastCells;
-        bool const isExtra = !empty && !region.getBlock(worldPosition).isAir();
+        // Preserve the Count Extras toggle, layer visibility, loaded-chunk
+        // filter and placeholder exclusion from the pre-port implementation.
+        bool isExtra = false;
+        if (state.cachedCountExtras && visible && !empty
+            && region.areChunksFullyLoaded(worldPosition, 0)) {
+            auto const& actual = region.getBlock(worldPosition);
+            isExtra = !actual.isAir() && !structure::placeholderBlock(actual.getTypeName());
+        }
         auto const detected = state.detectedExtraBlockPositions.find(key);
         if (isExtra != (detected != state.detectedExtraBlockPositions.end())) {
             if (isExtra) {
@@ -227,6 +316,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
             } else {
                 state.detectedExtraBlockPositions.erase(detected);
                 auto count = state.detectedExtraSectionCounts.find(localSectionKey(localPosition));
+                if (count == state.detectedExtraSectionCounts.end() || count->second == 0
+                    || state.progressExtraCount == 0)
+                    throw std::runtime_error("extra correction count invariant lost");
                 if (--count->second == 0)
                     state.detectedExtraSectionCounts.erase(count);
                 --state.progressExtraCount;
@@ -244,8 +336,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
             auto const transformedPosition =
                 transformStructurePosition(localPosition, *state.structure, mirrorMode, rotationTurns);
             section = ensureCorrectionSection(state, localPosition, transformedPosition);
-            state.extraBlockPositions.insert(key);
-            state.sectionExtraBlockPositions[section].insert(key);
+            // The global and per-section indexes are one logical write.
+            // Restore the transactional helper from the pre-port tracker.
+            registerExtraCell(state.extraBlockPositions, state.sectionExtraBlockPositions[section], key);
         } else {
             auto const sectionFound = state.localSectionIndices.find(localSectionKey(localPosition));
             if (sectionFound == state.localSectionIndices.end())
