@@ -202,10 +202,10 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
             // exposed face added or removed (including across 16^3 borders).
             constexpr int neighbors[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
             for (auto const& delta : neighbors) {
-                auto const neighbor = state.expectedWorldBlockIndices->find(
+                auto const neighbor = state.worldLookup->indexAt(
                     std::tuple{position.x + delta[0], position.y + delta[1], position.z + delta[2]});
-                if (neighbor != state.expectedWorldBlockIndices->end()) {
-                    markDirty(state.correctionStates.section(neighbor->second), models);
+                if (neighbor) {
+                    markDirty(state.correctionStates.section(*neighbor), models);
                 }
             }
         }

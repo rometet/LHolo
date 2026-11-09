@@ -529,10 +529,8 @@ void buildProjectionSection(
     ProjectionSectionBuildSettings const& sectionBuildSettings
 ) {
     if (!state.structure
-        || !state.expectedWorldBlocks
-        || !state.expectedWorldLiquids
+        || !state.worldLookup
         || !state.expectedWorldBlockActors
-        || !state.expectedWorldBlockIndices
         || section >= state.sections.size()
         || section >= state.sectionBlockIndices.size()
         || section >= state.sectionExtraBlockPositions.size()
@@ -778,8 +776,7 @@ void buildProjectionSection(
         bubbleNativeAttempted.reserve(bubbleCellCount);
     auto const classifiedAt = std::chrono::steady_clock::now();
     ScopedTessellationBlocks tessellationBlocksScope(
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors,
         &state.nativeLiquidTelemetry
     );
@@ -1094,12 +1091,11 @@ void buildProjectionSection(
                             glass.position.y + (*neighborDelta)[1],
                             glass.position.z + (*neighborDelta)[2]
                         };
-                        auto const found = state.expectedWorldBlocks->find(neighbor);
-                        auto const index = state.expectedWorldBlockIndices->find(neighbor);
-                        if (found != state.expectedWorldBlocks->end()
-                            && found->second == glass.block
-                            && index != state.expectedWorldBlockIndices->end()
-                            && state.renderCorrectionState(index->second) == CorrectionState::Missing)
+                        auto const* found = state.worldLookup->blockAt(neighbor);
+                        auto const index = state.worldLookup->indexAt(neighbor);
+                        if (found == glass.block
+                            && index
+                            && state.renderCorrectionState(*index) == CorrectionState::Missing)
                             hiddenGlassFaces[face] = 1;
                     }
                 }
@@ -2237,12 +2233,12 @@ void buildLiquidProxySectionMesh(
             };
             auto const neighborEntry = [&](int dx,int dy,int dz)
                 -> std::optional<structure::LoadedStructure::RenderBlock> {
-                auto const found=state.expectedWorldBlockIndices->find(std::tuple{
+                auto const found=state.worldLookup->indexAt(std::tuple{
                     worldPosition.x+dx,worldPosition.y+dy,worldPosition.z+dz
                 });
-                if(found==state.expectedWorldBlockIndices->end()
-                    || found->second>=state.structure->renderBlocks.size())return {};
-                return state.structure->renderBlocks[found->second];
+                if(!found
+                    || *found>=state.structure->renderBlocks.size())return {};
+                return state.structure->renderBlocks[*found];
             };            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
                 auto const neighbor = neighborEntry(dx, dy, dz);
                 if (!neighbor || !neighbor->liquid) return false;
@@ -2805,12 +2801,12 @@ void buildCorrectionSectionMeshes(
                 state.anchor.y + settings.offsetY + p.y + dy,
                 state.anchor.z + settings.offsetZ + p.z + dz
             };
-            auto const expected = state.expectedWorldBlockIndices->find(std::tuple{
+            auto const expected = state.worldLookup->indexAt(std::tuple{
                 worldPosition.x, worldPosition.y, worldPosition.z
             });
-            auto priority = expected == state.expectedWorldBlockIndices->end()
-                    || !state.hasBuildBlockState(expected->second)
-                ? 0 : correctionPriority(state.renderCorrectionState(expected->second));
+            auto priority = !expected
+                    || !state.hasBuildBlockState(*expected)
+                ? 0 : correctionPriority(state.renderCorrectionState(*expected));
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
                 *state.structure,
