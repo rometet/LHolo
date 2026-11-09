@@ -2563,6 +2563,7 @@ void testRedstoneNativeRenderPass() {
 
 int runMcstructureInputTests();
 int runStructureBlocksCompactTests();
+int runCorrectionBulkEventTests();
 int main() {
     try {
     testRedstoneNativeRenderPass();
@@ -2633,6 +2634,7 @@ int main() {
     testI18n();
     LHOLO_CHECK(runMcstructureInputTests() == 0);
     LHOLO_CHECK(runStructureBlocksCompactTests() == 0);
+    LHOLO_CHECK(runCorrectionBulkEventTests() == 0);
     lholo::tests::runHudControlChecks([](bool ok) { LHOLO_CHECK(ok); });
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
