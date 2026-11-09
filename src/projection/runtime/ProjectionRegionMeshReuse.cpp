@@ -197,7 +197,8 @@ std::size_t restoreUnchangedRegionMeshes(ProjectionState& now) noexcept {
                 now.progressErrorKind[current] = errorKind;
                 if (errorKind == 1) ++now.progressWrongTypeCount;
                 else if (errorKind == 2) ++now.progressWrongStateCount;
-                now.initialCorrectionScan.record(current);
+                // Keep initial scan coverage pending: transferred results are
+                // a provisional snapshot until the new world is rechecked.
                 now.missingLayers[current]=saved->missingLayers[previous];
                 now.blockActorRendererAvailable[current]=saved->actorRendererAvailable[previous];
             }
