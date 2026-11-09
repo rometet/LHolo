@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/runtime/ProjectionFramePipeline.h"
+#include "projection/mesh/ProjectionMeshResidency.h"
 #include "resourcepacks/WorldPackReloadState.h"
 
 #include "projection/correction/ProjectionCorrectionTracker.h"
@@ -224,12 +225,14 @@ void processProjectionOpaqueFrame(
     // the render owner. This marker is not a private GPU completion receipt.
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     uploadCompletedProjectionMeshes(state, tessellator);
+    trimProjectionMeshResidency(state, cameraPosition);
     scheduleProjectionMeshBuild(
         state, tessellator, region, cameraPosition, buildSettings
     );
     buildNextProjectionSectionSynchronously(
         state, tessellator, blockTessellator, region, buildSettings
     );
+    if (!state.asyncMeshBuildingEnabled) trimProjectionMeshResidency(state, cameraPosition);
 }
 
 } // namespace lholo::projection::detail

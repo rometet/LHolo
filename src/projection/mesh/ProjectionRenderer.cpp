@@ -887,8 +887,7 @@ void submitProjectedBlockActorPass(
 ) {
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (state.projectedBlockActors.empty()
-        || !state.expectedWorldBlocks
-        || !state.expectedWorldLiquids
+        || !state.worldLookup
         || !state.expectedWorldBlockActors) {
         return;
     }
@@ -909,8 +908,7 @@ void submitProjectedBlockActorPass(
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
     ScopedRegionWriteSuppression projectedWrites;
     ScopedTessellationBlocks blockActorWorldScope(
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors
     );
     for (auto const& projected : state.projectedBlockActors) {

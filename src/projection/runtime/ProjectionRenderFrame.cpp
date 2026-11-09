@@ -251,8 +251,7 @@ void renderProjection(
     // The render callback can race a world/dimension transition. Never
     // dereference a player or immutable projection maps after they disappear.
     if (!player || !state.structure || !state.blockTessellator
-        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
-        || !state.expectedWorldBlockIndices || !state.expectedWorldBlockActors) {
+        || !state.worldLookup || !state.expectedWorldBlockActors) {
         return;
     }
 
@@ -594,11 +593,11 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
     return ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe&) {
             if (state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive) {
-                auto const found = state.expectedWorldBlockIndices->find(
+                auto const found = state.worldLookup->indexAt(
                     std::tuple{pos.x, pos.y, pos.z}
                 );
-                if (found != state.expectedWorldBlockIndices->end() && found->second < state.correctionStates.size()) {
-                    auto const correctionState = state.correctionStates[found->second];
+                if (found && *found < state.correctionStates.size()) {
+                    auto const correctionState = state.correctionStates[*found];
                     if (correctionState == CorrectionState::WrongType
                         || correctionState == CorrectionState::WrongState) {
                         // LHolo already renders a complete red/yellow hull and

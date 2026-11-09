@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionMeshScheduler.h"
+#include "projection/mesh/ProjectionMeshResidency.h"
 #include "projection/correction/CorrectionMeshRules.h"
 #include "resourcepacks/WorldPackReloadState.h"
 
@@ -66,6 +67,7 @@ std::optional<std::size_t> selectNextDirtySection(
             };
             auto const delta=center-cameraPosition;
             bool const ready = sec.dirty && sec.withinBuildDistance && !sec.buildInFlight
+                && canBuildResidentSection(state, index, cameraPosition)
                 && !projectionSectionHasPendingCorrection(state, index, settings);
             return ProjectionBuildCandidate{
                 ready,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
@@ -120,10 +122,8 @@ bool validateMeshData(
 
 bool sectionBuildStorageReady(ProjectionState const& state, std::size_t section) {
     return state.structure
-        && state.expectedWorldBlocks
-        && state.expectedWorldLiquids
+        && state.worldLookup
         && state.expectedWorldBlockActors
-        && state.expectedWorldBlockIndices
         && section < state.sections.size()
         && section < state.sectionBlockIndices.size()
         && section < state.sectionExtraBlockPositions.size()
@@ -293,10 +293,8 @@ void scheduleProjectionMeshBuild(
     snapshot->sectionBlockSnapshot.emplace();
     snapshot->sectionBlockSnapshot->capture(std::move(snapshotIndices),
         state.correctionStates, state.blockActorRendererAvailable);
-    snapshot->expectedWorldBlocks = state.expectedWorldBlocks;
-    snapshot->expectedWorldLiquids = state.expectedWorldLiquids;
+    snapshot->worldLookup = state.worldLookup;
     snapshot->expectedWorldBlockActors = state.expectedWorldBlockActors;
-    snapshot->expectedWorldBlockIndices = state.expectedWorldBlockIndices;
     snapshot->sections.resize(1);
     snapshot->sections[0].meshBounds = state.sections[section].meshBounds;
     snapshot->warningFillSectionMeshes.resize(1);
@@ -401,11 +399,11 @@ void scheduleProjectionMeshBuild(
                     BlockTessellator localBlockTessellator(localRegion.get());
                     localBlockTessellator.mCachedGetBlock.get()
                         = [snapshot, region = localRegion.get()](BlockPos const& position) -> Block const& {
-                            auto const found = snapshot->expectedWorldBlocks->find(
+                            auto const* found = snapshot->worldLookup->blockAt(
                                 std::tuple{position.x, position.y, position.z}
                             );
-                            return found == snapshot->expectedWorldBlocks->end()
-                                ? region->getBlock(position) : *found->second;
+                            return !found
+                                ? region->getBlock(position) : *found;
                         };
                     buildProjectionSection(
                         *snapshot,
@@ -581,6 +579,7 @@ void buildNextProjectionSectionSynchronously(
         state.sections[section].modelDirty = false;
         state.sections[section].interactiveDirty = false;
         ++state.meshUploadRevision;
+        recordProjectionResidentBytes(state, section);
         state.drawCache.noteMeshUpload(section);
         break;
     }

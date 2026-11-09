@@ -8,6 +8,7 @@
 
 #include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
+#include "projection/mesh/ProjectionMeshResidency.h"
 
 #include "plugin/LHolo.h"
 #include "projection/core/ProjectionInternalTypes.h"
@@ -334,6 +335,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     state.correctionDrawBatches.clear();
                 }
                 ++state.meshUploadRevision;
+                recordProjectionResidentBytes(state, section);
                 state.drawCache.noteMeshUpload(section);
                 state.sections[section].incrementalDirty = false;
                 state.sections[section].interactiveDirty = false;
