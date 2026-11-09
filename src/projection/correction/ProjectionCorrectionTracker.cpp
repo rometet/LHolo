@@ -9,6 +9,7 @@
 #include "projection/correction/ProjectionCorrectionTracker.h"
 #include "projection/world/CorrectionWorldReader.h"
 #include "projection/correction/CorrectionMeshRules.h"
+#include "projection/correction/CorrectionCellClassification.h"
 #include "projection/correction/ExtraCellRegistration.h"
 #include <utility>
 
@@ -18,6 +19,7 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "structure/StructureLoader.h"
 #include "structure/MaterialTypePresence.h"
+#include "structure/Verification.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -172,6 +174,13 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
                                                   structure::LayerAxis layerAxis, Vec3 const& cameraPosition,
                                                   CorrectionWorkKind work, CorrectionFrameBudget& budget) {
     CorrectionProgressChanges changes;
+    if (!state.structure || !state.worldLookup)
+        return changes;
+    auto const count = state.structure->renderBlocks.size();
+    if (state.missingLayers.size() < count || state.correctionStates.size() < count
+        || state.progressCorrect.size() < count || state.progressMaterialTypePresent.size() < count
+        || state.progressErrorKind.size() < count || state.blockToSection.size() < count)
+        throw std::runtime_error("correction cell storage is not aligned");
     struct DirtySection {
         std::size_t section;
         bool models;
@@ -197,13 +206,22 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
         auto const transformed = transformStructurePosition(entry, *state.structure, mirrorMode, rotationTurns);
         BlockPos const position{state.anchor.x + offsetX + transformed.x, state.anchor.y + offsetY + transformed.y,
                                 state.anchor.z + offsetZ + transformed.z};
-        auto classify = [&]() {
-            if (worldReader.empty(position)) {
-                ++state.correctionEmptyFastCells;
-                return CorrectionState::Missing;
-            }
+        auto classify = [&]() -> ClassifiedCorrectionCell {
             auto const* expected = transformExpectedBlock(entry.block, transformSettings, identityTransform);
             auto const* expectedLiquid = transformExpectedBlock(entry.liquid, transformSettings, identityTransform);
+            // The uniform-air fast path must still respect unloaded chunks,
+            // placeholder palette entries, and body/liquid material semantics.
+            if (worldReader.empty(position)) {
+                ++state.correctionEmptyFastCells;
+                bool const ready = region.areChunksFullyLoaded(position, 0)
+                    && (!expected || !structure::placeholderBlock(expected->getTypeName()))
+                    && (!expectedLiquid || !structure::placeholderBlock(expectedLiquid->getTypeName()));
+                bool const bodyMissing = expected != nullptr;
+                bool const liquidMissing = expectedLiquid != nullptr;
+                return classifyCorrectionCell({ready, expected != nullptr, expectedLiquid != nullptr,
+                    bodyMissing, liquidMissing, false, false, false, true, true});
+            }
+
             auto const& actual = region.getBlock(position);
             auto const isBubbleColumn = (expected && expected->getTypeName() == "minecraft:bubble_column") ||
                                         (actual.getTypeName() == "minecraft:bubble_column");
@@ -218,51 +236,62 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
                 expectedLiquid && !actualLiquid.isAir() && actualLiquid.getTypeName() != expectedLiquid->getTypeName();
             auto const liquidCellOccupiedBySolid =
                 !expected && expectedLiquid && !actual.isAir() && actual.getTypeName() != expectedLiquid->getTypeName();
-            auto nextState = CorrectionState::Correct;
-            if (bodyMissing || liquidMissing) {
-                nextState = CorrectionState::Missing;
-            } else if (bodyTypeWrong || liquidTypeWrong || liquidCellOccupiedBySolid) {
-                nextState = CorrectionState::WrongType;
-            } else if ((expected &&
-                        !projectionStatesMatch(
-                            // Native component/wall connections are derived from
-                            // the neighborhood, rather than player orientation.
-                            // Normalize Java or unflattened palette states before
-                            // comparing with the real world's current permutation.
-                            withFlattenedConnections(*expected, region, position), actual)) ||
-                       (expectedLiquid && !projectionStatesMatch(*expectedLiquid, actualLiquid))) {
-                nextState = CorrectionState::WrongState;
+            bool const ready = region.areChunksFullyLoaded(position, 0)
+                && !structure::placeholderBlock(actual.getTypeName())
+                && (!expectedLiquid || !structure::placeholderBlock(actualLiquid.getTypeName()))
+                && (!expected || !structure::placeholderBlock(expected->getTypeName()))
+                && (!expectedLiquid || !structure::placeholderBlock(expectedLiquid->getTypeName()));
+            bool bodyMatches = true, liquidMatches = true;
+            if (ready && !bodyMissing && !liquidMissing && !bodyTypeWrong && !liquidTypeWrong
+                && !liquidCellOccupiedBySolid) {
+                if (expected)
+                    bodyMatches = projectionStatesMatch(
+                        withFlattenedConnections(*expected, region, position), actual);
+                if (expectedLiquid)
+                    liquidMatches = projectionStatesMatch(*expectedLiquid, actualLiquid);
             }
-            return nextState;
+            return classifyCorrectionCell({
+                ready, expected != nullptr, expectedLiquid != nullptr,
+                bodyMissing, liquidMissing, bodyTypeWrong, liquidTypeWrong,
+                liquidCellOccupiedBySolid, bodyMatches, liquidMatches
+            });
         };
-        auto nextState = classify();
+        auto const classification = classify();
+        auto const nextState = classification.correction;
+        if (state.progressMaterialTypePresent[index] != classification.materialPresent) {
+            state.progressMaterialTypePresent[index] = classification.materialPresent;
+            ++state.progressRevision;
+        }
+        auto const previousMissingLayers = state.missingLayers[index];
+        state.missingLayers[index] = classification.missingLayers;
         auto const nowCorrect = nextState == CorrectionState::Correct;
         auto const previousState = state.correctionStates.get(index);
-        auto const wasCorrect = previousState == CorrectionState::Correct;
+        // Progress bitsets remain authoritative across region reuse and layer changes.
+        auto const wasCorrect = state.progressCorrect[index] != 0;
         if (nowCorrect != wasCorrect) {
             state.progressCorrect[index] = nowCorrect ? 1 : 0;
             ++state.progressRevision;
             if (nowCorrect)
                 ++state.progressCorrectCount;
-            else
+            else if (state.progressCorrectCount != 0)
                 --state.progressCorrectCount;
             changes.overall = true;
             if (visible) {
                 if (nowCorrect)
                     ++state.progressVisibleCorrectCount;
-                else
+                else if (state.progressVisibleCorrectCount != 0)
                     --state.progressVisibleCorrectCount;
                 changes.visible = true;
             }
         }
-        auto const nextErrorKind = nextState == CorrectionState::WrongType    ? uchar{1}
-                                   : nextState == CorrectionState::WrongState ? uchar{2}
-                                                                              : uchar{0};
+        auto const nextErrorKind = !visible ? uchar{0}
+            : nextState == CorrectionState::WrongType ? uchar{1}
+            : nextState == CorrectionState::WrongState ? uchar{2} : uchar{0};
         auto const previousErrorKind = state.progressErrorKind[index];
         if (nextErrorKind != previousErrorKind) {
-            if (previousErrorKind == 1)
+            if (previousErrorKind == 1 && state.progressWrongTypeCount != 0)
                 --state.progressWrongTypeCount;
-            else if (previousErrorKind == 2)
+            else if (previousErrorKind == 2 && state.progressWrongStateCount != 0)
                 --state.progressWrongStateCount;
             if (nextErrorKind == 1)
                 ++state.progressWrongTypeCount;
@@ -277,8 +306,9 @@ CorrectionProgressChanges updateCorrectionTracker(ProjectionState& state, BlockS
         auto const stateChanged = state.correctionStates.set(index, nextState);
         if (!visible)
             return;
-        if (stateChanged) {
-            bool models = correctionNeedsModelUpdate(previousState, nextState);
+        if (stateChanged || previousMissingLayers != classification.missingLayers) {
+            bool models = correctionNeedsModelUpdate(previousState, nextState)
+                || previousMissingLayers != classification.missingLayers;
             markDirty(state.correctionStates.section(index), models);
             // A missing-cell shell omits faces shared with adjacent missing
             // cells. If either side changes, both section meshes may need an

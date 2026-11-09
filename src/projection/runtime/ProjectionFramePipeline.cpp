@@ -124,7 +124,8 @@ void processProjectionOpaqueFrame(
                 } else if (kind == CorrectionWorkKind::Initial) {
                     if (!state.correctionScan.empty())
                         return CorrectionPriority{0, 0.0f};
-                } else if (!state.extraScan.complete()) {
+                } else if (state.cachedCountExtras && !state.extraScan.complete()) {
+                    // Disabled extras must not consume background scan budget.
                     return CorrectionPriority{0, 0.0f};
                 }
                 return std::nullopt;

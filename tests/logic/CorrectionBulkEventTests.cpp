@@ -1,5 +1,6 @@
 #include "projection/correction/CorrectionWorkQueues.h"
 #include "projection/correction/CorrectionStateStore.h"
+#include "projection/correction/CorrectionCellClassification.h"
 #include "projection/core/ProjectionRules.h"
 
 #include <chrono>
@@ -18,6 +19,46 @@ int runCorrectionBulkEventTests() {
             if (failures < 12) std::fprintf(stderr, "Correction bulk event check %d failed\n", checks);
         }
     };
+
+    // Match the pre-port Verifier/material semantics: loaded/unknown status,
+    // waterlogged body/liquid masks, wrong-type versus wrong-state inventory,
+    // and an all-air native subchunk.
+    {
+        CorrectionCellFacts f{};
+        f.expectedBody = true;
+        check(classifyCorrectionCell(f).correction == CorrectionState::Unknown);
+        check(classifyCorrectionCell(f).materialPresent == 0);
+        check(classifyCorrectionCell(f).missingLayers == MissingLayerBoth);
+        f.ready = true;
+        f.bodyMissing = true;
+        check(classifyCorrectionCell(f).correction == CorrectionState::Missing);
+        check(classifyCorrectionCell(f).missingLayers == MissingLayerBody);
+        f.bodyMissing = false;
+        check(classifyCorrectionCell(f).correction == CorrectionState::Correct);
+        check(classifyCorrectionCell(f).materialPresent == lholo::structure::MaterialBodyPresent);
+        f.bodyStateMatches = false;
+        check(classifyCorrectionCell(f).correction == CorrectionState::WrongState);
+        check(classifyCorrectionCell(f).materialPresent == lholo::structure::MaterialBodyPresent);
+        f.bodyStateMatches = true;
+        f.expectedLiquid = true;
+        f.liquidMissing = true;
+        check(classifyCorrectionCell(f).correction == CorrectionState::Missing);
+        check(classifyCorrectionCell(f).missingLayers == MissingLayerLiquid);
+        check(classifyCorrectionCell(f).materialPresent == lholo::structure::MaterialBodyPresent);
+        f.liquidMissing = false;
+        f.liquidStateMatches = false;
+        check(classifyCorrectionCell(f).correction == CorrectionState::WrongState);
+        check(classifyCorrectionCell(f).materialPresent ==
+              (lholo::structure::MaterialBodyPresent | lholo::structure::MaterialLiquidPresent));
+        f.liquidStateMatches = true;
+        f.bodyTypeWrong = true;
+        check(classifyCorrectionCell(f).correction == CorrectionState::WrongType);
+        check(classifyCorrectionCell(f).materialPresent == lholo::structure::MaterialLiquidPresent);
+        f.bodyTypeWrong = false;
+        f.ready = false;
+        check(classifyCorrectionCell(f).correction == CorrectionState::Unknown);
+        check(classifyCorrectionCell(f).materialPresent == 0);
+    }
 
     // The immutable worker view survives COW updates, and queries outside its
     // captured neighbor pages are conservatively Unknown rather than UB.
