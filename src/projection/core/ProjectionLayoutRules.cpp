@@ -130,8 +130,6 @@ BlockPos inverseTransformStructurePosition(
     return BlockPos{representableCoordinate(cell.x),position.y,representableCoordinate(cell.z)};
 }
 
-bool isStructureCellCovered(
-    structure::LoadedStructure const& loaded,
 std::optional<ProjectionCellBox> projectionSectionLocalIntersection(
     std::array<int, 3> const& section, structure::LoadedStructure const& loaded,
     BlockPos const& origin, int mirror, int rotation
@@ -154,6 +152,8 @@ std::optional<ProjectionCellBox> projectionSectionLocalIntersection(
         {std::max(a.x, b.x) + 1, std::max(a.y, b.y) + 1, std::max(a.z, b.z) + 1}};
 }
 
+bool isStructureCellCovered(
+    structure::LoadedStructure const& loaded,
     BlockPos const&                    position
 ) {
     for (auto const& region : loaded.regions) {

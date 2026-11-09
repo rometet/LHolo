@@ -31,12 +31,6 @@ class BlockActor;
 
 namespace lholo::projection::detail {
 
-    }
-};
-
-enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
-
-struct ProjectedBlockActor {
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
 enum class NativeLiquidRenderPath : std::uint8_t { LHoloRetained, PraxisCompat };
 enum class PraxisCompatLiquidKind : std::uint8_t { Water, Lava };

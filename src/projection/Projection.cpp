@@ -157,13 +157,7 @@ std::optional<MaterialProgressKey> getMaterialProgressKey() {
             -> std::optional<MaterialProgressKey> {
             if (detail::projectionWorldEventsFailed() || !state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive
                 || !state.cachedLayerDisplayMode || !state.cachedLayerAxis
-            auto& state=*selected;
-            if (!state.enabled || !state.structure
-                || !state.cachedLayerDisplayMode || !state.cachedLayerAxis
                 || !state.initialCorrectionScan.complete()) {
-                return std::nullopt;
-            }
-            return MaterialProgressKey{
                 return std::nullopt;
             }
             return MaterialProgressKey{
@@ -186,13 +180,7 @@ std::optional<MaterialProgressSnapshot> captureMaterialProgress(
         [&expected](detail::ProjectionState& state, overlay::BoundsWireframe&)
             -> std::optional<MaterialProgressSnapshot> {
             auto const matches = !detail::projectionWorldEventsFailed() && state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive
-            if (!root.enabled || !selected) return std::nullopt;
-            auto& state=*selected;
-            auto const matches = state.enabled && state.structure
                 && state.initialCorrectionScan.complete()
-                && state.structureGeneration == expected.structureGeneration
-                && state.activationGeneration == expected.activationGeneration
-                && state.progressRevision == expected.progressRevision
                 && state.structureGeneration == expected.structureGeneration
                 && state.activationGeneration == expected.activationGeneration
                 && state.progressRevision == expected.progressRevision
