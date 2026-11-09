@@ -328,6 +328,10 @@ struct ProjectionState {
     // changes recreate meshes; toggling visible blocks does not rebuild them.
     std::vector<std::unique_ptr<overlay::BoundsWireframe>> nativeRegionBounds;
     std::vector<SectionState>               sections;
+    // Preserve the indexed section ownership used by lifecycle, placement,
+    // and block-entity render culling. CorrectionStateStore uses a separate
+    // compact index, but existing consumers still require this mapping.
+    std::vector<std::size_t>                blockToSection;
     std::size_t                             dirtySectionCursor{};
     std::uint64_t                           meshWorkerGeneration{};
     int                                     consecutiveMeshWorkerFailures{};
