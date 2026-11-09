@@ -40,6 +40,7 @@ void markSectionDirty(ProjectionState& state, std::size_t section, bool incremen
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
     sectionState.dirty = true;
+    sectionState.modelDirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
     ++sectionState.requestedRevision;
 }
@@ -223,13 +224,15 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     bucketNames{"LHoloOpaque", "LHoloAlphaTest", "LHoloBlend", "LHoloBlendToOpaque"};
                 std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)>
                     uploadedMeshes;
-                for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
-                    uploadedMeshes[bucket] = uploadCpuMesh(
-                        std::move(result.sectionMeshes[bucket]),
-                        bucketNames[bucket],
-                        bucket == static_cast<std::size_t>(RenderBucket::Blend)
-                            ? &result.blendSource : nullptr
-                    );
+                if (!result.correctionOnly) {
+                    for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
+                        uploadedMeshes[bucket] = uploadCpuMesh(
+                            std::move(result.sectionMeshes[bucket]),
+                            bucketNames[bucket],
+                            bucket == static_cast<std::size_t>(RenderBucket::Blend)
+                                ? &result.blendSource : nullptr
+                        );
+                    }
                 }
                 auto const blendBucket = static_cast<std::size_t>(RenderBucket::Blend);
                 if (uploadedMeshes[blendBucket]) {
@@ -265,46 +268,50 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     std::move(result.blockEntityPlaceholderMesh), "LHoloBlockEntityPlaceholder"
                 );
     
-                for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
-                    state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
+                if (!result.correctionOnly) {
+                    for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
+                        state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
+                    }
+                    state.sections[section].blendSource = std::move(result.blendSource);
+                    state.sections[section].blendSortKeyValid = false;
+                    state.sections[section].blendSortUnsupported = false;
+                    state.sections[section].blendSortOrder.clear();
+                    ++state.sections[section].blendSortUploadGeneration;
+                    // Capture both old and new native-liquid ownership before moving.
+                    bool const liquidSourcesChanged =
+                        state.nativeLiquidSectionMeshes[section] != nullptr
+                        || state.praxisCompatLiquidSections[section] != nullptr
+                        || nativeLiquid != nullptr
+                        || result.praxisCompatLiquidData != nullptr;
+                    state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
+                    state.praxisCompatLiquidSections[section] = std::move(
+                        result.praxisCompatLiquidData
+                    );
+                    // Opaque-only section updates cannot affect the native liquid
+                    // aggregate. Retain it rather than copying all water/lava
+                    // streams again on every unrelated mesh upload.
+                    if (liquidSourcesChanged) {
+                        state.praxisCompatLiquidAggregate.reset();
+                        state.praxisCompatLiquidAggregateOrder.clear();
+                        state.praxisCompatLiquidBoundaryMaskCache.clear();
+                        state.praxisCompatLiquidAggregateDirty = true;
+                    }
+                    state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
+                    state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
+                    state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;
+                    mergeNativeLiquidTelemetry(
+                        state.nativeLiquidTelemetry,
+                        result.nativeLiquidTelemetry
+                    );
+                    state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
+                    state.sections[section].modelDirty = false;
                 }
-                state.sections[section].blendSource = std::move(result.blendSource);
-                state.sections[section].blendSortKeyValid = false;
-                state.sections[section].blendSortUnsupported = false;
-                state.sections[section].blendSortOrder.clear();
-                ++state.sections[section].blendSortUploadGeneration;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);
                 state.wrongOutlineSectionMeshes[section] = std::move(wrongOutline);
-                // Capture both old and new native-liquid ownership before moving.
-                bool const liquidSourcesChanged =
-                    state.nativeLiquidSectionMeshes[section] != nullptr
-                    || state.praxisCompatLiquidSections[section] != nullptr
-                    || nativeLiquid != nullptr
-                    || result.praxisCompatLiquidData != nullptr;
-                state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
-                state.praxisCompatLiquidSections[section] = std::move(
-                    result.praxisCompatLiquidData
-                );
-                // Opaque-only section updates cannot affect the native liquid
-                // aggregate. Retain it rather than copying all water/lava
-                // streams again on every unrelated mesh upload.
-                if (liquidSourcesChanged) {
-                    state.praxisCompatLiquidAggregate.reset();
-                    state.praxisCompatLiquidAggregateOrder.clear();
-                    state.praxisCompatLiquidBoundaryMaskCache.clear();
-                    state.praxisCompatLiquidAggregateDirty = true;
-                }
-                state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
-                state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
-                state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;
-                mergeNativeLiquidTelemetry(
-                    state.nativeLiquidTelemetry,
-                    result.nativeLiquidTelemetry
-                );
-                state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
                 state.sections[section].uploadedRevision = result.revision;
+                state.sections[section].meshBounds = result.meshBounds;
                 // Only a successfully uploaded original can contribute to a
                 // batch. An invalid GPU mesh must never be resurrected by
                 // the retained CPU source in a future group upload.
@@ -329,6 +336,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 ++state.meshUploadRevision;
                 state.drawCache.noteMeshUpload(section);
                 state.sections[section].incrementalDirty = false;
+                state.sections[section].interactiveDirty = false;
                 state.sections[section].dirty = false;
                 state.consecutiveMeshWorkerFailures = 0;
                 state.meshPreflightDone = false;
@@ -338,6 +346,8 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     ).count()
                 );
                 ++state.meshWorkerUploadedSections;
+                if (result.correctionOnly)
+                    ++state.meshWorkerCorrectionOnlySections;
                 state.meshWorkerSnapshotMicros += result.snapshotPrepareMicros;
                 state.meshWorkerSnapshotDataMicros += result.snapshotDataMicros;
                 state.meshWorkerChunkViewMicros += result.chunkViewMicros;
@@ -378,7 +388,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     // Six INFO records for a 393-section projection; unlike
                     // DEBUG this survives the default production log level.
                     logger().info(
-                        "Projection mesh worker: {} sections; snapshot {}/{} us (data {}/{}, chunkView {}/{}), build {}/{} us, upload {}/{} us",
+                        "Projection mesh worker: {} sections; snapshot {}/{} us (data {}/{}, chunkView {}/{}), build {}/{} us, upload {}/{} us; correction snapshot {} B, COW total {} B, overlay-only {}",
                         count,
                         state.meshWorkerSnapshotMicros / count,
                         state.meshWorkerPeakSnapshotMicros,
@@ -389,7 +399,10 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                         state.meshWorkerBuildMicros / count,
                         state.meshWorkerPeakBuildMicros,
                         state.meshWorkerUploadMicros / count,
-                        state.meshWorkerPeakUploadMicros
+                        state.meshWorkerPeakUploadMicros,
+                        result.correctionSnapshotBytes,
+                        state.correctionStates.copiedBytes(),
+                        state.meshWorkerCorrectionOnlySections
                     );
                     logger().info(
                         "LHolo mesh stages: {} sections avgUs classification={} nativeBody={} liquid={} auxiliary={}",

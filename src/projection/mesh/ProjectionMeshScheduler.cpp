@@ -446,6 +446,7 @@ void scheduleProjectionMeshBuild(
                     }
                     result.sectionMeshes[bucket] = std::move(snapshot->sections[0].meshes[bucket]);
                 }
+                result.meshBounds = snapshot->sections[0].meshBounds;
                 result.warningFillMesh = std::move(snapshot->warningFillSectionMeshes[0]);
                 result.correctionOutlineMesh = std::move(snapshot->correctionOutlineSectionMeshes[0]);
                 result.wrongFillMesh = std::move(snapshot->wrongFillSectionMeshes[0]);
