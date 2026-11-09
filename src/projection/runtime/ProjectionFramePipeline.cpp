@@ -64,46 +64,52 @@ void processProjectionOpaqueFrame(
     auto started = CorrectionFrameBudget::Clock::now();
     // Intake is bounded too. Leave most of the frame slice for actual
     // comparisons when world notifications arrive continuously.
-    for (int batch = 0; batch < CorrectionFrameBudget::MaximumIntakeBatches && budget.available(); ++batch) {
-        if (batch && CorrectionFrameBudget::Clock::now() - started >= CorrectionFrameBudget::IntakeDuration)
-            break;
-        auto events = takePendingBlockChangeSections(CorrectionFrameBudget::EventSectionsPerBatch);
-        auto chunks = batch < CorrectionFrameBudget::LoadedIntakeBatches
-            ? takePendingLoadedSubChunks(CorrectionFrameBudget::LoadedSectionsPerBatch) : std::vector<SubChunkKey>{};
-        if (events.empty() && chunks.empty())
-            break;
-        state.correctionReceivedSections += events.size();
-        for (auto const& event : events) state.correctionReceivedCells += event.size();
-        // The single-file fork has no ProjectionWorldBounds helper; keep the
-        // same half-open structure AABB test inline. Structure cells occupy
-        // [origin, origin + size) per axis after the build transform.
-        bool const rotated = (buildSettings.rotationTurns & 1) != 0;
-        std::array<long long, 3> const origin{
-            static_cast<long long>(state.anchor.x) + buildSettings.offsetX,
-            static_cast<long long>(state.anchor.y) + buildSettings.offsetY,
-            static_cast<long long>(state.anchor.z) + buildSettings.offsetZ,
-        };
-        std::array<long long, 3> const structureMax{
-            origin[0] + (rotated ? state.structure->sizeZ : state.structure->sizeX),
-            origin[1] + state.structure->sizeY,
-            origin[2] + (rotated ? state.structure->sizeX : state.structure->sizeZ),
-        };
-        for (auto& event : events)
-            state.correctionEvents.push(std::move(event).clipped(origin, structureMax));
-        for (auto const& chunk : chunks) {
-            auto [x, y, z] = chunk;
-            std::array<long long, 3> const lo{
-                static_cast<long long>(x) * 16,
-                static_cast<long long>(y) * 16,
-                static_cast<long long>(z) * 16,
+    // Intake removes notifications from the global queue before adding them to
+    // the projection queue. If allocation or clipping fails, the discarded
+    // notifications must invalidate world-event truth just like a failed
+    // correction comparison; otherwise the overlay can remain stale forever.
+    runCorrectionUpdate([&] {
+        for (int batch = 0; batch < CorrectionFrameBudget::MaximumIntakeBatches && budget.available(); ++batch) {
+            if (batch && CorrectionFrameBudget::Clock::now() - started >= CorrectionFrameBudget::IntakeDuration)
+                break;
+            auto events = takePendingBlockChangeSections(CorrectionFrameBudget::EventSectionsPerBatch);
+            auto chunks = batch < CorrectionFrameBudget::LoadedIntakeBatches
+                ? takePendingLoadedSubChunks(CorrectionFrameBudget::LoadedSectionsPerBatch) : std::vector<SubChunkKey>{};
+            if (events.empty() && chunks.empty())
+                break;
+            state.correctionReceivedSections += events.size();
+            for (auto const& event : events) state.correctionReceivedCells += event.size();
+            // The single-file fork has no ProjectionWorldBounds helper; keep the
+            // same half-open structure AABB test inline. Structure cells occupy
+            // [origin, origin + size) per axis after the build transform.
+            bool const rotated = (buildSettings.rotationTurns & 1) != 0;
+            std::array<long long, 3> const origin{
+                static_cast<long long>(state.anchor.x) + buildSettings.offsetX,
+                static_cast<long long>(state.anchor.y) + buildSettings.offsetY,
+                static_cast<long long>(state.anchor.z) + buildSettings.offsetZ,
             };
-            bool const overlaps = lo[0] < structureMax[0] && lo[0] + 16 > origin[0]
-                && lo[1] < structureMax[1] && lo[1] + 16 > origin[1]
-                && lo[2] < structureMax[2] && lo[2] + 16 > origin[2];
-            if (overlaps)
-                state.correctionSubChunks.push({x, y, z});
+            std::array<long long, 3> const structureMax{
+                origin[0] + (rotated ? state.structure->sizeZ : state.structure->sizeX),
+                origin[1] + state.structure->sizeY,
+                origin[2] + (rotated ? state.structure->sizeX : state.structure->sizeZ),
+            };
+            for (auto& event : events)
+                state.correctionEvents.push(std::move(event).clipped(origin, structureMax));
+            for (auto const& chunk : chunks) {
+                auto [x, y, z] = chunk;
+                std::array<long long, 3> const lo{
+                    static_cast<long long>(x) * 16,
+                    static_cast<long long>(y) * 16,
+                    static_cast<long long>(z) * 16,
+                };
+                bool const overlaps = lo[0] < structureMax[0] && lo[0] + 16 > origin[0]
+                    && lo[1] < structureMax[1] && lo[1] + 16 > origin[1]
+                    && lo[2] < structureMax[2] && lo[2] + 16 > origin[2];
+                if (overlaps)
+                    state.correctionSubChunks.push({x, y, z});
+            }
         }
-    }
+    }, []() noexcept { markProjectionWorldEventsFailed(); });
     auto distance = [&](CorrectionPosition const& position, float scale) {
         auto dx = position[0] * scale - cameraPosition.x;
         auto dy = position[1] * scale - cameraPosition.y;
