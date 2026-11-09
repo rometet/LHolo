@@ -157,7 +157,7 @@ std::optional<MaterialProgressKey> getMaterialProgressKey() {
             -> std::optional<MaterialProgressKey> {
             if (detail::projectionWorldEventsFailed() || !state.enabled || !state.structure || state.placementCoordinatesInvalid || state.placementBuildActive
                 || !state.cachedLayerDisplayMode || !state.cachedLayerAxis
-                || state.correctionScanCursor != state.structure->renderBlocks.size()) {
+                || !state.initialCorrectionScan.complete()) {
                 return std::nullopt;
             }
             return MaterialProgressKey{
@@ -180,7 +180,7 @@ std::optional<MaterialProgressSnapshot> captureMaterialProgress(
         [&expected](detail::ProjectionState& state, overlay::BoundsWireframe&)
             -> std::optional<MaterialProgressSnapshot> {
             auto const matches = !detail::projectionWorldEventsFailed() && state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive
-                && state.correctionScanCursor == state.structure->renderBlocks.size()
+                && state.initialCorrectionScan.complete()
                 && state.structureGeneration == expected.structureGeneration
                 && state.activationGeneration == expected.activationGeneration
                 && state.progressRevision == expected.progressRevision

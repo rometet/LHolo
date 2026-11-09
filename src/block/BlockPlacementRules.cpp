@@ -11,6 +11,10 @@
 
 namespace lholo::block {
 
+bool hasUsableItem(ItemStackBase const& item) {
+    return item.mCount > 0 && item.mItem.get() != nullptr && !item.isNull();
+}
+
 ItemStack makePlacementItem(Block const& block) {
     std::string const blockName{placeableBaseName(block.getTypeName())};
     auto const itemName = placementItemName(blockName);

@@ -12,6 +12,7 @@
 
 class Block;
 class ItemStack;
+class ItemStackBase;
 
 namespace lholo::block {
 
@@ -83,6 +84,10 @@ struct PlacementItem {
 // Builds the neutral inventory item used to place a block. World orientation
 // states are intentionally not copied into the item stack.
 [[nodiscard]] ItemStack makePlacementItem(Block const& block);
+
+// Native NBT loading may leave count/valid set with no resolved Item (missing
+// add-ons). isNull() alone does not protect name, identity or renderer calls.
+[[nodiscard]] bool hasUsableItem(ItemStackBase const& item);
 
 // Manual mode uses native Block -> Item identity/aux for material variants and
 // wall-mounted forms. The existing auto/range item-selection policy is unchanged.

@@ -2,7 +2,9 @@
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionShellRules.h"
 #include "projection/core/ProjectionVisibilityRules.h"
+#include "projection/core/ProjectionResidencyScan.h"
 
+#include <algorithm>
 #include <bit>
 #include <array>
 #include <cstdio>
@@ -196,8 +198,33 @@ void testTransformedBounds() {
     CULL_CHECK(projectionBuildRank(true, true, true) < projectionBuildRank(true, true, false));
 }
 
-void testBuildSelection() {
-    std::array<ProjectionBuildCandidate, 4> candidates{{{true, false, false, false, true, 1},
+void testResidencyScan() {
+    ProjectionResidencyScan scan;
+    CULL_CHECK(!scan.pending());
+    scan.request(5);
+    CULL_CHECK(scan.next() == 0 && scan.next() == 1);
+    scan.request(5);
+    for (auto expected : {2u, 3u, 4u, 0u, 1u}) CULL_CHECK(scan.next() == expected);
+    CULL_CHECK(!scan.pending());
+    scan.request(1);
+    CULL_CHECK(scan.next() == 0 && !scan.pending());
+    scan.request(0);
+    CULL_CHECK(!scan.pending());
+
+    // Renewing a large scan every frame must still visit every section.
+    constexpr std::size_t count = 1025;
+    std::array<bool, count> visited{};
+    for (std::size_t frame = 0; frame < 9; ++frame) {
+        scan.request(count);
+        for (std::size_t work = 0; work < ProjectionResidencyProbesPerFrame; ++work) visited[scan.next()] = true;
+    }
+    CULL_CHECK(std::all_of(visited.begin(), visited.end(), [](bool v) { return v; }));
+    std::size_t drained{};
+    while (scan.pending()) { scan.next(); ++drained; }
+    CULL_CHECK(drained == count - ProjectionResidencyProbesPerFrame);
+}
+
+void testBuildSelection() {    std::array<ProjectionBuildCandidate, 4> candidates{{{true, false, false, false, true, 1},
                                                         {true, false, true, true, false, 100},
                                                         {true, false, true, true, false, 50},
                                                         {true, false, false, true, false, 1}}};
@@ -285,6 +312,7 @@ int runProjectionCullingTests() {
     testNativeFarClipStreaming();
     testLiquidProxyDrawSelection();
     testTransformedBounds();
+    testResidencyScan();
     testBuildSelection();
     testShell();
     std::printf("ProjectionCullingTests: %d checks, %d failures\n", checks, failures);

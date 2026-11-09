@@ -3,6 +3,8 @@
 // mesh ownership never crosses a world/dimension/resource-pack transition.
 #include "projection/runtime/ProjectionRegionMeshReuse.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/core/ProjectionRules.h"
+#include "projection/correction/CorrectionCellClassification.h"
 #include "projection/runtime/ProjectionRegionReusePolicy.h"
 #include "structure/StructureLoader.h"
 
@@ -56,7 +58,7 @@ bool compatibleSources(ProjectionState const& old,
         && old.structure->sizeX==next->sizeX
         && old.structure->sizeY==next->sizeY
         && old.structure->sizeZ==next->sizeZ
-        && old.correctionScanCursor>=old.structure->renderBlocks.size()
+        && old.initialCorrectionScan.complete()
         && !old.placementBuildActive && !old.placementCoordinatesInvalid
         && old.cachedRotation>=0 && old.cachedMirror>=0
         && old.sectionBlockIndices.size()==old.sections.size();
@@ -172,7 +174,31 @@ std::size_t restoreUnchangedRegionMeshes(ProjectionState& now) noexcept {
                newSection>=now.nativeLiquidSectionMeshes.size())continue;
             for(std::size_t i=0;i<beforeIndices.size();++i) {
                 auto previous=beforeIndices[i],current=afterIndices[i];
-                now.correctionStates[current]=saved->corrections[previous];
+                // CorrectionStateStore is paged and immutable to readers. Use its
+                // copy-on-write setter rather than the removed vector assignment.
+                auto const correction = saved->corrections.get(previous);
+                now.correctionStates.set(current, correction);
+                // These HUD counters must agree with the restored state before
+                // the initial recheck runs, or a subsequent Correct->Missing
+                // transition would underflow progressCorrectCount.
+                auto const& cell = now.structure->renderBlocks[current];
+                auto const axis = now.cachedLayerAxis.value_or(structure::LayerAxis::Y);
+                auto const mode = now.cachedLayerDisplayMode.value_or(structure::LayerDisplayMode::All);
+                bool const visible = isLayerVisible(
+                    projectionLayer(*now.structure, cell, axis, now.cachedMirror, now.cachedRotation),
+                    mode, now.cachedDisplayLayer, cell.materialIndex,
+                    cell.liquidMaterialIndex, axis);
+                if (correction == CorrectionState::Correct) {
+                    now.progressCorrect[current] = 1;
+                    ++now.progressCorrectCount;
+                    if (visible) ++now.progressVisibleCorrectCount;
+                }
+                auto const errorKind = correctionProgressErrorKind(correction, visible);
+                now.progressErrorKind[current] = errorKind;
+                if (errorKind == 1) ++now.progressWrongTypeCount;
+                else if (errorKind == 2) ++now.progressWrongStateCount;
+                // Keep initial scan coverage pending: transferred results are
+                // a provisional snapshot until the new world is rechecked.
                 now.missingLayers[current]=saved->missingLayers[previous];
                 now.blockActorRendererAvailable[current]=saved->actorRendererAvailable[previous];
             }
@@ -196,9 +222,11 @@ std::size_t restoreUnchangedRegionMeshes(ProjectionState& now) noexcept {
             after.buildInFlight=false;
             after.uploadedRevision=after.requestedRevision;
             ++now.meshUploadRevision;
+            now.drawCache.noteMeshUpload(newSection);
             ++reused;
         }
         if(reused){
+            ++now.progressRevision;
             now.praxisCompatLiquidAggregateDirty=true;
             now.praxisCompatLiquidAggregate.reset();
             now.praxisCompatLiquidAggregateOrder.clear();

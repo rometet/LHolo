@@ -251,8 +251,7 @@ void renderProjection(
     // The render callback can race a world/dimension transition. Never
     // dereference a player or immutable projection maps after they disappear.
     if (!player || !state.structure || !state.blockTessellator
-        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
-        || !state.expectedWorldBlockIndices || !state.expectedWorldBlockActors) {
+        || !state.worldLookup || !state.expectedWorldBlockActors) {
         return;
     }
 
@@ -318,6 +317,7 @@ void renderProjection(
         auto const correctionOutlineOpacity = session.correctionOutlineOpacity();
         auto const comparisonStrength = session.comparisonStrength();
         auto const correctionOutlineWidth = session.correctionOutlineWidth();
+        auto const layerUpdateStarted = std::chrono::steady_clock::now();
         auto const invalidation = reconcileProjectionInvalidation(
             state,
             ProjectionInvalidationSettings{
@@ -336,7 +336,24 @@ void renderProjection(
                 .correctionOutlineWidth   = correctionOutlineWidth
             }
         );
-        if (invalidation.placementViewChanged() || state.placementBuildActive) {
+        // A layer-only change uses an immutable lightweight lookup view, not a
+        // new 1M-cell placement/actor/initial-correction rebuild. Full rebuilds
+        // remain mandatory for pose changes or incomplete placement.
+        if (invalidation.layerOnlyChanged() && !state.placementBuildActive) {
+            if (!refreshProjectionLayerView(
+                    state, player->getDimensionBlockSource(),
+                    layerAxis, layerDisplayMode, displayLayer)) {
+                state.cachedRotation = -1; // retry through full placement next frame
+                return;
+            }
+            auto const elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - layerUpdateStarted).count();
+            auto const staleSections = std::count_if(state.sections.begin(), state.sections.end(),
+                [](SectionState const& section) { return section.layerStale; });
+            logger().info("Projection layer fast switch: axis={} mode={} layer={} setupUs={} staleSections={}/{}",
+                static_cast<int>(layerAxis), static_cast<int>(layerDisplayMode), displayLayer,
+                elapsedUs, staleSections, state.sections.size());
+        } else if (invalidation.placementViewChanged() || state.placementBuildActive) {
             auto const placementReady = rebuildProjectionPlacement(
                 state,
                 player->getDimensionBlockSource(),
@@ -594,11 +611,11 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
     return ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe&) {
             if (state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive) {
-                auto const found = state.expectedWorldBlockIndices->find(
+                auto const found = state.worldLookup->indexAt(
                     std::tuple{pos.x, pos.y, pos.z}
                 );
-                if (found != state.expectedWorldBlockIndices->end() && found->second < state.correctionStates.size()) {
-                    auto const correctionState = state.correctionStates[found->second];
+                if (found && *found < state.correctionStates.size()) {
+                    auto const correctionState = state.correctionStates.get(*found);
                     if (correctionState == CorrectionState::WrongType
                         || correctionState == CorrectionState::WrongState) {
                         // LHolo already renders a complete red/yellow hull and

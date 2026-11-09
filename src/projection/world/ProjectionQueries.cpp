@@ -21,22 +21,18 @@ ProjectionQuery queryProjectionCell(
     ProjectionState const& state,
     BlockPos const&        worldPosition
 ) {
-    if (!state.expectedWorldBlockIndices || !state.expectedWorldBlocks) {
+    if (!state.worldLookup) {
         return {nullptr, false};
     }
     auto const key = std::tuple{worldPosition.x, worldPosition.y, worldPosition.z};
-    auto const foundIndex = state.expectedWorldBlockIndices->find(key);
-    if (foundIndex == state.expectedWorldBlockIndices->end()
-        || foundIndex->second >= state.correctionStates.size()) {
+    auto const foundIndex = state.worldLookup->indexAt(key);
+    if (!foundIndex || *foundIndex >= state.correctionStates.size()) {
         return {nullptr, false};
     }
-    auto const foundBlock = state.expectedWorldBlocks->find(key);
-    Block const* block = foundBlock == state.expectedWorldBlocks->end()
-        ? nullptr
-        : foundBlock->second;
+    Block const* block = state.worldLookup->blockAt(key);
     // Liquids have no normal block item, so they are never a valid place target.
     if (block && block->getBlockType().mMaterial.get().mLiquid) block = nullptr;
-    bool const missing = state.correctionStates[foundIndex->second] == CorrectionState::Missing;
+    bool const missing = state.correctionStates.get(*foundIndex) == CorrectionState::Missing;
     return {block, missing};
 }
 
@@ -47,7 +43,7 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
 ) {
     std::vector<RangeCandidate> result;
     auto const bounds = projectionRangeBox({center.x, center.y, center.z}, radius);
-    if (!state.expectedWorldBlockIndices || !state.expectedWorldBlocks || !bounds) {
+    if (!state.worldLookup || !bounds) {
         return result;
     }
     // Only visit cells in the axis-aligned box around the center: with a small
@@ -59,20 +55,16 @@ std::vector<RangeCandidate> queryMissingProjectionCells(
         for (auto z = bounds->min[2]; z <= bounds->max[2]; ++z) {
             for (auto x = bounds->min[0]; x <= bounds->max[0]; ++x) {
                 auto const key = std::tuple{static_cast<int>(x), static_cast<int>(y), static_cast<int>(z)};
-                auto const foundIndex = state.expectedWorldBlockIndices->find(key);
-                if (foundIndex == state.expectedWorldBlockIndices->end()
-                    || foundIndex->second >= state.correctionStates.size()) {
+                auto const foundIndex = state.worldLookup->indexAt(key);
+                if (!foundIndex || *foundIndex >= state.correctionStates.size()) {
                     continue;
                 }
-                if (state.correctionStates[foundIndex->second] != CorrectionState::Missing) continue;
+                if (state.correctionStates.get(*foundIndex) != CorrectionState::Missing) continue;
                 double const dx = static_cast<double>(x) + 0.5 - center.x;
                 double const dy = static_cast<double>(y) + 0.5 - center.y;
                 double const dz = static_cast<double>(z) + 0.5 - center.z;
                 if (dx * dx + dy * dy + dz * dz > r2) continue;
-                auto const foundBlock = state.expectedWorldBlocks->find(key);
-                Block const* block = foundBlock == state.expectedWorldBlocks->end()
-                    ? nullptr
-                    : foundBlock->second;
+                Block const* block = state.worldLookup->blockAt(key);
                 // Liquids have no normal block item, so they are never a valid place target.
                 if (block && block->getBlockType().mMaterial.get().mLiquid) block = nullptr;
                 if (!block) continue;

@@ -887,8 +887,7 @@ void submitProjectedBlockActorPass(
 ) {
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (state.projectedBlockActors.empty()
-        || !state.expectedWorldBlocks
-        || !state.expectedWorldLiquids
+        || !state.worldLookup
         || !state.expectedWorldBlockActors) {
         return;
     }
@@ -909,8 +908,7 @@ void submitProjectedBlockActorPass(
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
     ScopedRegionWriteSuppression projectedWrites;
     ScopedTessellationBlocks blockActorWorldScope(
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors
     );
     for (auto const& projected : state.projectedBlockActors) {
@@ -918,6 +916,14 @@ void submitProjectedBlockActorPass(
             || projected.structureIndex >= state.correctionStates.size()
             || projected.structureIndex >= state.missingLayers.size()) {
             continue;
+        }
+        // Old projected actors obey the same layer upload barrier as meshes.
+        // Retaining actors across layer changes must never show a hidden one
+        // before its section's matching GPU revision is ready.
+        if (projected.structureIndex < state.blockToSection.size()) {
+            auto const section = state.blockToSection[projected.structureIndex];
+            if (section < state.sections.size() && state.sections[section].layerStale)
+                continue;
         }
         // Phase 16: only piston models receive conservative 16-block-expanded
         // frustum culling. Unlike the reverted Phase 13 optimization, this
@@ -2060,6 +2066,7 @@ void submitProjectionMeshPass(
     struct MaterialStateRestore {
         mce::RenderMaterial* material{};
         std::optional<mce::BlendStateDescription> blend;
+        std::optional<mce::DepthWriteMask> depthWriteMask;
         mce::PrimitiveMode primitive{};
         float depthBias{};
         float slopeBias{};
@@ -2067,6 +2074,7 @@ void submitProjectionMeshPass(
         ~MaterialStateRestore() {
             if (!material || !blend) return;
             material->blendStateDescription.get() = *blend;
+            if (depthWriteMask) material->depthStencilStateDescription.get().depthWriteMask = *depthWriteMask;
             material->mDepthBias = depthBias;
             material->mSlopeScaledDepthBias = slopeBias;
             if (restorePrimitive) material->mPrimitiveMode = primitive;
@@ -2086,11 +2094,16 @@ void submitProjectionMeshPass(
             restore.depthBias = renderMaterial->mDepthBias;
             restore.slopeBias = renderMaterial->mSlopeScaledDepthBias;
             restore.restorePrimitive = true;
+            auto& depthState = renderMaterial->depthStencilStateDescription.get();
+            restore.depthWriteMask = depthState.depthWriteMask;
+            depthState.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
             renderMaterial->mPrimitiveMode = mce::PrimitiveMode::QuadList;
             renderMaterial->blendStateDescription.get()
                 = blendRenderMaterial->blendStateDescription.get();
             renderMaterial->mDepthBias = 100.0f;
             renderMaterial->mSlopeScaledDepthBias = 15.0f;
+            render::ScopedShaderColor fillColor{renderContext.mScreenContext.currentShaderColor,
+                mce::Color{1.f, 1.f, 1.f, std::clamp(state.cachedCorrectionFillOpacity, 0.f, 1.f)}};
             renderOverlayMeshes(state.warningFillSectionMeshes, outlineMaterial, missingSeeThrough, ProjectionDrawSlot::MissingFill);
             renderOverlayMeshes(state.wrongFillSectionMeshes, outlineMaterial, correctionSeeThrough, ProjectionDrawSlot::WrongFill);
         }

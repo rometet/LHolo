@@ -36,6 +36,9 @@ struct ProjectionInvalidationResult {
     [[nodiscard]] bool placementViewChanged() const {
         return geometryTransformChanged || placementMoved || layerChanged;
     }
+    [[nodiscard]] bool layerOnlyChanged() const {
+        return layerChanged && !geometryTransformChanged && !placementMoved;
+    }
 };
 
 ProjectionInvalidationResult reconcileProjectionInvalidation(

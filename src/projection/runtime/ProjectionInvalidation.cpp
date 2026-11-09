@@ -19,17 +19,20 @@
 namespace lholo::projection::detail {
 namespace {
 
-void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
+void markSectionDirty(
+    ProjectionState& state, std::size_t section, bool incremental, bool models = true
+) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    sectionState.modelDirty = sectionState.modelDirty || models;
     sectionState.dirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
     ++sectionState.requestedRevision;
 }
 
-void markAllSectionsDirty(ProjectionState& state, bool incremental) {
+void markAllSectionsDirty(ProjectionState& state, bool incremental, bool models = true) {
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        markSectionDirty(state, section, incremental);
+        markSectionDirty(state, section, incremental, models);
     }
 }
 
@@ -79,8 +82,11 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     // A placement/layer/rotation change marks sections below, after its
     // correction/progress invalidation. Do not issue two revision bumps in the
     // same reconcile call; an XYZ move still requires fresh world corrections.
-    if (!result.placementViewChanged() && (opacityChanged || correctionStyleChanged)) {
-        markAllSectionsDirty(state, false);
+    if ((!result.placementViewChanged() || result.layerOnlyChanged())
+        && (opacityChanged || correctionStyleChanged)) {
+        // Opacity is baked into model vertex colors, so only it requires full
+        // model rebuilds; correction-style changes rebuild overlays only.
+        markAllSectionsDirty(state, false, opacityChanged);
     }
 
     auto const layerIsVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
@@ -95,7 +101,17 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     };
     // LayerRange changes only invalidate sections containing blocks whose
     // visibility crossed the old/new boundary.
-    if (result.layerChanged && !result.geometryTransformChanged) {
+    if (result.layerChanged || result.geometryTransformChanged) {
+        // A layer toggle changes the exposed correction faces of *adjacent*
+        // sections too, even when none of their own cells changed visibility.
+        // Coalesce section dirtiness: incrementing revisions once per cell
+        // caused unnecessary rebuild churn for large schematics.
+        std::vector<std::uint8_t> visibilityChangedSections;
+        std::vector<std::uint8_t> newlyVisibleSections;
+        if (!result.geometryTransformChanged) {
+            visibilityChangedSections.resize(state.sections.size());
+            newlyVisibleSections.resize(state.sections.size());
+        }
         auto const oldLayerVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
             if (!state.cachedLayerDisplayMode || !state.cachedLayerAxis) return false;
             auto const layer = projectionLayer(*state.structure, entry, *state.cachedLayerAxis, state.cachedMirror, state.cachedRotation);
@@ -107,14 +123,74 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         for (std::size_t index = 0; index < state.structure->renderBlocks.size(); ++index) {
             auto const& entry = state.structure->renderBlocks[index];
             auto const visible = layerIsVisible(entry);
-            if (oldLayerVisible(entry) == visible) continue;
-            auto const section = state.blockToSection[index];
-            if (section < state.sections.size()) {
-                markSectionDirty(state, section, false);
+            // Rotation and initial placement also change which cells the paged
+            // correction store must expose. Never leave its default all-visible
+            // mask in place for a hidden layer.
+            if (!result.geometryTransformChanged && oldLayerVisible(entry) == visible) continue;
+            if (!result.geometryTransformChanged) {
+                auto const section = state.correctionStates.section(index);
+                if (section < visibilityChangedSections.size()) {
+                    visibilityChangedSections[section] = 1;
+                    if (visible) newlyVisibleSections[section] = 1;
+                }
+                // A cell hidden during initial placement was marked Correct
+                // solely to suppress its ghost. If never scanned, restore
+                // conservative Missing truth before exposing it to the mesh.
+                if (visible && !state.initialCorrectionScan.visited(index)) {
+                    state.correctionStates.set(index, CorrectionState::Missing);
+                    state.missingLayers[index] = MissingLayerBoth;
+                }
+                auto const oldError = state.progressErrorKind[index];
+                auto const truth = state.correctionStates.get(index);
+                std::uint8_t const newError = !visible ? 0
+                    : truth == CorrectionState::WrongType ? 1
+                    : truth == CorrectionState::WrongState ? 2 : 0;
+                if (oldError != newError) {
+                    if (oldError == 1 && state.progressWrongTypeCount) --state.progressWrongTypeCount;
+                    if (oldError == 2 && state.progressWrongStateCount) --state.progressWrongStateCount;
+                    if (newError == 1) ++state.progressWrongTypeCount;
+                    if (newError == 2) ++state.progressWrongStateCount;
+                    state.progressErrorKind[index] = newError;
+                }
             }
-            state.correctionStates[index] = visible
-                ? CorrectionState::Unknown
-                : CorrectionState::Correct;
+            state.correctionStates.setVisible(index, visible);
+        }
+        if (!result.geometryTransformChanged) {
+            // Only changed sections need their model geometry regenerated.
+            // The six face-neighbors need an overlay-only refresh: an exposed
+            // top/side face can appear when the adjacent layer is hidden.
+            constexpr int neighborOffsets[6][3] = {
+                {-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
+                {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
+            };
+            std::vector<std::uint8_t> overlayNeighbors(state.sections.size());
+            for (std::size_t section = 0; section < visibilityChangedSections.size(); ++section) {
+                if (!visibilityChangedSections[section]) continue;
+                markSectionDirty(state, section, false);
+                state.sections[section].layerStale = true;
+                if (section >= state.localSectionKeys.size()) continue;
+                auto const [x, y, z] = state.localSectionKeys[section];
+                for (auto const& delta : neighborOffsets) {
+                    auto found = state.localSectionIndices.find(SubChunkKey{
+                        x + delta[0], y + delta[1], z + delta[2]});
+                    if (found != state.localSectionIndices.end()
+                        && found->second < overlayNeighbors.size())
+                        overlayNeighbors[found->second] = 1;
+                }
+            }
+            for (std::size_t section = 0; section < overlayNeighbors.size(); ++section) {
+                if (overlayNeighbors[section] && !visibilityChangedSections[section]) {
+                    // Native model faces can be occluded by a neighbor's
+                    // newly hidden block, not just the correction overlay.
+                    markSectionDirty(state, section, false, true);
+                    state.sections[section].layerStale = true;
+                }
+            }
+            // Already-scanned hidden cells keep their real-world truth.
+            // Only newly exposed sections need fresh comparisons; hiding a
+            // layer is a pure render-mask change, not a new correction scan.
+            state.correctionScan.revisitSections(state.sectionBlockIndices,
+                newlyVisibleSections);
         }
     }
 
@@ -133,32 +209,46 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     state.cachedComparisonStrength = settings.comparisonStrength;
     state.cachedCorrectionOutlineWidth = settings.correctionOutlineWidth;
 
-    if (result.placementViewChanged()) {
+    if (result.geometryTransformChanged || result.placementMoved) {
         state.detectedExtraBlockPositions.clear();
+        state.detectedExtraSectionCounts.clear();
         state.extraBlockPositions.clear();
         for (auto& positions : state.sectionExtraBlockPositions) positions.clear();
         state.progressExtraCount = 0;
         // Error HUD counts follow the same visible range as the meshes.
         state.progressWrongTypeCount = state.progressWrongStateCount = 0;
         std::fill(state.progressErrorKind.begin(), state.progressErrorKind.end(), 0);
-        state.extraScanRegion = 0;
-        state.extraScanCell = 0;
+        state.extraScan.reset();
         markAllSectionsDirty(state, false);
         publishErrorProgress(
             state.progressWrongTypeCount,
             state.progressWrongStateCount,
             0
         );
+    } else if (result.layerChanged) {
+        // Extra world cells are layer-dependent. Invalidate their old overlay
+        // sections, then rescan empty cells in the new visible range. Existing
+        // block truth, GPU meshes in unaffected sections and native actors stay.
+        for (std::size_t section = 0; section < state.sectionExtraBlockPositions.size(); ++section) {
+            if (!state.sectionExtraBlockPositions[section].empty()) {
+                markSectionDirty(state, section, false, false);
+                state.sections[section].layerStale = true;
+            }
+            state.sectionExtraBlockPositions[section].clear();
+        }
+        state.detectedExtraBlockPositions.clear();
+        state.detectedExtraSectionCounts.clear();
+        state.extraBlockPositions.clear();
+        state.progressExtraCount = 0;
+        state.extraScan.reset();
+        publishErrorProgress(state.progressWrongTypeCount,
+            state.progressWrongStateCount, 0);
     }
 
     // Rotation/mirror alter local block models, so only those require throwing
     // away every GPU mesh. XYZ movement stays represented by the world matrix.
     if (result.geometryTransformChanged) {
-        std::fill(
-            state.correctionStates.begin(),
-            state.correctionStates.end(),
-            CorrectionState::Unknown
-        );
+        state.correctionStates.fill(CorrectionState::Missing);
         std::fill(state.missingLayers.begin(), state.missingLayers.end(), MissingLayerBoth);
         for (auto& sectionState : state.sections) {
             for (auto& mesh : sectionState.meshes) mesh.reset();

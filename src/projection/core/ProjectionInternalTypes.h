@@ -6,6 +6,8 @@
 // with Minecraft's immediate submission path.
 
 #pragma once
+
+#include "projection/correction/CorrectionState.h"
 #include "projection/core/ProjectionCoordinateKey.h"
 #include "projection/core/LiquidReplayRules.h"
 #include "projection/mesh/NativeReplaySort.h"
@@ -29,7 +31,6 @@ class BlockActor;
 
 namespace lholo::projection::detail {
 
-enum class CorrectionState : std::uint8_t { Unknown, Missing, Correct, WrongType, WrongState };
 enum class RenderBucket : std::uint8_t { Opaque, Alpha, AlphaOneSided, Blend, Count };
 enum class NativeLiquidRenderPath : std::uint8_t { LHoloRetained, PraxisCompat };
 enum class PraxisCompatLiquidKind : std::uint8_t { Water, Lava };
@@ -190,17 +191,8 @@ struct ProjectedBlockActor {
     bool         pistonCandidate{}; // classified once during placement
 };
 
-using ExpectedBlockMap = std::unordered_map<
-    SubChunkKey, Block const*, SubChunkKeyHash
->;
-using ExpectedLiquidMap = std::unordered_map<
-    SubChunkKey, Block const*, SubChunkKeyHash
->;
 using ExpectedBlockActorMap = std::unordered_map<
     SubChunkKey, std::shared_ptr<BlockActor>, SubChunkKeyHash
->;
-using ExpectedBlockIndexMap = std::unordered_map<
-    SubChunkKey, std::size_t, SubChunkKeyHash
 >;
 
 } // namespace lholo::projection::detail

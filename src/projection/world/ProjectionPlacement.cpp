@@ -55,8 +55,7 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
     }};
 
     ScopedTessellationBlocks projectedWorld{
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors
     };
     for (auto const& [key, actor] : *state.expectedWorldBlockActors) {
@@ -84,6 +83,27 @@ void pairProjectedChests(BlockSource& region, ProjectionState& state) {
 
 } // namespace
 
+bool refreshProjectionLayerView(
+    ProjectionState& state, BlockSource& region,
+    structure::LayerAxis axis, structure::LayerDisplayMode mode, int layer
+) {
+    if (!state.worldLookup || !state.blockTessellator || state.placementBuildActive)
+        return false;
+    // Publish a new immutable view so an already-running async tessellator
+    // continues using its own captured layer. Palette transforms and actors
+    // remain owned by the current placement; no full rebuild is needed.
+    auto lookup = std::make_shared<ProjectionWorldLookup>(
+        state.worldLookup->withLayer(axis, mode, layer));
+    state.blockTessellator->mCachedGetBlock.get()
+        = [lookup, regionAddress = &region](BlockPos const& position) -> Block const& {
+            auto const* found = lookup->blockAt(
+                std::tuple{position.x, position.y, position.z});
+            return found ? *found : regionAddress->getBlock(position);
+        };
+    state.worldLookup = std::move(lookup);
+    return true;
+}
+
 bool rebuildProjectionPlacement(
     ProjectionState&                   state,
     BlockSource&                       region,
@@ -97,8 +117,7 @@ bool rebuildProjectionPlacement(
     constexpr auto kPlacementWorkBudget = std::chrono::milliseconds(3);
 
     if (!state.structure || !state.level || !state.blockTessellator
-        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
-        || !state.expectedWorldBlockActors || !state.expectedWorldBlockIndices
+        || !state.worldLookup || !state.expectedWorldBlockActors
         || state.correctionStates.size() < state.structure->renderBlocks.size()
         || state.blockActorRendererAvailable.size() < state.structure->renderBlocks.size()
         || state.blockToSection.size() < state.structure->renderBlocks.size()) {
@@ -125,19 +144,34 @@ bool rebuildProjectionPlacement(
 
         // Publish a fresh snapshot, then populate it incrementally. No mesh
         // worker is scheduled until the snapshot is complete, so workers never
-        // observe partially built maps.
-        auto blocks = std::make_shared<ExpectedBlockMap>();
-        auto liquids = std::make_shared<ExpectedLiquidMap>();
+        // observe partially built placement data. The immutable coordinate
+        // view replaces the old per-cell world maps: it follows the new origin
+        // without allocating one hash node per cell, and resolves every
+        // distinct palette state once on this thread.
         auto actors = std::make_shared<ExpectedBlockActorMap>();
-        auto indices = std::make_shared<ExpectedBlockIndexMap>();
-
-        auto const expectedCells = state.structure->renderBlocks.size();
-        blocks->reserve(expectedCells);
-        liquids->reserve(expectedCells);
-        indices->reserve(expectedCells);
         actors->reserve(std::min<std::size_t>(
-            expectedCells, 1024
+            state.structure->renderBlocks.size(), 1024
         ));
+        ProjectionWorldLookup::BlockTransforms transformedBlocks;
+        state.structure->renderBlocks.forEachStoredValue([&](auto const& cell) {
+            for (auto value : {cell.block, cell.liquid}) {
+                if (!value || transformedBlocks.contains(value)) continue;
+                transformedBlocks.emplace(value, transformExpectedBlock(
+                    value, transformSettings, settings.identityTransform
+                ));
+            }
+        });
+        auto worldLookup = std::make_shared<ProjectionWorldLookup>(
+            state.structure,
+            std::array<long long, 3>{
+                static_cast<long long>(state.anchor.x) + settings.offsetX,
+                static_cast<long long>(state.anchor.y) + settings.offsetY,
+                static_cast<long long>(state.anchor.z) + settings.offsetZ
+            },
+            settings.mirrorMode, settings.rotationTurns,
+            settings.layerAxis, settings.layerDisplayMode, settings.displayLayer,
+            std::move(transformedBlocks)
+        );
         std::vector<Vec3> centerSums(state.sections.size());
         std::vector<std::size_t> centerCounts(state.sections.size());
 
@@ -145,10 +179,8 @@ bool rebuildProjectionPlacement(
         // the following publication uses only nonthrowing moves/clears.
         state.projectedBlockActors.clear();
         state.blockTessellator = std::move(blockTessellator);
-        state.expectedWorldBlocks = std::move(blocks);
-        state.expectedWorldLiquids = std::move(liquids);
+        state.worldLookup = std::move(worldLookup);
         state.expectedWorldBlockActors = std::move(actors);
-        state.expectedWorldBlockIndices = std::move(indices);
         std::fill(
             state.blockActorRendererAvailable.begin(),
             state.blockActorRendererAvailable.end(),
@@ -177,17 +209,17 @@ bool rebuildProjectionPlacement(
             break;
         }
         auto const& entry = state.structure->renderBlocks[index];
-        if (!isLayerVisible(
-                projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
-                settings.layerDisplayMode,
-                settings.displayLayer,
-                entry.materialIndex,
-                entry.liquidMaterialIndex,
-                settings.layerAxis
-            )) {
-            // Hidden layers behave like completed cells for mesh generation,
-            // but are excluded from the world lookup below.
-            state.correctionStates[index] = CorrectionState::Correct;
+        bool const visible = isLayerVisible(
+            projectionLayer(*state.structure, entry, settings.layerAxis, settings.mirrorMode, settings.rotationTurns),
+            settings.layerDisplayMode, settings.displayLayer,
+            entry.materialIndex, entry.liquidMaterialIndex, settings.layerAxis);
+        // Retain native actors for *all* layers. A later layer-only switch
+        // changes just the immutable lookup view and visibility bitmask; it
+        // cannot safely construct native actors from the mesh worker.
+        bool const mayHaveActor = !visible && entry.block
+            && entry.block->getBlockType().getBlockEntityType() != BlockActorType::Undefined;
+        if (!visible && !mayHaveActor) {
+            state.correctionStates.set(index, CorrectionState::Correct);
             state.placementBuildCursor = index + 1;
             continue;
         }
@@ -204,7 +236,6 @@ bool rebuildProjectionPlacement(
         };
         auto const worldKey = std::tuple{worldPosition.x, worldPosition.y, worldPosition.z};
         if (transformedBlock) {
-            state.expectedWorldBlocks->emplace(worldKey, transformedBlock);
             if (transformedBlock->getBlockType().getBlockEntityType() != BlockActorType::Undefined) {
                 try {
                     auto blockActor = VanillaBlockActorFactory::createBlockActor(
@@ -250,17 +281,13 @@ bool rebuildProjectionPlacement(
             }
         }
 
-        // The liquid layer is independent of the body layer. This must run
-        // even when a solid body exists so waterlogged slabs, stairs, fences
-        // and signs remain a two-layer cell in the virtual projection world.
-        auto const* transformedLiquid = transformExpectedBlock(
-            entry.liquid, transformSettings, settings.identityTransform
-        );
-        if (transformedLiquid) {
-            state.expectedWorldLiquids->emplace(worldKey, transformedLiquid);
+        if (!visible) {
+            // Retain the actor for future layer toggles, but keep hidden
+            // cells out of placement centers and correction rendering.
+            state.correctionStates.set(index, CorrectionState::Correct);
+            state.placementBuildCursor = index + 1;
+            continue;
         }
-        state.expectedWorldBlockIndices->emplace(worldKey, index);
-
         auto const section = state.blockToSection[index];
         if (section < state.placementCenterSums.size()) {
             state.placementCenterSums[section] += Vec3{
@@ -287,20 +314,23 @@ bool rebuildProjectionPlacement(
         }
     }
 
-    auto expectedWorldBlocks = state.expectedWorldBlocks;
+    auto worldLookup = state.worldLookup;
     auto* regionAddress = &region;
     state.blockTessellator->mCachedGetBlock.get()
-        = [expectedWorldBlocks = std::move(expectedWorldBlocks), regionAddress](
+        = [worldLookup = std::move(worldLookup), regionAddress](
               BlockPos const& position
           ) -> Block const& {
-            auto const found = expectedWorldBlocks->find(
+            auto const* found = worldLookup->blockAt(
                 std::tuple{position.x, position.y, position.z}
             );
-            return found == expectedWorldBlocks->end()
-                ? regionAddress->getBlock(position) : *found->second;
+            return !found
+                ? regionAddress->getBlock(position) : *found;
         };
 
-    state.correctionScanCursor = 0;
+    state.correctionScan.reset(state.sectionBlockIndices);
+    state.correctionEvents.clear();
+    state.correctionSubChunks.clear();
+    state.initialCorrectionScan.reset(state.structure->renderBlocks.size());
     state.placementBuildActive = false;
     state.placementCenterSums.clear();
     state.placementCenterCounts.clear();

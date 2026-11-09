@@ -781,7 +781,8 @@ bool wouldMergeClickedSlab(Block const& ghost, Block const& support) {
 
     ItemInstance const ghostItem = ghost.getBlockType().asItemInstance(ghost, nullptr);
     ItemInstance const supportItem = support.getBlockType().asItemInstance(support, nullptr);
-    return ghostItem.getIdAux() == supportItem.getIdAux();
+    return block::hasUsableItem(ghostItem) && block::hasUsableItem(supportItem)
+        && ghostItem.getIdAux() == supportItem.getIdAux();
 }
 
 // RuntimeId is intentionally retained for ordinary blocks. For the three

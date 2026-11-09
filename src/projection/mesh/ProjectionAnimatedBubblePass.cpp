@@ -180,7 +180,7 @@ void submitAnimatedBubbleOverlay(
         if (index >= state.structure->renderBlocks.size()
             || index >= state.correctionStates.size()
             || index >= state.missingLayers.size()
-            || !projectionBodyShouldRender(state.correctionStates[index],
+            || !projectionBodyShouldRender(state.renderCorrectionState(index),
                 state.missingLayers[index]))
             continue;
         auto const& entry = state.structure->renderBlocks[index];

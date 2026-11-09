@@ -33,6 +33,7 @@ struct ProjectionSectionBuildSettings {
     float    comparisonStrength{1.0f};
     float    correctionOutlineWidth{1.0f};
     bool     identityTransform{};
+    bool     correctionOnly{};
 };
 
 // Shared by the async owner's lightweight setup and synchronous section build.
@@ -47,6 +48,15 @@ void buildProjectionSection(
     Tessellator&                          tessellator,
     BlockTessellator&                     blockTessellator,
     BlockSource&                          region,
+    std::size_t                           section,
+    Tessellator::UploadMode               uploadMode,
+    ProjectionSectionBuildSettings const& settings
+);
+
+// Geometry-only overlay update: no world/chunk source or BlockTessellator.
+void buildProjectionCorrectionSection(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
     std::size_t                           section,
     Tessellator::UploadMode               uploadMode,
     ProjectionSectionBuildSettings const& settings

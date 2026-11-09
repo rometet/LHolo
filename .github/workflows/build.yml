@@ -25,7 +25,21 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $installer = Join-Path $env:RUNNER_TEMP 'LLVM-22.1.8-win64.exe'
           $llvmRoot = Join-Path $env:RUNNER_TEMP 'llvm-22.1.8'
-          Invoke-WebRequest 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe' -OutFile $installer
+          $llvmUrl = 'https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-win64.exe'
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $llvmUrl -OutFile $installer -ErrorAction Stop
+              break
+            } catch {
+              $detail = $_.Exception.Message
+              $transient = $detail -match '(?i)(429|50[0234]|gateway time-out|timed out|timeout|connection reset|connection closed|failed to connect)'
+              if (-not $transient -or $attempt -eq 4) { throw }
+              Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+              $delay = 25 * $attempt
+              Write-Warning "LLVM download transient failure (attempt $attempt): $detail; retry in $delay seconds."
+              Start-Sleep -Seconds $delay
+            }
+          }
           $expected = '16e5709785fef73c854646241c4a92c5cd574318d1b33c63330dd7721903e55c'
           if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
             throw 'LLVM installer checksum mismatch'
@@ -42,8 +56,32 @@ jobs:
       - run: |
           xmake repo -u
 
-      - run: |
-          xmake f -a x64 -m release -p windows -v --target_type=client -y
+      - name: Resolve client dependencies (retry transient download errors)
+        shell: pwsh
+        run: |
+          # Xmake's release asset downloads can intermittently return HTTP 5xx.
+          # Retry *only* recognized transient network errors; compilation and
+          # package/configuration errors must still fail immediately.
+          $ErrorActionPreference = 'Continue'
+          $maxAttempts = 4
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Xmake dependency resolution attempt $attempt/$maxAttempts"
+            $configOutput = @()
+            & xmake f -a x64 -m release -p windows -v --target_type=client -y 2>&1 |
+              Tee-Object -Variable configOutput
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) { exit 0 }
+
+            $combined = $configOutput -join "`n"
+            $transient = $combined -match '(?i)(status=(429|500|502|503|504)|timed out|timeout|connection reset|failed to connect|could not resolve host|SSL connect error)'
+            if (-not $transient -or $attempt -eq $maxAttempts) {
+              Write-Error "Xmake failed (exit $exitCode). Transient network failure: $transient."
+              exit $exitCode
+            }
+            $delay = 25 * $attempt
+            Write-Warning "Transient package download failure; retrying in $delay seconds."
+            Start-Sleep -Seconds $delay
+          }
 
       - run: |
           xmake -v -y

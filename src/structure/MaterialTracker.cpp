@@ -105,8 +105,10 @@ std::string localizedBlockName(Block const& block, std::string_view localeCode) 
     if (auto* itemPtr = item.get()) {
         ItemStack itemStack{ItemStack::EMPTY_ITEM()};
         itemStack.reinit(*itemPtr, 1, 0);
-        auto const name = itemStack.getName();
-        if (!name.empty() && name != typeName) return name;
+        if (block::hasUsableItem(itemStack)) {
+            auto const name = itemStack.getName();
+            if (!name.empty() && name != typeName) return name;
+        }
     }
 
     auto const translationKey = block.buildDescriptionName();

@@ -17,8 +17,7 @@
 namespace lholo::projection::detail {
 namespace {
 
-thread_local ExpectedBlockMap const*      gTessellationBlocks{};
-thread_local ExpectedLiquidMap const*     gTessellationLiquids{};
+thread_local ProjectionWorldLookup const* gTessellationLookup{};
 thread_local ExpectedBlockActorMap const* gTessellationBlockActors{};
 thread_local NativeLiquidTelemetry*       gNativeLiquidTelemetry{};
 thread_local bool                         gSuppressRegionWrites{};
@@ -39,19 +38,16 @@ bool regionWritesSuppressed() {
 }
 
 ScopedTessellationBlocks::ScopedTessellationBlocks(
-    ExpectedBlockMap const&      blocks,
-    ExpectedLiquidMap const&     liquids,
+    ProjectionWorldLookup const& worldLookup,
     ExpectedBlockActorMap const& blockActors,
     NativeLiquidTelemetry*       telemetry
 )
-: mPreviousBlocks(std::exchange(gTessellationBlocks, &blocks)),
-  mPreviousLiquids(std::exchange(gTessellationLiquids, &liquids)),
+: mPreviousLookup(std::exchange(gTessellationLookup, &worldLookup)),
   mPreviousBlockActors(std::exchange(gTessellationBlockActors, &blockActors)),
   mPreviousTelemetry(std::exchange(gNativeLiquidTelemetry, telemetry)) {}
 
 ScopedTessellationBlocks::~ScopedTessellationBlocks() {
-    gTessellationBlocks      = mPreviousBlocks;
-    gTessellationLiquids     = mPreviousLiquids;
+    gTessellationLookup      = mPreviousLookup;
     gTessellationBlockActors = mPreviousBlockActors;
     gNativeLiquidTelemetry   = mPreviousTelemetry;
 }
@@ -79,21 +75,21 @@ bool isDiodeVirtualAirPosition(BlockPos const& pos) noexcept {
 }
 
 Block const* findTessellationBlock(BlockPos const& position) {
-    if (!gTessellationBlocks) return nullptr;
-    auto const found = gTessellationBlocks->find(
+    if (!gTessellationLookup) return nullptr;
+    auto const* found = gTessellationLookup->blockAt(
         std::tuple{position.x, position.y, position.z}
     );
-    if (found != gTessellationBlocks->end()) return found->second;
+    if (found) return found;
     return isDiodeVirtualAirPosition(position) ? gDiodeAir : nullptr;
 }
 
 Block const* findTessellationLiquid(BlockPos const& position) {
-    if (!gTessellationLiquids) return nullptr;
+    if (!gTessellationLookup) return nullptr;
     if (gNativeLiquidTelemetry) ++gNativeLiquidTelemetry->virtualLiquidQueryHits;
-    auto const found = gTessellationLiquids->find(
+    auto const* found = gTessellationLookup->liquidAt(
         std::tuple{position.x, position.y, position.z}
     );
-    if (found != gTessellationLiquids->end()) return found->second;
+    if (found) return found;
     return isDiodeVirtualAirPosition(position) ? gDiodeAir : nullptr;
 }
 

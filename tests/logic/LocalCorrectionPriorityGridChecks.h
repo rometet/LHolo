@@ -1,6 +1,8 @@
 #pragma once
 #include "projection/mesh/LocalCorrectionPriorityGrid.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/mesh/CorrectionFaceMask.h"
+#include "projection/correction/CorrectionStateStore.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +58,44 @@ void runLocalCorrectionPriorityGridChecks(Check check) {
             ++traversed;
         });
         check(traversed==indices.size());
+    }
+
+    // Single-layer correction fill must not be occluded by a hidden block
+    // above it. Capture both pages to reproduce the worker's 6-neighbor
+    // section snapshot, including a face across a subchunk boundary (Y=15/16).
+    // Raw truth remains Missing/WrongType even when the render view is hidden.
+    {
+        using namespace lholo::projection::detail;
+        std::vector<std::vector<std::size_t>> pages{{0}, {1}};
+        CorrectionStateStore states;
+        states.initialize(pages, 2);
+        states.set(1, CorrectionState::WrongType);
+        std::array<std::size_t, 2> capturedSections{0, 1};
+        for (bool upperVisible : {false, true}) {
+            states.setVisible(1, upperVisible);
+            auto view = states.capture(capturedSections);
+            check(view.renderState(0) == CorrectionState::Missing);
+            check(states.get(1) == CorrectionState::WrongType);
+            check(view.renderState(1) == (upperVisible ? CorrectionState::WrongType : CorrectionState::Correct));
+            LocalCorrectionPriorityGrid surface;
+            check(surface.reset(0, 14, 0, 0, 17, 0));
+            surface.add(0, 15, 0, static_cast<std::uint8_t>(correctionPriority(view.renderState(0))));
+            surface.add(0, 16, 0, static_cast<std::uint8_t>(correctionPriority(view.renderState(1))));
+            auto top = correctionExposedFaceMask(correctionPriority(view.renderState(0)),
+                [&](int dx, int dy, int dz) { return static_cast<int>(surface.get(dx, 15 + dy, dz)); });
+            // Face bit 5 is +Y. A hidden upper block must never hide it.
+            check(((top >> 5) & 1U) == (upperVisible ? 0U : 1U));
+            check((top & 0x1FU) == 0x1FU); // sides/bottom remain exposed
+        }
+        states.setVisible(1, true);
+        states.set(1, CorrectionState::Missing);
+        auto allLayers = states.capture(capturedSections);
+        LocalCorrectionPriorityGrid surface;
+        check(surface.reset(0, 14, 0, 0, 17, 0));
+        surface.add(0, 16, 0, static_cast<std::uint8_t>(correctionPriority(allLayers.renderState(1))));
+        check((correctionExposedFaceMask(1, [&](int dx, int dy, int dz) {
+            return static_cast<int>(surface.get(dx, 15 + dy, dz));
+        }) & (1U << 5)) == 0);
     }
 
     // Deterministic random priorities: the dense grid must agree with the
