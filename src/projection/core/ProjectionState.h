@@ -18,6 +18,7 @@
 #include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/core/ProjectionDrawCache.h"
+#include "projection/core/ProjectionResidencyScan.h"
 #include "projection/mesh/ProjectionCorrectionBatchCache.h"
 #include "projection/mesh/ProjectionTransparentBatchCache.h"
 #include "projection/ProjectionTypes.h"
@@ -88,8 +89,6 @@ struct SectionState {
     bool    incrementalDirty{};
     bool    interactiveDirty{};
     bool    buildInFlight{};
-    bool    residencyDeferred{};
-    std::size_t residentBytes{};
     std::uint64_t requestedRevision{};
     std::uint64_t uploadedRevision{};
     // The blend mesh is re-sorted only after the camera moves by a quarter
@@ -173,12 +172,10 @@ struct ProjectionState {
     ProjectionTransparentBatchCache transparentDrawBatches;
     std::uint64_t meshUploadRevision{};
     std::uint64_t visibilityRevision{};
-    // Bounded mesh residency: distant sections are evicted above the global
-    // geometry budget and deferred until the camera moves again.
-    std::uint64_t                           residencyTrimRevision{};
-    Vec3                                    residencyCamera{};
-    bool                                    hasResidencyCamera{};
-    std::optional<float>                    residencyDistanceLimit;
+    // Bounded mesh residency: sections outside the retention ring are
+    // released a few per frame; renewed requests keep the scan cursor so
+    // continuous camera movement cannot starve a large blueprint (23b259d).
+    ProjectionResidencyScan                  residencyScan;
     std::uint64_t meshBuildSelections{};
     std::uint64_t visibilityBoundsGeneration{};
     std::size_t visibilityBoundsSections{};

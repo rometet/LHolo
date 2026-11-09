@@ -8,7 +8,6 @@
 
 #include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
-#include "projection/mesh/ProjectionMeshResidency.h"
 
 #include "plugin/LHolo.h"
 #include "projection/core/ProjectionInternalTypes.h"
@@ -198,7 +197,10 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 }
                 continue;
             }
-            if (result.revision != state.sections[section].requestedRevision) {
+            // Obsolete or now-distant work must not allocate GPU resources,
+            // report a current failure or disable the asynchronous worker.
+            if (result.revision != state.sections[section].requestedRevision
+                || !state.sections[section].withinRetentionDistance) {
                 state.sections[section].dirty = true;
                 continue;
             }
@@ -335,7 +337,6 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     state.correctionDrawBatches.clear();
                 }
                 ++state.meshUploadRevision;
-                recordProjectionResidentBytes(state, section);
                 state.drawCache.noteMeshUpload(section);
                 state.sections[section].incrementalDirty = false;
                 state.sections[section].interactiveDirty = false;

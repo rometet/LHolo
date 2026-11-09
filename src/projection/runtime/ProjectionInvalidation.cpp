@@ -137,9 +137,6 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     state.cachedCorrectionOutlineWidth = settings.correctionOutlineWidth;
 
     if (result.placementViewChanged()) {
-        // The placement moved; the residency camera key no longer matches, so
-        // deferred distant sections may be admitted again.
-        state.hasResidencyCamera = false;
         state.detectedExtraBlockPositions.clear();
         state.detectedExtraSectionCounts.clear();
         state.extraBlockPositions.clear();
@@ -163,7 +160,6 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
         state.correctionStates.fill(CorrectionState::Missing);
         std::fill(state.missingLayers.begin(), state.missingLayers.end(), MissingLayerBoth);
         for (auto& sectionState : state.sections) {
-            sectionState.residentBytes = 0;
             for (auto& mesh : sectionState.meshes) mesh.reset();
             sectionState.blendSource.reset();
             sectionState.blendSortKeyValid = false;

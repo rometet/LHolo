@@ -2,7 +2,6 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionMeshScheduler.h"
-#include "projection/mesh/ProjectionMeshResidency.h"
 #include "projection/correction/CorrectionMeshRules.h"
 #include "resourcepacks/WorldPackReloadState.h"
 
@@ -67,7 +66,6 @@ std::optional<std::size_t> selectNextDirtySection(
             };
             auto const delta=center-cameraPosition;
             bool const ready = sec.dirty && sec.withinBuildDistance && !sec.buildInFlight
-                && canBuildResidentSection(state, index, cameraPosition)
                 && !projectionSectionHasPendingCorrection(state, index, settings);
             return ProjectionBuildCandidate{
                 ready,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
@@ -579,7 +577,6 @@ void buildNextProjectionSectionSynchronously(
         state.sections[section].modelDirty = false;
         state.sections[section].interactiveDirty = false;
         ++state.meshUploadRevision;
-        recordProjectionResidentBytes(state, section);
         state.drawCache.noteMeshUpload(section);
         break;
     }

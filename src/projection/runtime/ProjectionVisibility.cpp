@@ -51,8 +51,10 @@ void updateProjectionVisibility(ProjectionState& state, BaseActorRenderContext& 
         static_cast<float>(state.anchor.z+state.cachedOffsetZ)-camera.z};
     float const farClip=cam.mZFar;
     bool changed=resetBounds;
+    bool retentionFlipped=false;
     for(auto& sec:state.sections) {
         auto const view=classifyProjectionSection(frustum,sec.buildBounds,origin,farClip);
+        if(sec.withinRetentionDistance!=view.withinRetentionDistance)retentionFlipped=true;
         if(sec.renderVisible!=view.renderVisible
             || sec.buildVisible!=view.buildVisible
             || sec.prefetchVisible!=view.prefetchVisible
@@ -62,8 +64,12 @@ void updateProjectionVisibility(ProjectionState& state, BaseActorRenderContext& 
         sec.buildVisible=view.buildVisible;
         sec.prefetchVisible=view.prefetchVisible;
         sec.withinBuildDistance=view.withinBuildDistance;
-        sec.withinRetentionDistance=view.withinRetentionDistance;    }
+        sec.withinRetentionDistance=view.withinRetentionDistance;
+    }
     if(changed)++state.visibilityRevision;
+    // A section that left the retention ring must be released by the bounded
+    // scan; sections that came back simply re-enter the build admission.
+    if(retentionFlipped)state.residencyScan.request(state.sections.size());
     // Retire at most two out-of-range Blend GPU streams per frame, without
     // touching the original opaque/correction/liquid owners. Rebuild the
     // section when it returns to range. Never retire during pack reload.

@@ -225,14 +225,14 @@ void processProjectionOpaqueFrame(
     // the render owner. This marker is not a private GPU completion receipt.
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     uploadCompletedProjectionMeshes(state, tessellator);
-    trimProjectionMeshResidency(state, cameraPosition);
+    trimProjectionMeshResidency(state);
     scheduleProjectionMeshBuild(
         state, tessellator, region, cameraPosition, buildSettings
     );
     buildNextProjectionSectionSynchronously(
         state, tessellator, blockTessellator, region, buildSettings
     );
-    if (!state.asyncMeshBuildingEnabled) trimProjectionMeshResidency(state, cameraPosition);
+    if (!state.asyncMeshBuildingEnabled) trimProjectionMeshResidency(state);
 }
 
 } // namespace lholo::projection::detail
