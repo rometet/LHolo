@@ -88,6 +88,7 @@ public:
         mCopiedBytes = 0;
     }
 
+    std::size_t size() const { return mLayout ? mLayout->size() : 0; }
     CorrectionState get(std::size_t index) const {
         auto const location = (*mLayout)[index];
         return mPages[location.section]->states[location.slot];

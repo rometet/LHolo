@@ -187,7 +187,7 @@ bool rebuildProjectionPlacement(
             )) {
             // Hidden layers behave like completed cells for mesh generation,
             // but are excluded from the world lookup below.
-            state.correctionStates[index] = CorrectionState::Correct;
+            state.correctionStates.set(index, CorrectionState::Correct);
             state.placementBuildCursor = index + 1;
             continue;
         }
@@ -300,7 +300,10 @@ bool rebuildProjectionPlacement(
                 ? regionAddress->getBlock(position) : *found->second;
         };
 
-    state.correctionScanCursor = 0;
+    state.correctionScan.reset(state.sectionBlockIndices);
+    state.correctionEvents.clear();
+    state.correctionSubChunks.clear();
+    state.initialCorrectionScan.reset(state.structure->renderBlocks.size());
     state.placementBuildActive = false;
     state.placementCenterSums.clear();
     state.placementCenterCounts.clear();

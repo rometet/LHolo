@@ -241,7 +241,7 @@ struct ProjectionState {
             : index < correctionStates.size() && index < blockActorRendererAvailable.size();
     }
     CorrectionState buildCorrectionState(std::size_t index) const {
-        if (!sectionBlockSnapshot) return correctionStates.at(index);
+        if (!sectionBlockSnapshot) return correctionStates.get(index);
         auto const* value = sectionBlockSnapshot->find(index);
         if (!value) throw std::out_of_range("section correction snapshot missing block");
         return static_cast<CorrectionState>(value->correction);
