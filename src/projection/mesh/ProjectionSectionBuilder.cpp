@@ -232,13 +232,6 @@ std::uint32_t modulateAbgr(std::uint32_t color, std::uint32_t tint) {
     return (color & 0xFF000000U) | channel(0) | channel(8) | channel(16);
 }
 
-int correctionPriority(CorrectionState state) {
-    return state == CorrectionState::WrongType ? 4
-        : state == CorrectionState::WrongState ? 3
-        : state == CorrectionState::Missing ? 1
-        : 0;
-}
-
 template <class Value>
 void compactPerVertexField(
     std::vector<Value>&               field,
@@ -2614,9 +2607,14 @@ void buildCorrectionSectionMeshes(
                 maxX + 1, maxY + 1, maxZ + 1);
             if (priorityGridReady) {
                 state.sectionBlockSnapshot->forEach(
-                    [&](std::size_t index, SectionBlockSnapshot::Value const& value) {
+                    [&](std::size_t index, SectionBlockSnapshot::Value const&) {
+                        // The snapshot's raw correction byte includes hidden
+                        // layers. The exposed-face grid must use the *visible*
+                        // correction snapshot, just like the actual fill cells;
+                        // otherwise a hidden upper layer culls the top face of
+                        // the selected layer (also at section boundaries).
                         auto const priority = correctionPriority(
-                            static_cast<CorrectionState>(value.correction));
+                            state.renderCorrectionState(index));
                         if (!priority) return;
                         auto const transformed = transformStructurePosition(
                             state.structure->renderBlocks[index], *state.structure,

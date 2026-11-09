@@ -101,6 +101,13 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     // LayerRange changes only invalidate sections containing blocks whose
     // visibility crossed the old/new boundary.
     if (result.layerChanged || result.geometryTransformChanged) {
+        // A layer toggle changes the exposed correction faces of *adjacent*
+        // sections too, even when none of their own cells changed visibility.
+        // Coalesce section dirtiness: incrementing revisions once per cell
+        // caused unnecessary rebuild churn for large schematics.
+        std::vector<std::uint8_t> visibilityChangedSections;
+        if (!result.geometryTransformChanged)
+            visibilityChangedSections.resize(state.sections.size());
         auto const oldLayerVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
             if (!state.cachedLayerDisplayMode || !state.cachedLayerAxis) return false;
             auto const layer = projectionLayer(*state.structure, entry, *state.cachedLayerAxis, state.cachedMirror, state.cachedRotation);
@@ -118,11 +125,37 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             if (!result.geometryTransformChanged && oldLayerVisible(entry) == visible) continue;
             if (!result.geometryTransformChanged) {
                 auto const section = state.correctionStates.section(index);
-                if (section < state.sections.size()) {
-                    markSectionDirty(state, section, false);
-                }
+                if (section < visibilityChangedSections.size())
+                    visibilityChangedSections[section] = 1;
             }
             state.correctionStates.setVisible(index, visible);
+        }
+        if (!result.geometryTransformChanged) {
+            // Only changed sections need their model geometry regenerated.
+            // The six face-neighbors need an overlay-only refresh: an exposed
+            // top/side face can appear when the adjacent layer is hidden.
+            constexpr int neighborOffsets[6][3] = {
+                {-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
+                {0, 1, 0}, {0, 0, -1}, {0, 0, 1}
+            };
+            std::vector<std::uint8_t> overlayNeighbors(state.sections.size());
+            for (std::size_t section = 0; section < visibilityChangedSections.size(); ++section) {
+                if (!visibilityChangedSections[section]) continue;
+                markSectionDirty(state, section, false);
+                if (section >= state.localSectionKeys.size()) continue;
+                auto const [x, y, z] = state.localSectionKeys[section];
+                for (auto const& delta : neighborOffsets) {
+                    auto found = state.localSectionIndices.find(SubChunkKey{
+                        x + delta[0], y + delta[1], z + delta[2]});
+                    if (found != state.localSectionIndices.end()
+                        && found->second < overlayNeighbors.size())
+                        overlayNeighbors[found->second] = 1;
+                }
+            }
+            for (std::size_t section = 0; section < overlayNeighbors.size(); ++section) {
+                if (overlayNeighbors[section] && !visibilityChangedSections[section])
+                    markSectionDirty(state, section, false, false);
+            }
         }
     }
 
