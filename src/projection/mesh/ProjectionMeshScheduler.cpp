@@ -65,8 +65,10 @@ std::optional<std::size_t> selectNextDirtySection(
                 static_cast<float>(state.anchor.z+settings.offsetZ)
             };
             auto const delta=center-cameraPosition;
+            bool const ready = sec.dirty && sec.withinBuildDistance && !sec.buildInFlight
+                && !projectionSectionHasPendingCorrection(state, index, settings);
             return ProjectionBuildCandidate{
-                sec.dirty && sec.withinBuildDistance,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
+                ready,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
                 sec.incrementalDirty,delta.x*delta.x+delta.y*delta.y+delta.z*delta.z,
                 sec.interactiveDirty
             };
@@ -582,6 +584,16 @@ void buildNextProjectionSectionSynchronously(
         state.drawCache.noteMeshUpload(section);
         break;
     }
+}
+
+bool projectionSectionHasPendingCorrection(ProjectionState const& state, std::size_t section,
+                                           ProjectionSectionBuildSettings const& settings) {
+    if (state.correctionEvents.empty()) return false;
+    auto bounds = projectionSectionCellWorldBounds(state.localSectionKeys[section], *state.structure,
+        {static_cast<long long>(state.anchor.x) + settings.offsetX,
+         static_cast<long long>(state.anchor.y) + settings.offsetY,
+         static_cast<long long>(state.anchor.z) + settings.offsetZ}, settings.mirrorMode, settings.rotationTurns, 1);
+    return state.correctionEvents.intersects(bounds.minimum, bounds.maximum);
 }
 
 } // namespace lholo::projection::detail

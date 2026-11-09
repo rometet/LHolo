@@ -14,6 +14,7 @@
 #include "projection/mesh/ProjectionMeshWorker.h"
 #include "plugin/LHolo.h"
 #include "ll/api/mod/NativeMod.h"
+#include "ll/api/io/Logger.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/core/ProjectionState.h"
@@ -62,13 +63,16 @@ void processProjectionOpaqueFrame(
     auto started = CorrectionFrameBudget::Clock::now();
     // Intake is bounded too. Leave most of the frame slice for actual
     // comparisons when world notifications arrive continuously.
-    for (int batch = 0; batch < 8 && budget.available(); ++batch) {
-        if (batch && CorrectionFrameBudget::Clock::now() - started >= CorrectionFrameBudget::DefaultDuration / 4)
+    for (int batch = 0; batch < CorrectionFrameBudget::MaximumIntakeBatches && budget.available(); ++batch) {
+        if (batch && CorrectionFrameBudget::Clock::now() - started >= CorrectionFrameBudget::IntakeDuration)
             break;
-        auto events = takePendingBlockChanges(32);
-        auto chunks = takePendingLoadedSubChunks(2);
+        auto events = takePendingBlockChangeSections(CorrectionFrameBudget::EventSectionsPerBatch);
+        auto chunks = batch < CorrectionFrameBudget::LoadedIntakeBatches
+            ? takePendingLoadedSubChunks(CorrectionFrameBudget::LoadedSectionsPerBatch) : std::vector<SubChunkKey>{};
         if (events.empty() && chunks.empty())
             break;
+        state.correctionReceivedSections += events.size();
+        for (auto const& event : events) state.correctionReceivedCells += event.size();
         // The single-file fork has no ProjectionWorldBounds helper; keep the
         // same half-open structure AABB test inline. Structure cells occupy
         // [origin, origin + size) per axis after the build transform.
@@ -83,19 +87,8 @@ void processProjectionOpaqueFrame(
             origin[1] + state.structure->sizeY,
             origin[2] + (rotated ? state.structure->sizeX : state.structure->sizeZ),
         };
-        for (auto const& event : events) {
-            std::array<long long, 3> const position{
-                event.position.x, event.position.y, event.position.z
-            };
-            bool const inside = position[0] >= origin[0] && position[0] < structureMax[0]
-                && position[1] >= origin[1] && position[1] < structureMax[1]
-                && position[2] >= origin[2] && position[2] < structureMax[2];
-            if (inside)
-                state.correctionEvents.push(
-                    {event.position.x, event.position.y, event.position.z},
-                    event.destroyedAt
-                );
-        }
+        for (auto& event : events)
+            state.correctionEvents.push(std::move(event).clipped(origin, structureMax));
         for (auto const& chunk : chunks) {
             auto [x, y, z] = chunk;
             std::array<long long, 3> const lo{
@@ -138,6 +131,7 @@ void processProjectionOpaqueFrame(
         );
         if (!selected)
             break;
+        auto workBefore = budget.work();
         auto changes = runCorrectionUpdate(
             [&] {
                 return updateCorrectionTracker(
@@ -159,6 +153,7 @@ void processProjectionOpaqueFrame(
             },
             []() noexcept { markProjectionWorldEventsFailed(); }
         );
+        state.correctionWorkByKind[static_cast<std::size_t>(selected->kind)] += budget.work() - workBefore;
         if (changes.overall) {
             publishPlacedProgress(state.progressCorrectCount);
         }
@@ -186,15 +181,40 @@ void processProjectionOpaqueFrame(
         auto const emptyCells = state.correctionEmptyFastCells;
         auto const probes = state.correctionEmptyProbes;
         state.correctionEmptyFastCells = state.correctionEmptyProbes = 0;
-        LHolo::getInstance().getSelf().getLogger().debug(
-            "Projection correction: average/peak {} / {} us, average {} work units, target {} us; empty fast-path {} cells / {} probes",
-            state.correctionMicros / state.correctionFrames,
-            state.correctionPeakMicros,
-            state.correctionWork / state.correctionFrames,
-            CorrectionFrameBudget::DefaultDuration.count(),
-            emptyCells,
-            probes
-        );
+        auto& logger = LHolo::getInstance().getSelf().getLogger();
+        bool const report = logger.shouldLog(ll::io::LogLevel::Debug);
+        std::size_t pendingCells{}, pendingSections{}, pendingLoaded{}, blocked{}, dirty{};
+        if (report) {
+            // Disabled diagnostics must not scan every section or acquire the
+            // incoming world-event mutex just to discard the formatted result.
+            pendingCells = state.correctionEvents.size();
+            pendingSections = state.correctionEvents.sections();
+            pendingLoaded = state.correctionSubChunks.size();
+            for (std::size_t index = 0; index < state.sections.size(); ++index) {
+                if (!state.sections[index].dirty) continue;
+                ++dirty;
+                blocked += projectionSectionHasPendingCorrection(state, index, buildSettings);
+            }
+        }
+        if (report) {
+            auto incoming = pendingProjectionEventCounts();
+            logger.debug(
+                "Projection correction queues: incoming {} cells / {} tiles / {} loaded; pending {} cells / {} tiles / {} loaded; intake {} cells / {} tiles; work event/loaded/initial/extra {}/{}/{}/{}; dirty {} (coalescing {})",
+                incoming.cells, incoming.sections, incoming.loadedSections, pendingCells, pendingSections, pendingLoaded,
+                state.correctionReceivedCells, state.correctionReceivedSections, state.correctionWorkByKind[0],
+                state.correctionWorkByKind[1], state.correctionWorkByKind[2], state.correctionWorkByKind[3], dirty, blocked);
+            logger.debug(
+                "Projection correction: average/peak {} / {} us, average {} work units, target {} us; empty fast-path {} cells / {} probes",
+                state.correctionMicros / state.correctionFrames,
+                state.correctionPeakMicros,
+                state.correctionWork / state.correctionFrames,
+                CorrectionFrameBudget::DefaultDuration.count(),
+                emptyCells,
+                probes
+            );
+        }
+        state.correctionReceivedCells = state.correctionReceivedSections = 0;
+        state.correctionWorkByKind = {};
         state.correctionFrames = state.correctionMicros = 0;
         state.correctionPeakMicros = state.correctionWork = 0;
     }
