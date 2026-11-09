@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #include "projection/mesh/ProjectionMeshScheduler.h"
+#include "projection/correction/CorrectionMeshRules.h"
 #include "resourcepacks/WorldPackReloadState.h"
 
 #include "plugin/LHolo.h"
@@ -66,7 +67,8 @@ std::optional<std::size_t> selectNextDirtySection(
             auto const delta=center-cameraPosition;
             return ProjectionBuildCandidate{
                 sec.dirty && sec.withinBuildDistance,sec.buildInFlight,sec.buildVisible,sec.prefetchVisible,
-                sec.incrementalDirty,delta.x*delta.x+delta.y*delta.y+delta.z*delta.z
+                sec.incrementalDirty,delta.x*delta.x+delta.y*delta.y+delta.z*delta.z,
+                sec.interactiveDirty
             };
         });
 }
@@ -143,8 +145,9 @@ void scheduleProjectionMeshBuild(
     Tessellator&                          tessellator,
     BlockSource&                          region,
     Vec3 const&                           cameraPosition,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& buildSettings
 ) {
+    auto settings = buildSettings;
     // A single in-flight task gives each BlockTessellator exclusive access and
     // naturally coalesces repeated changes into the latest revision.
     if (!state.asyncMeshBuildingEnabled || meshWorkerIsBusy()) return;
@@ -154,6 +157,8 @@ void scheduleProjectionMeshBuild(
 
     auto const snapshotStarted = std::chrono::steady_clock::now();
     auto const section = *selected;
+    settings.correctionOnly =
+        canBuildCorrectionOnly(state.sections[section].modelDirty, state.sections[section].uploadedRevision);
     ++state.meshBuildSelections;
     if (!sectionBuildStorageReady(state, section) || !state.level || !state.dimension) {
         if (section < state.sections.size()) {
@@ -181,58 +186,60 @@ void scheduleProjectionMeshBuild(
     }
     BlockPos minimum{INT_MAX, INT_MAX, INT_MAX};
     BlockPos maximum{INT_MIN, INT_MIN, INT_MIN};
-    for (auto const index : state.sectionBlockIndices[section]) {
-        auto const local = transformStructurePosition(
-            state.structure->renderBlocks[index], *state.structure, settings.mirrorMode,
-            settings.rotationTurns
-        );
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + local.x,
-            state.anchor.y + settings.offsetY + local.y,
-            state.anchor.z + settings.offsetZ + local.z
-        };
-        minimum.x = std::min(minimum.x, world.x);
-        minimum.y = std::min(minimum.y, world.y);
-        minimum.z = std::min(minimum.z, world.z);
-        maximum.x = std::max(maximum.x, world.x);
-        maximum.y = std::max(maximum.y, world.y);
-        maximum.z = std::max(maximum.z, world.z);
+    if (!settings.correctionOnly) {
+        for (auto const index : state.sectionBlockIndices[section]) {
+            auto const local = transformStructurePosition(
+                state.structure->renderBlocks[index], *state.structure, settings.mirrorMode,
+                settings.rotationTurns
+            );
+            BlockPos const world{
+                state.anchor.x + settings.offsetX + local.x,
+                state.anchor.y + settings.offsetY + local.y,
+                state.anchor.z + settings.offsetZ + local.z
+            };
+            minimum.x = std::min(minimum.x, world.x);
+            minimum.y = std::min(minimum.y, world.y);
+            minimum.z = std::min(minimum.z, world.z);
+            maximum.x = std::max(maximum.x, world.x);
+            maximum.y = std::max(maximum.y, world.y);
+            maximum.z = std::max(maximum.z, world.z);
+        }
+        for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
+            auto const local = transformStructurePosition(
+                BlockPos{x, y, z}, *state.structure, settings.mirrorMode, settings.rotationTurns
+            );
+            BlockPos const world{
+                state.anchor.x + settings.offsetX + local.x,
+                state.anchor.y + settings.offsetY + local.y,
+                state.anchor.z + settings.offsetZ + local.z
+            };
+            minimum.x = std::min(minimum.x, world.x);
+            minimum.y = std::min(minimum.y, world.y);
+            minimum.z = std::min(minimum.z, world.z);
+            maximum.x = std::max(maximum.x, world.x);
+            maximum.y = std::max(maximum.y, world.y);
+            maximum.z = std::max(maximum.z, world.z);
+        }
+        if (minimum.x == INT_MAX) {
+            auto const& center = state.sections[section].center;
+            auto const extentX = settings.rotationTurns & 1 ? state.structure->sizeZ : state.structure->sizeX;
+            auto const extentZ = settings.rotationTurns & 1 ? state.structure->sizeX : state.structure->sizeZ;
+            auto const centerCell = [](float position, int extent) {
+                // A large finite local center can round to INT_MAX+1 in float.
+                // Keep the double clamp before narrowing, inside the structure.
+                return static_cast<int>(std::clamp(static_cast<double>(position), 0.0, static_cast<double>(extent - 1)));
+            };
+            BlockPos const world{
+                state.anchor.x + settings.offsetX + centerCell(center.x, extentX),
+                state.anchor.y + settings.offsetY + centerCell(center.y, state.structure->sizeY),
+                state.anchor.z + settings.offsetZ + centerCell(center.z, extentZ),
+            };
+            minimum = world;
+            maximum = world;
+        }
+        minimum = BlockPos{minimum.x - 2, minimum.y - 2, minimum.z - 2};
+        maximum = BlockPos{maximum.x + 2, maximum.y + 2, maximum.z + 2};
     }
-    for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
-        auto const local = transformStructurePosition(
-            BlockPos{x, y, z}, *state.structure, settings.mirrorMode, settings.rotationTurns
-        );
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + local.x,
-            state.anchor.y + settings.offsetY + local.y,
-            state.anchor.z + settings.offsetZ + local.z
-        };
-        minimum.x = std::min(minimum.x, world.x);
-        minimum.y = std::min(minimum.y, world.y);
-        minimum.z = std::min(minimum.z, world.z);
-        maximum.x = std::max(maximum.x, world.x);
-        maximum.y = std::max(maximum.y, world.y);
-        maximum.z = std::max(maximum.z, world.z);
-    }
-    if (minimum.x == INT_MAX) {
-        auto const& center = state.sections[section].center;
-        auto const extentX = settings.rotationTurns & 1 ? state.structure->sizeZ : state.structure->sizeX;
-        auto const extentZ = settings.rotationTurns & 1 ? state.structure->sizeX : state.structure->sizeZ;
-        auto const centerCell = [](float position, int extent) {
-            // A large finite local center can round to INT_MAX+1 in float.
-            // Keep the double clamp before narrowing, inside the structure.
-            return static_cast<int>(std::clamp(static_cast<double>(position), 0.0, static_cast<double>(extent - 1)));
-        };
-        BlockPos const world{
-            state.anchor.x + settings.offsetX + centerCell(center.x, extentX),
-            state.anchor.y + settings.offsetY + centerCell(center.y, state.structure->sizeY),
-            state.anchor.z + settings.offsetZ + centerCell(center.z, extentZ),
-        };
-        minimum = world;
-        maximum = world;
-    }
-    minimum = BlockPos{minimum.x - 2, minimum.y - 2, minimum.z - 2};
-    maximum = BlockPos{maximum.x + 2, maximum.y + 2, maximum.z + 2};
 
     auto snapshot = std::make_shared<ProjectionState>();
     snapshot->level = state.level;
@@ -271,6 +278,16 @@ void scheduleProjectionMeshBuild(
         auto const& indices = state.sectionBlockIndices.at(found->second);
         snapshotIndices.insert(snapshotIndices.end(), indices.begin(), indices.end());
     }
+    std::vector<std::size_t> correctionSections;
+    correctionSections.reserve(7);
+    for (auto const& delta : neighborSections) {
+        auto const found = state.localSectionIndices.find(std::tuple{
+            sectionX + delta[0], sectionY + delta[1], sectionZ + delta[2]
+        });
+        if (found == state.localSectionIndices.end()) continue;
+        correctionSections.push_back(found->second);
+    }
+    snapshot->correctionSnapshot.emplace(state.correctionStates.capture(correctionSections));
     snapshot->sectionBlockSnapshot.emplace();
     snapshot->sectionBlockSnapshot->capture(std::move(snapshotIndices),
         state.correctionStates, state.blockActorRendererAvailable);
@@ -279,6 +296,7 @@ void scheduleProjectionMeshBuild(
     snapshot->expectedWorldBlockActors = state.expectedWorldBlockActors;
     snapshot->expectedWorldBlockIndices = state.expectedWorldBlockIndices;
     snapshot->sections.resize(1);
+    snapshot->sections[0].meshBounds = state.sections[section].meshBounds;
     snapshot->warningFillSectionMeshes.resize(1);
     snapshot->correctionOutlineSectionMeshes.resize(1);
     snapshot->wrongFillSectionMeshes.resize(1);
@@ -313,21 +331,24 @@ void scheduleProjectionMeshBuild(
     }
     // 26.51 removed the ChunkViewSource(ChunkSource&, LoadMode) export; the
     // player chunk-view factory is the only remaining creation path.
-    auto* localPlayer = []() -> LocalPlayer* {
-        auto client = ll::service::getClientInstance();
-        return client ? client->getLocalPlayer() : nullptr;
-    }();
-    if (!localPlayer) return;
-    auto chunkView = localPlayer->$_createChunkSource(region.getChunkSource());
-    if (!chunkView) return;
-    chunkView->move(
-        minimum,
-        maximum,
-        false,
-        ChunkSourceViewGenerateMode::DontGenerateOnlyGet,
-        [](gsl::span<std::shared_ptr<LevelChunk>>) {},
-        nullptr
-    );
+    std::shared_ptr<ChunkViewSource> chunkView;
+    if (!settings.correctionOnly) {
+        auto* localPlayer = []() -> LocalPlayer* {
+            auto client = ll::service::getClientInstance();
+            return client ? client->getLocalPlayer() : nullptr;
+        }();
+        if (!localPlayer) return;
+        chunkView = localPlayer->$_createChunkSource(region.getChunkSource());
+        if (!chunkView) return;
+        chunkView->move(
+            minimum,
+            maximum,
+            false,
+            ChunkSourceViewGenerateMode::DontGenerateOnlyGet,
+            [](gsl::span<std::shared_ptr<LevelChunk>>) {},
+            nullptr
+        );
+    }
     auto const chunkViewMicros = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - snapshotDataFinished
@@ -354,34 +375,46 @@ void scheduleProjectionMeshBuild(
             result.workerGeneration = workerGeneration;
             result.structureGeneration = structureGeneration;
             result.revision = revision;
+            result.correctionOnly = settings.correctionOnly;
             result.section = section;
             result.snapshotPrepareMicros = snapshotPrepareMicros;
+            result.correctionSnapshotBytes = snapshot->correctionSnapshot->retainedBytes();
             result.snapshotDataMicros = snapshotDataMicros;
             result.chunkViewMicros = chunkViewMicros;
             auto const workerStarted = std::chrono::steady_clock::now();
             try {
-                auto localRegion = std::make_unique<BlockSource>(
-                    *level, *dimension, *chunkView, false, true, false, false
-                );
-                BlockTessellator localBlockTessellator(localRegion.get());
-                localBlockTessellator.mCachedGetBlock.get()
-                    = [snapshot, region = localRegion.get()](BlockPos const& position) -> Block const& {
-                        auto const found = snapshot->expectedWorldBlocks->find(
-                            std::tuple{position.x, position.y, position.z}
-                        );
-                        return found == snapshot->expectedWorldBlocks->end()
-                            ? region->getBlock(position) : *found->second;
-                    };
                 Tessellator localTessellator(weakBufferService);
-                buildProjectionSection(
-                    *snapshot,
-                    localTessellator,
-                    localBlockTessellator,
-                    *localRegion,
-                    0,
-                    Tessellator::UploadMode::Never,
-                    settings
-                );
+                if (settings.correctionOnly) {
+                    buildProjectionCorrectionSection(
+                        *snapshot,
+                        localTessellator,
+                        0,
+                        Tessellator::UploadMode::Never,
+                        settings
+                    );
+                } else {
+                    auto localRegion = std::make_unique<BlockSource>(
+                        *level, *dimension, *chunkView, false, true, false, false
+                    );
+                    BlockTessellator localBlockTessellator(localRegion.get());
+                    localBlockTessellator.mCachedGetBlock.get()
+                        = [snapshot, region = localRegion.get()](BlockPos const& position) -> Block const& {
+                            auto const found = snapshot->expectedWorldBlocks->find(
+                                std::tuple{position.x, position.y, position.z}
+                            );
+                            return found == snapshot->expectedWorldBlocks->end()
+                                ? region->getBlock(position) : *found->second;
+                        };
+                    buildProjectionSection(
+                        *snapshot,
+                        localTessellator,
+                        localBlockTessellator,
+                        *localRegion,
+                        0,
+                        Tessellator::UploadMode::Never,
+                        settings
+                    );
+                }
                 result.bodyClassifyMicros = snapshot->meshBodyClassifyMicros;
                 result.bodyTessellateMicros = snapshot->meshBodyTessellateMicros;
                 result.liquidMicros = snapshot->meshLiquidMicros;
@@ -486,8 +519,9 @@ void buildNextProjectionSectionSynchronously(
     Tessellator&                          tessellator,
     BlockTessellator&                     blockTessellator,
     BlockSource&                          region,
-    ProjectionSectionBuildSettings const& settings
+    ProjectionSectionBuildSettings const& buildSettings
 ) {
+    auto settings = buildSettings;
     if (state.asyncMeshBuildingEnabled) return;
 
     // Compatibility path: preserve one synchronous section per frame when
@@ -519,13 +553,17 @@ void buildNextProjectionSectionSynchronously(
             );
             continue;
         }
-        // A failed native build can already have replaced a section stream.
-        // Retire derived aggregates before entering that fallible operation.
-        state.praxisCompatLiquidAggregate.reset();
-        state.praxisCompatLiquidAggregateOrder.clear();
-        state.praxisCompatLiquidBoundaryMaskCache.clear();
-        state.praxisCompatLiquidAggregateDirty = true;
-        state.meshPreflightDone = false;
+        settings.correctionOnly =
+            canBuildCorrectionOnly(state.sections[section].modelDirty, state.sections[section].uploadedRevision);
+        if (!settings.correctionOnly) {
+            // A failed native build can already have replaced a section stream.
+            // Retire derived aggregates before entering that fallible operation.
+            state.praxisCompatLiquidAggregate.reset();
+            state.praxisCompatLiquidAggregateOrder.clear();
+            state.praxisCompatLiquidBoundaryMaskCache.clear();
+            state.praxisCompatLiquidAggregateDirty = true;
+            state.meshPreflightDone = false;
+        }
         completeSynchronousSectionBuild(state.sections[section], [&] {
             buildProjectionSection(
                 state,
@@ -537,6 +575,8 @@ void buildNextProjectionSectionSynchronously(
                 settings
             );
         });
+        state.sections[section].modelDirty = false;
+        state.sections[section].interactiveDirty = false;
         ++state.meshUploadRevision;
         state.drawCache.noteMeshUpload(section);
         break;
