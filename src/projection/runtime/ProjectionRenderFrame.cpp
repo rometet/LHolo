@@ -597,7 +597,7 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
                     std::tuple{pos.x, pos.y, pos.z}
                 );
                 if (found && *found < state.correctionStates.size()) {
-                    auto const correctionState = state.correctionStates[*found];
+                    auto const correctionState = state.correctionStates.get(*found);
                     if (correctionState == CorrectionState::WrongType
                         || correctionState == CorrectionState::WrongState) {
                         // LHolo already renders a complete red/yellow hull and
