@@ -267,6 +267,8 @@ struct ProjectionState {
     CorrectionWorkCursor correctionWorkCursor;
     std::uint64_t correctionFrames{}, correctionMicros{}, correctionPeakMicros{}, correctionWork{};
     std::uint64_t correctionEmptyFastCells{}, correctionEmptyProbes{};
+    std::uint64_t correctionReceivedCells{}, correctionReceivedSections{};
+    std::array<std::uint64_t, 4> correctionWorkByKind{};
     std::vector<BrokenProjectionCell> pendingBrokenCells;
     bool                            cachedCountExtras{true};
     int                             cachedRotation{-1};
