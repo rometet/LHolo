@@ -19,17 +19,20 @@
 namespace lholo::projection::detail {
 namespace {
 
-void markSectionDirty(ProjectionState& state, std::size_t section, bool incremental) {
+void markSectionDirty(
+    ProjectionState& state, std::size_t section, bool incremental, bool models = true
+) {
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
+    sectionState.modelDirty = sectionState.modelDirty || models;
     sectionState.dirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
     ++sectionState.requestedRevision;
 }
 
-void markAllSectionsDirty(ProjectionState& state, bool incremental) {
+void markAllSectionsDirty(ProjectionState& state, bool incremental, bool models = true) {
     for (std::size_t section = 0; section < state.sections.size(); ++section) {
-        markSectionDirty(state, section, incremental);
+        markSectionDirty(state, section, incremental, models);
     }
 }
 
@@ -80,7 +83,9 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     // correction/progress invalidation. Do not issue two revision bumps in the
     // same reconcile call; an XYZ move still requires fresh world corrections.
     if (!result.placementViewChanged() && (opacityChanged || correctionStyleChanged)) {
-        markAllSectionsDirty(state, false);
+        // Opacity is baked into model vertex colors, so only it requires full
+        // model rebuilds; correction-style changes rebuild overlays only.
+        markAllSectionsDirty(state, false, opacityChanged);
     }
 
     auto const layerIsVisible = [&](structure::LoadedStructure::RenderBlock const& entry) {
@@ -108,13 +113,11 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
             auto const& entry = state.structure->renderBlocks[index];
             auto const visible = layerIsVisible(entry);
             if (oldLayerVisible(entry) == visible) continue;
-            auto const section = state.blockToSection[index];
+            auto const section = state.correctionStates.section(index);
             if (section < state.sections.size()) {
                 markSectionDirty(state, section, false);
             }
-            state.correctionStates[index] = visible
-                ? CorrectionState::Unknown
-                : CorrectionState::Correct;
+            state.correctionStates.setVisible(index, visible);
         }
     }
 
@@ -135,14 +138,14 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
 
     if (result.placementViewChanged()) {
         state.detectedExtraBlockPositions.clear();
+        state.detectedExtraSectionCounts.clear();
         state.extraBlockPositions.clear();
         for (auto& positions : state.sectionExtraBlockPositions) positions.clear();
         state.progressExtraCount = 0;
         // Error HUD counts follow the same visible range as the meshes.
         state.progressWrongTypeCount = state.progressWrongStateCount = 0;
         std::fill(state.progressErrorKind.begin(), state.progressErrorKind.end(), 0);
-        state.extraScanRegion = 0;
-        state.extraScanCell = 0;
+        state.extraScan.reset();
         markAllSectionsDirty(state, false);
         publishErrorProgress(
             state.progressWrongTypeCount,
@@ -154,11 +157,7 @@ ProjectionInvalidationResult reconcileProjectionInvalidation(
     // Rotation/mirror alter local block models, so only those require throwing
     // away every GPU mesh. XYZ movement stays represented by the world matrix.
     if (result.geometryTransformChanged) {
-        std::fill(
-            state.correctionStates.begin(),
-            state.correctionStates.end(),
-            CorrectionState::Unknown
-        );
+        state.correctionStates.fill(CorrectionState::Missing);
         std::fill(state.missingLayers.begin(), state.missingLayers.end(), MissingLayerBoth);
         for (auto& sectionState : state.sections) {
             for (auto& mesh : sectionState.meshes) mesh.reset();
