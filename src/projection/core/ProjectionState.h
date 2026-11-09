@@ -6,6 +6,13 @@
 
 #pragma once
 
+#include "projection/correction/CorrectionScanProgress.h"
+#include "projection/correction/CorrectionStateStore.h"
+#include "projection/correction/CorrectionScanScheduler.h"
+#include "projection/correction/CorrectionWorkQueues.h"
+#include "projection/correction/CorrectionCellMask.h"
+#include "projection/correction/CorrectionAirScan.h"
+
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/LiquidBoundaryMaskCache.h"
 #include "projection/core/ProjectionVisibilityRules.h"
@@ -75,7 +82,9 @@ struct SectionState {
     bool withinRetentionDistance{true};
     Vec3    center{};
     bool    dirty{};
+    bool    modelDirty{true};
     bool    incrementalDirty{};
+    bool    interactiveDirty{};
     bool    buildInFlight{};
     std::uint64_t requestedRevision{};
     std::uint64_t uploadedRevision{};
@@ -184,7 +193,13 @@ struct ProjectionState {
     std::uint64_t                   structureGeneration{};
     std::uint64_t                   activationGeneration{};
     std::unique_ptr<BlockTessellator> blockTessellator;
-    std::vector<CorrectionState>    correctionStates;
+    CorrectionStateStore correctionStates;
+    std::optional<CorrectionStateStore::Snapshot> correctionSnapshot;
+    // Both builders share this read boundary. Only the active state is mutable;
+    // a worker retains a bounded, immutable neighborhood instead of all cells.
+    CorrectionState renderCorrectionState(std::size_t index) const {
+        return correctionSnapshot ? correctionSnapshot->renderState(index) : correctionStates.renderState(index);
+    }
     // Component absence from the same bounded correction read; overall
     // CorrectionState remains the authoritative progress/Verifier result.
     std::vector<std::uint8_t>       missingLayers;
@@ -242,10 +257,15 @@ struct ProjectionState {
     std::uint64_t                   progressWrongTypeCount{};
     std::uint64_t                   progressWrongStateCount{};
     std::uint64_t                   progressExtraCount{};
-    std::size_t                     correctionScanCursor{};
-    std::size_t                     extraScanRegion{};
-    std::uint64_t                   extraScanCell{};
-    std::set<SubChunkKey>           pendingLoadedSubChunks;
+    CorrectionScanScheduler         correctionScan;
+    CorrectionScanProgress          initialCorrectionScan;
+    CorrectionAirScan               extraScan;
+    std::vector<CorrectionSectionIndex> correctionIndex;
+    CorrectionEventQueue correctionEvents;
+    CorrectionSubChunkQueue correctionSubChunks;
+    CorrectionWorkCursor correctionWorkCursor;
+    std::uint64_t correctionFrames{}, correctionMicros{}, correctionPeakMicros{}, correctionWork{};
+    std::uint64_t correctionEmptyFastCells{}, correctionEmptyProbes{};
     std::vector<BrokenProjectionCell> pendingBrokenCells;
     bool                            cachedCountExtras{true};
     int                             cachedRotation{-1};
@@ -268,6 +288,7 @@ struct ProjectionState {
     std::map<SubChunkKey, std::size_t>    localSectionIndices;
     std::vector<SubChunkKey>              localSectionKeys;
     std::set<SubChunkKey>                 detectedExtraBlockPositions;
+    std::unordered_map<SubChunkKey, std::size_t, SubChunkKeyHash> detectedExtraSectionCounts;
     std::set<SubChunkKey>                 extraBlockPositions;
     std::vector<std::set<SubChunkKey>>    sectionExtraBlockPositions;
     // Correction meshes are split by category so the see-through (X-ray) option
@@ -298,12 +319,12 @@ struct ProjectionState {
     // changes recreate meshes; toggling visible blocks does not rebuild them.
     std::vector<std::unique_ptr<overlay::BoundsWireframe>> nativeRegionBounds;
     std::vector<SectionState>               sections;
-    std::vector<std::size_t>                blockToSection;
     std::size_t                             dirtySectionCursor{};
     std::uint64_t                           meshWorkerGeneration{};
     int                                     consecutiveMeshWorkerFailures{};
     bool                                    asyncMeshBuildingEnabled{true};
     std::uint64_t                           meshWorkerUploadedSections{};
+    std::uint64_t                           meshWorkerCorrectionOnlySections{};
     std::uint64_t                           meshWorkerSnapshotMicros{};
     std::uint64_t                           meshWorkerSnapshotDataMicros{};
     std::uint64_t                           meshWorkerChunkViewMicros{};
