@@ -26,3 +26,20 @@ config/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Executables, temporary files and Python tooling
+*.exe
+*.tmp
+*.bak
+*.orig
+*.swp
+*.pyc
+*.pyo
+__pycache__/
+**/__pycache__/
+*.tlog
+*.idb
+*.ipch
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/

@@ -82,7 +82,7 @@
 - チェストの通常操作に戻すときは OFF にしてください。サーバー側アドオンや設定用マーカーファイルは不要です。
 - 一部のチェストやサーバーは未検証のため、最初は失っても困らないアイテムで試してください。
 
-詳細: [ja.12 リリースノート](docs/RELEASE_JA12_MATERIAL_GRAB_UI_20261026.md)
+詳細: [ja.12 リリースノート](docs/dev/RELEASE_JA12_MATERIAL_GRAB_UI_20261026.md)
 
 ## 注意事項・互換性
 
@@ -94,7 +94,7 @@
 ## ドキュメント
 
 - [更新履歴](CHANGELOG.md) / [リリース一覧](https://github.com/rometet/LHolo/releases)
-- [日本語の操作ガイド](docs/README_JA.md)
+- [ドキュメント索引](docs/README.md) / [日本語の操作ガイド](docs/README_JA.md)
 - [ビルド・ソース情報](SOURCE_BUILD.md) / [開発者向けドキュメント](DEVELOPMENT.md)
 - [ライセンス](LICENSE) / [サードパーティの通知](THIRD_PARTY_NOTICES.md)
 
