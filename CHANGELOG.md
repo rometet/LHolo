@@ -41,7 +41,7 @@
 - **Improved:** Easy Place orientation and latency, including stairs, trapdoors and connected blocks; material/verifier HUD consistency.
 - **Improved:** Waterlogged and animated bubble projection behavior. Glass R5 and native resource reload ABI v4 are retained.
 - **Limitations:** Prerelease; client-only material grab must be explicitly enabled; not every container or multiplayer configuration has been verified. Prior settings-save/hot-unload limitations are not claimed fixed.
-- See [release details](docs/RELEASE_JA10_CLIENT_ONLY_20261026.md).
+- See [release details](docs/dev/RELEASE_JA10_CLIENT_ONLY_20261026.md).
 
 ## v26.51.2-ja.9-rc.1 — 2026-10-21
 
