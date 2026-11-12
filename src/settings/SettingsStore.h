@@ -43,6 +43,7 @@ struct Settings {
     // Per-client preference; modes remain session-only. Empty means no exceptions.
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
+    int easyPlaceColumnDepth{1}; // 1 = unchanged single-layer placement
     int autoPlacementBreakCooldownSeconds{10};
     bool hudEnabled{true};
     bool hudShowFileName{true};
