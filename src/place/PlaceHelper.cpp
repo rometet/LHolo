@@ -381,6 +381,14 @@ int getPlacementRadius() {
     return placementState().radius();
 }
 
+void setEasyPlaceColumnDepth(int depth) {
+    placementState().setEasyPlaceColumnDepth(depth);
+}
+
+int getEasyPlaceColumnDepth() {
+    return placementState().easyPlaceColumnDepth();
+}
+
 void setAutoPlacementBreakCooldownSeconds(int seconds) {
     placementState().setAutoPlacementBreakCooldownSeconds(std::clamp(seconds, 0, 60));
 }
