@@ -153,6 +153,7 @@ MenuModel buildStructureMenuModel(float effectiveUiScale) {
     model.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
     model.placementRadius = place::getPlacementRadius();
     model.easyPlaceColumnDepth = place::getEasyPlaceColumnDepth();
+    model.easyPlaceMaxPerTick = place::getEasyPlaceMaxPerTick();
     model.autoPlacementBreakCooldownSeconds = place::getAutoPlacementBreakCooldownSeconds();
     model.offsetX = sessionSnapshot.transform.offsetX;
     model.offsetY = sessionSnapshot.transform.offsetY;
@@ -252,6 +253,11 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     (void)place::applyPlacementModes({model.easyPlaceEnabled, model.manualPlace,
         model.rangeEnabled, model.placementModesRevision});
     changed = place::setManualPlacementAllowedItems(model.manualPlacementAllowedItems) || changed;
+    auto const maxPerTick = std::clamp(model.easyPlaceMaxPerTick, 1, 4);
+    if (place::getEasyPlaceMaxPerTick() != maxPerTick) {
+        place::setEasyPlaceMaxPerTick(maxPerTick);
+        changed = true;
+    }
     auto const columnDepth = std::clamp(model.easyPlaceColumnDepth, 1, 4);
     if (place::getEasyPlaceColumnDepth() != columnDepth) {
         place::setEasyPlaceColumnDepth(columnDepth);
