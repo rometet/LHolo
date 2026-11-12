@@ -1394,14 +1394,13 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
+    // Keep column depth stable for this entire game tick/burst.
+    int const columnDepth = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        ? placementState().easyPlaceColumnDepth() : 1;
     std::optional<ProjectionTarget> target;
     {
         telemetry::ScopedTimer rayTimer(telemetry::Stage::Ray);
-        // Manual and Range keep their original single-visible-cell semantics.
-        // Easy Place can optionally descend beneath an already-built top cell.
-        int const columnDepth = placementState().enabled()
-            && !placementState().manualMode() && !placementState().rangeEnabled()
-            ? placementState().easyPlaceColumnDepth() : 1;
         target = findProjectionTarget(*player, origin, dir, pickRange, columnDepth);
     }
     updateAimedProjectedBlockName(
@@ -1461,6 +1460,24 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
 
+    // A vanilla-style bounded burst retries the fresh projected ray after
+    // each successful send, rather than sending the same cell repeatedly.
+    // Manual and Range remain deliberately single-send; inventory swaps or
+    // native rotation queues never execute inside a multi-placement batch.
+    int const maxPerTick = manualPlacement ? 1 : placementState().easyPlaceMaxPerTick();
+    int sentInTick = 0;
+    int burstSlot = -1;
+    int burstAux = -1;
+    int initialStackCount = 0;
+    for (int attempt = 0; attempt < maxPerTick; ++attempt) {
+        if (attempt != 0) {
+            // A previous item must have been physically transmitted, and the
+            // hand may not be changed between transactions in this burst.
+            if (sentInTick == 0 || player->getSelectedItemSlot() != burstSlot) return;
+            target = findProjectionTarget(*player, origin, dir, pickRange, columnDepth);
+            if (!target) return;
+        }
+
     // Skip cells placed a moment ago until the server applies them; new cells
     // place immediately.
     auto const now = GetTickCount64();
@@ -1480,6 +1497,14 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         telemetry::count(telemetry::Event::InventorySwapResolved);
     if (found.slot < 0) {
         telemetry::count(telemetry::Event::NoMaterial);
+        return;
+    }
+    // Never change material/selected slot mid-tick. The same net-ID and stack
+    // item must be used throughout a burst; all other targets wait next tick.
+    if (sentInTick > 0 && (found.slot != burstSlot
+        || found.item->getIdAux() != burstAux
+        || !isFastOpaquePlacementCandidate(*target->block)
+            && !detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))) {
         return;
     }
     // R19: start the server-synchronized inventory exchange at the FIRST
@@ -1559,15 +1584,50 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         // stair use transaction; never assume immediate remote synchronization.
         if (placement.requireNativeRotationSync) return;
     }
-    auto const submit = placeBlock(*player, placement, found.slot, *found.item);
+    // A native rotation needs a synchronized PlayerAuthInput slot. Never
+    // queue it after another ItemUse packet in the same game tick.
+    if (sentInTick > 0 && placement.requireNativeRotationSync) return;
+
+    // Each consecutive ItemUse transaction describes the predicted stack
+    // after the previous successful submission. The local inventory itself
+    // must NEVER be modified speculatively. Server echoes can update it
+    // during an integrated-server send; choose the smaller actual/predicted
+    // count in that case. No oversubscription beyond the original stack.
+    ItemStack packetItem = *found.item;
+    if (sentInTick == 0) {
+        initialStackCount = swapCount(*found.item);
+    } else {
+        auto const remaining = (std::min)(
+            swapCount(*found.item), initialStackCount - sentInTick);
+        if (remaining <= 0) return;
+        packetItem.mCount = static_cast<decltype(packetItem.mCount)>(remaining);
+    }
+    if (initialStackCount <= sentInTick) return;
+
+    auto const submit = placeBlock(*player, placement, found.slot, packetItem);
     // Queued rotations will mark the cell only in the actual native
     // forwarding hook; the pending manual press remains open meanwhile.
     if (!detail::isPlacementSent(submit)) return;
     markPlaced(placement.cell, now);
+    if (sentInTick == 0) {
+        burstSlot = found.slot;
+        burstAux = found.item->getIdAux();
+    }
+    ++sentInTick;
     // Manual repeat bookkeeping: record this placement and mark the current
     // press as having placed its first block (so holding then auto-repeats).
     placementState().setLastManualPlaceAt(now);
     placementState().setManualPlaceRequested(false);
+
+    // Directionally sensitive and multi-cell items (stairs, slabs, doors,
+    // etc.) stay at a single send/tick until native BDS proves safe multi-use.
+    // Normal opaque blocks and connectivity-driven walls/fences may burst.
+    if (placement.requireNativeRotationSync
+        || !(isFastOpaquePlacementCandidate(*target->block)
+            || detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))) {
+        return;
+    }
+    }
 }
 } // namespace
 
