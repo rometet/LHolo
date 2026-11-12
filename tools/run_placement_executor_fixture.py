@@ -46,7 +46,7 @@ hook_body=hook_body[:-1].rstrip()
 identity=(src/'src/block/BlockPlacementRules.h').read_text(encoding='utf-8')
 identity=identity[identity.index('[[nodiscard]] inline std::string_view placeableBaseName'):identity.index('// Returns the stable identity')]
 (out/'BlockIdentity.inc').write_text(identity,encoding='utf-8')
-cl=Path(r'E:\rufu client\.tools\llvm-22.1.8\bin\clang-cl.exe')
+cl=Path(os.environ.get('LHOLO_CLANG_CL', r'E:\rufu client\.tools\llvm-22.1.8\bin\clang-cl.exe'))
 vc=Path(r'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207')
 sdk=Path(r'C:\Program Files (x86)\Windows Kits\10');ver='10.0.26100.0'
 env=dict(os.environ)
