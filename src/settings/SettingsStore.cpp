@@ -6,6 +6,7 @@
 #include "projection/core/ComparisonStyle.h"
 #include "place/ManualPlacementRules.h"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <atomic>
