@@ -140,6 +140,8 @@
   "hint.assistedDisabledByConsent": "Assisted placement is off (accept the experimental notice first)",
   "hint.assistedDisabled": "Assisted placement is off",
   "label.placementRadius": "Placement radius (1-4)",
+  "label.easyPlaceColumnDepth": "Easy Place vertical column depth (1-4)",
+  "hint.easyPlaceColumnDepth": "Aim at an already-built schematic top block to fill up to three cells below it. Set 1 to disable. Only for Y-axis layers.",
   "label.autoPlacementCooldown": "Auto-place cooldown after a projected block is broken (0-60 s)",
   "section.interfaceSettings": "Interface settings",
   "label.uiScale": "UI scale (1-5)",
