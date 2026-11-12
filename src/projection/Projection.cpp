@@ -22,8 +22,10 @@
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/core/ProjectionState.h"
 #include "projection/world/ProjectionQueries.h"
+#include "projection/world/ProjectionWorldLookup.h"
 #include "structure/StructureSession.h"
 
+#include <tuple>
 #include <vector>
 
 #include "mc/client/player/LocalPlayer.h"
@@ -31,6 +33,8 @@
 #include "mc/world/level/Level.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/block/Block.h"
+#include "mc/world/level/block/BlockType.h"
+#include "mc/world/level/material/Material.h"
 
 namespace lholo::projection {
 namespace {
