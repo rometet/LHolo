@@ -398,6 +398,16 @@ int swapCount(Stack const& stack) {
     if constexpr (requires { stack.mCount; }) return static_cast<int>(stack.mCount);
     else return stack.count; // Portable fixture stack.
 }
+// Only the serialized item copy is adjusted. Never mutate the player's real
+// inventory; server reconciliation remains authoritative.
+template <class Stack>
+void setBurstPacketItemCount(Stack& stack, int count) {
+    if constexpr (requires { stack.mCount; }) {
+        stack.mCount = static_cast<decltype(stack.mCount)>(count);
+    } else {
+        stack.count = count; // Portable fixture stack.
+    }
+}
 int swapAux(ItemStack const& stack) {
     return stack.isNull() ? -1 : stack.getIdAux();
 }
@@ -1599,7 +1609,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         initialStackCount, swapCount(*found.item), sentInTick);
     if (predictedCount == 0) return;
     if (sentInTick > 0) {
-        packetItem.mCount = static_cast<decltype(packetItem.mCount)>(predictedCount);
+        setBurstPacketItemCount(packetItem, predictedCount);
     }
 
     auto const submit = placeBlock(*player, placement, found.slot, packetItem);
