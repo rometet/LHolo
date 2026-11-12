@@ -140,6 +140,8 @@
   "hint.assistedDisabledByConsent": "辅助放置未开启（需先同意实验性功能声明）",
   "hint.assistedDisabled": "辅助放置未开启",
   "label.placementRadius": "放置半径（范围 1～4）",
+  "label.easyPlaceColumnDepth": "Easy Place 纵向连续放置层数（1～4）",
+  "hint.easyPlaceColumnDepth": "对准已放置的投影顶部方块，可依次放置其下方最多 3 层。设为 1 关闭。仅支持 Y 轴图层。",
   "label.autoPlacementCooldown": "投影方块被破坏自动放置冷却时长（范围 0～60 秒）",
   "section.interfaceSettings": "界面设置",
   "label.uiScale": "界面缩放（范围 1～5）",
