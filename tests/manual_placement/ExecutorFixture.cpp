@@ -595,7 +595,7 @@ int main() {
     check(sent.size()==1,"EasyPlace default sends only one per tick");
     reset(player);
     state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
-    Block another{.name="minecraft:dirt",.mNetworkId=3,.material=2};
+    Block another{.name="minecraft:dirt",.states={},.mNetworkId=3,.material=2};
     player.inventory.items[0]={1,0,64};player.inventory.items[1]={2,0,64};
     planOutcomes[0]=planOutcomes[1]=true;
     aimedSequence.push_back(ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}});
