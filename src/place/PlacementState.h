@@ -85,6 +85,8 @@ public:
     bool setManualPlacementAllowedItems(std::vector<std::string> const& items);
     [[nodiscard]] bool manualPlacementItemAllowed(std::string_view itemId) const;
     [[nodiscard]] int radius() const;
+    [[nodiscard]] int easyPlaceColumnDepth() const;
+    void setEasyPlaceColumnDepth(int depth);
     void setRadius(int radius);
     [[nodiscard]] int autoPlacementBreakCooldownSeconds() const;
     void setAutoPlacementBreakCooldownSeconds(int seconds);
@@ -147,6 +149,7 @@ private:
     std::atomic_uint64_t mManualPressAt{0};
     std::atomic_uint64_t mLastManualPlaceAt{0};
     std::atomic_int      mRadius{4};
+    std::atomic_int      mEasyPlaceColumnDepth{1};
     std::atomic_int      mAutoPlacementBreakCooldownSeconds{10};
     std::atomic_uint64_t mNextPlaceAt{0};
     std::atomic_uint64_t mNextSwapAt{0};
