@@ -37,6 +37,7 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "place/EasyPlaceBurstPolicy.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionTransparentOrder.h"
@@ -113,6 +114,25 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+void testEasyPlaceBurstPolicy() {
+    using lholo::place::detail::burstPacketStackCount;
+    using lholo::place::detail::burstCanContinue;
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 0) == 64);
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 1) == 63);
+    LHOLO_CHECK(burstPacketStackCount(64, 62, 1) == 62);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 3) == 1);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 4) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 0, 1) == 0);
+    LHOLO_CHECK(burstPacketStackCount(0, 4, 0) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, -1) == 0);
+    LHOLO_CHECK(burstCanContinue(0, false, false, false, true));
+    LHOLO_CHECK(burstCanContinue(1, true, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, false, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, false, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, false, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, true, true));
 }
 
 void testEasyPlaceColumnLookup() {
@@ -2615,6 +2635,7 @@ int main() {
     LHOLO_CHECK(runOverlayRenderingTests()==0);
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
+    testEasyPlaceBurstPolicy();
     testEasyPlaceColumnLookup();
     testTransparentQuadSort();
     lholo::tests::runProjectedMeshSortChecks([](bool ok) { LHOLO_CHECK(ok); });
