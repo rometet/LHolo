@@ -151,7 +151,8 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     parsed.placementRadius = json.value("placementRadius", parsed.placementRadius);
     if (auto const depth = json.find("easyPlaceColumnDepth");
         depth != json.end() && depth->is_number_integer()) {
-        parsed.easyPlaceColumnDepth = std::clamp(depth->get<int>(), 1, 4);
+        parsed.easyPlaceColumnDepth = static_cast<int>(
+            std::clamp(depth->get<double>(), 1.0, 4.0));
     }
     parsed.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
