@@ -495,6 +495,24 @@ std::optional<ProjectionTarget> findProjectionTarget(
     if (!rayOrigin) return std::nullopt;
     auto& region = player.getDimensionBlockSource();
 
+    // A placement request can be in flight for several ticks on remote BDS.
+    // Advance through other cells in the column without waiting for that RTT:
+    // the per-cell lock prevents duplicate sends, and native placement planning
+    // still validates each lower cell's reach, support and resulting states.
+    auto const tryColumnBelow = [&](BlockPos const& top) -> std::optional<ProjectionTarget> {
+        if (columnDepth <= 1) return {};
+        for (int offset = 1; offset < columnDepth; ++offset) {
+            if (top.y < (std::numeric_limits<int>::min)() + offset) break;
+            BlockPos const below{top.x, top.y - offset, top.z};
+            if (recentlyPlaced(below, GetTickCount64())) continue;
+            auto const lower = projection::queryEasyPlaceColumnCell(player, below);
+            if (lower.block && lower.missing) {
+                return selectPlacementTarget(region, below, dir, lower.block);
+            }
+        }
+        return {};
+    };
+
     auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
     auto const axisY = detail::voxelRayAxis(origin.y, (*rayOrigin)[1], dir.y);
     auto const axisZ = detail::voxelRayAxis(origin.z, (*rayOrigin)[2], dir.z);
@@ -547,20 +565,20 @@ std::optional<ProjectionTarget> findProjectionTarget(
                 auto const top = projection::queryProjection(player, cell);
                 auto const& placedTop = region.getBlock(cell);
                 if (top.block && top.block->mNetworkId == placedTop.mNetworkId) {
-                    for (int offset = 1; offset < columnDepth; ++offset) {
-                        if (cell.y < (std::numeric_limits<int>::min)() + offset) break;
-                        BlockPos const below{cell.x, cell.y - offset, cell.z};
-                        auto const lower = projection::queryEasyPlaceColumnCell(player, below);
-                        if (lower.block && lower.missing) {
-                            return selectPlacementTarget(region, below, dir, lower.block);
-                        }
-                    }
+                    if (auto below = tryColumnBelow(cell)) return below;
                 }
             }
             break;
         }
         auto const query = projection::queryPlacementProjection(player, cell);
         if (!query.block || !query.missing) continue;
+
+        // While the upper placement is still awaiting its server round-trip,
+        // treat the recently sent upper ghost as a column anchor rather than
+        // repeatedly hitting its 500ms duplicate-send guard.
+        if (columnDepth > 1 && recentlyPlaced(cell, GetTickCount64())) {
+            if (auto below = tryColumnBelow(cell)) return below;
+        }
 
         // The ghost itself is the target; reuse the shared support selection
         // (real neighbor preferred, air-mPos fallback when floating).
