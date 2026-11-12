@@ -1482,6 +1482,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     int initialStackCount = 0;
     for (int attempt = 0; attempt < maxPerTick; ++attempt) {
         if (attempt != 0) {
+            // Packet sending can dispatch callbacks/reentrant state changes.
+            // Never continue after the session/mode/input has been retired.
+            if (!placementState().enabled() || placementState().manualMode()
+                || placementState().rangeEnabled() || !client->isInGameInputEnabled()
+                || structure::isGuiVisible() || client->getLocalPlayer() != player) return;
             // A previous item must have been physically transmitted, and the
             // hand may not be changed between transactions in this burst.
             if (sentInTick == 0 || player->getSelectedItemSlot() != burstSlot) return;
