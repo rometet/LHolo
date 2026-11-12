@@ -97,6 +97,12 @@ int PlacementState::easyPlaceColumnDepth() const {
 void PlacementState::setEasyPlaceColumnDepth(int depth) {
     mEasyPlaceColumnDepth.store(std::clamp(depth, 1, 4), std::memory_order_release);
 }
+int PlacementState::easyPlaceMaxPerTick() const {
+    return mEasyPlaceMaxPerTick.load(std::memory_order_relaxed);
+}
+void PlacementState::setEasyPlaceMaxPerTick(int count) {
+    mEasyPlaceMaxPerTick.store(std::clamp(count, 1, 4), std::memory_order_release);
+}
 void PlacementState::setRadius(int radius) { mRadius.store(radius, std::memory_order_release); }
 
 int PlacementState::autoPlacementBreakCooldownSeconds() const {
