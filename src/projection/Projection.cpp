@@ -256,6 +256,37 @@ ProjectionQuery queryPlacementProjection(LocalPlayer& player, BlockPos const& wo
     return result;
 }
 
+ProjectionQuery queryEasyPlaceColumnCell(LocalPlayer& player, BlockPos const& worldPos) {
+    ProjectionQuery result{nullptr, false};
+    detail::ProjectionSession::getInstance().withLockedState(
+        [&](detail::ProjectionState& state, overlay::BoundsWireframe&) {
+            std::lock_guard lifecycleLock(detail::projectionWorldLifecycleMutex());
+            if (!state.enabled || !state.structure || !state.worldLookup
+                || state.placementCoordinatesInvalid || state.placementBuildActive
+                || !structure::detail::StructureSession::getInstance().visible()) return;
+            if (!projectionWorldViewMatches(state, player)) return;
+            // Hidden-material or side-slice modes must never silently place
+            // blocks outside their explicitly selected material/axis.
+            if (!state.cachedLayerAxis) return;
+            auto const axis = *state.cachedLayerAxis;
+            if (axis != structure::LayerAxis::Y
+                && axis != structure::LayerAxis::BottomToTop
+                && axis != structure::LayerAxis::TopToBottom) return;
+            auto const key = std::tuple{worldPos.x, worldPos.y, worldPos.z};
+            Block const* block = state.worldLookup->blockAtAnyLayer(key);
+            if (block && !block->getBlockType().mMaterial.get().mLiquid) {
+                result.block = block;
+            }
+        }
+    );
+    if (result.block) {
+        // No correction-cache dependency: hidden-layer correction states are
+        // intentionally marked Correct and are unsuitable for placement.
+        result.missing = player.getDimensionBlockSource().getBlock(worldPos).isAir();
+    }
+    return result;
+}
+
 std::vector<RangeCandidate> queryMissingCellsInRange(LocalPlayer& player, Vec3 const& center, float radius) {
     std::vector<RangeCandidate> result;
     detail::ProjectionSession::getInstance().withLockedState(
