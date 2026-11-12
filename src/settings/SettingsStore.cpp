@@ -148,6 +148,10 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         }
     }
     parsed.placementRadius = json.value("placementRadius", parsed.placementRadius);
+    if (auto const depth = json.find("easyPlaceColumnDepth");
+        depth != json.end() && depth->is_number_integer()) {
+        parsed.easyPlaceColumnDepth = std::clamp(depth->get<int>(), 1, 4);
+    }
     parsed.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
         parsed.autoPlacementBreakCooldownSeconds
@@ -304,6 +308,7 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(
             settings.manualPlacementAllowedItems).value_or(std::vector<std::string>{})},
         {"placementRadius", settings.placementRadius},
+        {"easyPlaceColumnDepth", std::clamp(settings.easyPlaceColumnDepth, 1, 4)},
         {"autoPlacementBreakCooldownSeconds", settings.autoPlacementBreakCooldownSeconds},
         {"hudEnabled", settings.hudEnabled},
         {"hudShowFileName", settings.hudShowFileName},
