@@ -570,6 +570,39 @@ int main() {
     tickEasyPlaceImpl(player);
     check(sent.size()==4,"EasyPlace burst duplicate lock survives next tick");
 
+    // A one-item stack cannot fund four concurrent transactions; default
+    // count=1 also preserves legacy behaviour when extra targets exist.
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,1};
+    for (int x=0; x<4; ++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1 && sent[0].item.count==1,
+        "EasyPlace never oversubscribes a one-item stack");
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(1);
+    player.inventory.items[0]={1,0,64};
+    for (int x=0; x<4; ++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1,"EasyPlace default sends only one per tick");
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    Block another{.name="minecraft:dirt",.mNetworkId=3,.material=2};
+    player.inventory.items[0]={1,0,64};player.inventory.items[1]={2,0,64};
+    planOutcomes[0]=planOutcomes[1]=true;
+    aimedSequence.push_back(ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}});
+    aimedSequence.push_back(ProjectionTarget{{1,0,0},{1,0,0},1,&another,{1.5f,.25f,.5f}});
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1 && player.selected==0,"EasyPlace burst never swaps material mid-tick");
+
     // Real send guard + unchanged 500ms window, next tick inventory boundary.
     reset(player);player.inventory.items[19]={1,0,64};projection::candidates={{0,0,0,&stone}};planOutcomes[0]=true;
     tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
