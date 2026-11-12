@@ -4,6 +4,7 @@
 #include "place/PlacementState.h"
 #include "place/ManualPlacementRules.h"
 
+#include <algorithm>
 #include <iterator>
 #include <utility>
 
