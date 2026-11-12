@@ -23,6 +23,7 @@
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementDispatchResult.h"
+#include "place/EasyPlaceBurstPolicy.h"
 #include "place/EasyPlaceTelemetry.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
@@ -1501,12 +1502,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     }
     // Never change material/selected slot mid-tick. The same net-ID and stack
     // item must be used throughout a burst; all other targets wait next tick.
-    if (sentInTick > 0 && (found.slot != burstSlot
-        || found.item->getIdAux() != burstAux
-        || !isFastOpaquePlacementCandidate(*target->block)
-            && !detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))) {
-        return;
-    }
+    bool const simpleBurstTarget = isFastOpaquePlacementCandidate(*target->block)
+        || detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName());
+    if (!detail::burstCanContinue(
+            sentInTick, found.slot == burstSlot,
+            found.item->getIdAux() == burstAux, simpleBurstTarget, false)) return;
     // R19: start the server-synchronized inventory exchange at the FIRST
     // eligible aimed game tick. The old path spent time on full native-facing
     // planning first, then swapped, discarded the plan and waited another
@@ -1594,15 +1594,13 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     // during an integrated-server send; choose the smaller actual/predicted
     // count in that case. No oversubscription beyond the original stack.
     ItemStack packetItem = *found.item;
-    if (sentInTick == 0) {
-        initialStackCount = swapCount(*found.item);
-    } else {
-        auto const remaining = (std::min)(
-            swapCount(*found.item), initialStackCount - sentInTick);
-        if (remaining <= 0) return;
-        packetItem.mCount = static_cast<decltype(packetItem.mCount)>(remaining);
+    if (sentInTick == 0) initialStackCount = swapCount(*found.item);
+    int const predictedCount = detail::burstPacketStackCount(
+        initialStackCount, swapCount(*found.item), sentInTick);
+    if (predictedCount == 0) return;
+    if (sentInTick > 0) {
+        packetItem.mCount = static_cast<decltype(packetItem.mCount)>(predictedCount);
     }
-    if (initialStackCount <= sentInTick) return;
 
     auto const submit = placeBlock(*player, placement, found.slot, packetItem);
     // Queued rotations will mark the cell only in the actual native
@@ -1622,11 +1620,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     // Directionally sensitive and multi-cell items (stairs, slabs, doors,
     // etc.) stay at a single send/tick until native BDS proves safe multi-use.
     // Normal opaque blocks and connectivity-driven walls/fences may burst.
-    if (placement.requireNativeRotationSync
-        || !(isFastOpaquePlacementCandidate(*target->block)
-            || detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))) {
-        return;
-    }
+    if (placement.requireNativeRotationSync || !simpleBurstTarget) return;
     }
 }
 } // namespace
