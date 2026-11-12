@@ -8,6 +8,7 @@
 #include "place/PlacementRotation.h"
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementDispatchResult.h"
+#include "place/EasyPlaceBurstPolicy.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -304,6 +305,8 @@ auto& placementState() { return detail::PlacementState::getInstance(); }
 struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<detail::PlacementInteractionAngles> interactionRotation{};
     bool requireNativeRotationSync{}; };
 std::optional<ProjectionTarget> aimed;
+std::vector<ProjectionTarget> aimedSequence;
+std::size_t aimedSequenceIndex{};
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
 uchar oppositeFace(uchar f) { return Facing::OPPOSITE_FACING().at(f); }
@@ -362,7 +365,13 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
 PlacementContext makePlacementContext(Vec3 const& eye,Vec3 const&,float range) { return {eye,range*range}; }
 void consumeBrokenProjectionCells(Player&,std::uint64_t) {}
 void updateAimedProjectedBlockName(Block const*) {}
-std::optional<ProjectionTarget> findProjectionTarget(Player&,Vec3 const&,Vec3 const&,float) { return aimed; }
+std::optional<ProjectionTarget> findProjectionTarget(Player&,Vec3 const&,Vec3 const&,float,int = 1) {
+    if (!aimedSequence.empty()) {
+        if (aimedSequenceIndex >= aimedSequence.size()) return aimedSequence.back();
+        return aimedSequence[aimedSequenceIndex++];
+    }
+    return aimed;
+}
 bool isManualPlacementHeldItemAllowed(Player&) { return heldExempt; }
 #include "ExecutorBodies.inc"
 struct FixtureGameMode;
@@ -389,9 +398,10 @@ void check(bool ok,char const* message) {
 }
 using namespace lholo::place;
 void reset(Player& p) {
-    placementState().resetWorldSession();p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
+    placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
+    p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();
+    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
@@ -527,6 +537,38 @@ int main() {
     check(state.beginManualPress(1000,state.manualInputEpoch()),"quick tap admitted");state.releaseManualPress();
     tickEasyPlaceImpl(player);fixtureTime=1050;tickEasyPlaceImpl(player);
     check(sent.size()==1&&!state.manualPlaceRequested(),"quick tap sends once after release");
+
+    // Production tick/dispatch bodies: verify four distinct same-slot sends
+    // in one tick with successively predicted stack counts, then no duplicates.
+    // This is an offline packet fixture, not proof of BDS acceptance.
+    reset(player);
+    state.setEnabled(true);
+    state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,4};
+    for (int x=0; x<4; ++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==4,"EasyPlace burst sends four distinct cells in one tick");
+    if (sent.size()==4) {
+        bool distinct=true,counts=true,sameTick=true;
+        for (int i=0;i<4;++i) {
+            distinct=distinct&&sent[i].pos.x==i;
+            counts=counts&&sent[i].item.count==4-i;
+            sameTick=sameTick&&sent[i].time==1000;
+        }
+        check(distinct,"EasyPlace burst never repeats the same cell");
+        check(counts,"EasyPlace burst predicts decreasing transaction item counts");
+        check(sameTick,"EasyPlace sends all four packets within the same game tick");
+    }
+    // The built-in 500ms cell locks also hold when a subsequent ray reuses a
+    // previously sent coordinate; no fifth packet can leak within the window.
+    fixtureTime=1050;
+    aimedSequenceIndex=0;
+    tickEasyPlaceImpl(player);
+    check(sent.size()==4,"EasyPlace burst duplicate lock survives next tick");
 
     // Real send guard + unchanged 500ms window, next tick inventory boundary.
     reset(player);player.inventory.items[19]={1,0,64};projection::candidates={{0,0,0,&stone}};planOutcomes[0]=true;
