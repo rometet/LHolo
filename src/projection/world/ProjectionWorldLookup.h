@@ -41,7 +41,7 @@ public:
         return view;
     }
 
-    std::optional<std::size_t> indexAt(Key const& key) const {
+    std::optional<std::size_t> indexAtAnyLayer(Key const& key) const {
         if (!mSource) return {};
         auto [x, y, z] = key;
         std::array<long long, 3> p{x - mOrigin[0], y - mOrigin[1], z - mOrigin[2]};
@@ -55,6 +55,11 @@ public:
         );
         auto index = mSource->renderBlocks.find(local.x, local.y, local.z);
         if (!index) return {};
+        return index;
+    }
+    std::optional<std::size_t> indexAt(Key const& key) const {
+        auto index = indexAtAnyLayer(key);
+        if (!index) return {};
         auto cell = mSource->renderBlocks[*index];
         // Hidden layers behave like completed cells for mesh generation and
         // stay excluded from the world lookup, exactly like the placement loop.
@@ -65,10 +70,13 @@ public:
     // Bedrock stores the body and liquid layers independently; waterlogged
     // cells keep both. Each layer resolves through the same stored transform.
     Block const* blockAt(Key const& key) const { return valueAt(key, false); }
+    // Easy Place's explicit downward-column assist may inspect hidden layers;
+    // this must never be used by the renderer or normal place/range queries.
+    Block const* blockAtAnyLayer(Key const& key) const { return valueAt(key, false, true); }
     Block const* liquidAt(Key const& key) const { return valueAt(key, true); }
 private:
-    Block const* valueAt(Key const& key, bool liquid) const {
-        auto index = indexAt(key);
+    Block const* valueAt(Key const& key, bool liquid, bool anyLayer = false) const {
+        auto index = anyLayer ? indexAtAnyLayer(key) : indexAt(key);
         if (!index) return nullptr;
         auto cell = mSource->renderBlocks[*index];
         auto value = liquid ? cell.liquid : cell.block;
