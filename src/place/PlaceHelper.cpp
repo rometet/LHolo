@@ -389,6 +389,14 @@ int getEasyPlaceColumnDepth() {
     return placementState().easyPlaceColumnDepth();
 }
 
+void setEasyPlaceMaxPerTick(int count) {
+    placementState().setEasyPlaceMaxPerTick(count);
+}
+
+int getEasyPlaceMaxPerTick() {
+    return placementState().easyPlaceMaxPerTick();
+}
+
 void setAutoPlacementBreakCooldownSeconds(int seconds) {
     placementState().setAutoPlacementBreakCooldownSeconds(std::clamp(seconds, 0, 60));
 }
