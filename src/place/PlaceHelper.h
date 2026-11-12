@@ -34,6 +34,10 @@ void setRangeEnabled(bool enabled);
 bool isRangeEnabled();
 void setPlacementRadius(int radius);
 int  getPlacementRadius();
+// Easy Place only: fill up to N vertical schematic cells below a visible,
+// correctly placed top cell without changing the displayed layer (1 = off).
+void setEasyPlaceColumnDepth(int depth);
+int  getEasyPlaceColumnDepth();
 void setAutoPlacementBreakCooldownSeconds(int seconds);
 int  getAutoPlacementBreakCooldownSeconds();
 // Manual mode: only place while the right mouse button is held, instead of
