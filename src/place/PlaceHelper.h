@@ -38,6 +38,9 @@ int  getPlacementRadius();
 // correctly placed top cell without changing the displayed layer (1 = off).
 void setEasyPlaceColumnDepth(int depth);
 int  getEasyPlaceColumnDepth();
+// Max distinct Easy Place dispatches within one client game tick (1 = legacy).
+void setEasyPlaceMaxPerTick(int count);
+int  getEasyPlaceMaxPerTick();
 void setAutoPlacementBreakCooldownSeconds(int seconds);
 int  getAutoPlacementBreakCooldownSeconds();
 // Manual mode: only place while the right mouse button is held, instead of
