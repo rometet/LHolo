@@ -479,6 +479,10 @@ ProjectionTarget selectPlacementTarget(BlockSource& region, BlockPos const& cell
     return ProjectionTarget{cell, neighborOf(cell, bestFace), oppositeFace(bestFace), block};
 }
 
+// Shared by the full placement predictor below. For a placed top cell, its
+// non-connection states must still match before it can anchor a column.
+bool manualSerializedPlacementMatches(Block const& predicted, Block const& ghost);
+
 // Voxel raycast (Amanatides & Woo) against the real world plus the projection's
 // virtual grid. The vanilla crosshair hit result never sees LHolo's drawn ghost
 // blocks, so the ray is traced manually: real blocks block it, projected
@@ -564,7 +568,10 @@ std::optional<ProjectionTarget> findProjectionTarget(
             if (columnDepth > 1) {
                 auto const top = projection::queryProjection(player, cell);
                 auto const& placedTop = region.getBlock(cell);
-                if (top.block && top.block->mNetworkId == placedTop.mNetworkId) {
+                if (top.block && (top.block->mNetworkId == placedTop.mNetworkId
+                    || (detail::isVanillaConnectivityPlacementBlock(top.block->getTypeName())
+                        && placedTop.getTypeName() == top.block->getTypeName()
+                        && manualSerializedPlacementMatches(placedTop, *top.block)))) {
                     if (auto below = tryColumnBelow(cell)) return below;
                 }
             }
