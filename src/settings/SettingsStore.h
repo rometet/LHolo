@@ -44,6 +44,7 @@ struct Settings {
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
     int easyPlaceColumnDepth{1}; // 1 = unchanged single-layer placement
+    int easyPlaceMaxPerTick{1};  // 1 = legacy single send; 2-4 = experimental burst
     int autoPlacementBreakCooldownSeconds{10};
     bool hudEnabled{true};
     bool hudShowFileName{true};
