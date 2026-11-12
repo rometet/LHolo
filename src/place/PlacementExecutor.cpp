@@ -487,7 +487,8 @@ std::optional<ProjectionTarget> findProjectionTarget(
     LocalPlayer& player,
     Vec3 const&  origin,
     Vec3 const&  dir,
-    float        maxDist
+    float        maxDist,
+    int          columnDepth = 1
 ) {
     auto const rayOrigin = projection::detail::checkedVoxelRayOrigin(
         {origin.x, origin.y, origin.z}, {dir.x, dir.y, dir.z}, maxDist);
@@ -536,6 +537,25 @@ std::optional<ProjectionTarget> findProjectionTarget(
             auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
                 return ProjectionTarget{neighbor, cell, entryFace, query.block};
+            }
+            // Java-style downward column placement: after the visible top
+            // block is built, it occludes the ghost beneath it. Resolve a
+            // matching visible top against the CURRENT world and inspect only
+            // its 1..N-1 cells below in the same X/Z column. Never expand the
+            // projection's actual visible/rendered layer.
+            if (columnDepth > 1) {
+                auto const top = projection::queryProjection(player, cell);
+                auto const& placedTop = region.getBlock(cell);
+                if (top.block && top.block->mNetworkId == placedTop.mNetworkId) {
+                    for (int offset = 1; offset < columnDepth; ++offset) {
+                        if (cell.y < (std::numeric_limits<int>::min)() + offset) break;
+                        BlockPos const below{cell.x, cell.y - offset, cell.z};
+                        auto const lower = projection::queryEasyPlaceColumnCell(player, below);
+                        if (lower.block && lower.missing) {
+                            return selectPlacementTarget(region, below, dir, lower.block);
+                        }
+                    }
+                }
             }
             break;
         }
@@ -1352,7 +1372,12 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     std::optional<ProjectionTarget> target;
     {
         telemetry::ScopedTimer rayTimer(telemetry::Stage::Ray);
-        target = findProjectionTarget(*player, origin, dir, pickRange);
+        // Manual and Range keep their original single-visible-cell semantics.
+        // Easy Place can optionally descend beneath an already-built top cell.
+        int const columnDepth = placementState().enabled()
+            && !placementState().manualMode() && !placementState().rangeEnabled()
+            ? placementState().easyPlaceColumnDepth() : 1;
+        target = findProjectionTarget(*player, origin, dir, pickRange, columnDepth);
     }
     updateAimedProjectedBlockName(
         showProjectedBlockName && target ? target->block : nullptr
