@@ -124,7 +124,9 @@ LL_TYPE_INSTANCE_HOOK(
                 "stairQueued={} stairPlanFail={} stairSyncDrop={} "
                 "swapWait={} hotbarFound={} "
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
-                "over4ms[tick,ray,plan]={}/{}/{}",
+                "over4ms[tick,ray,plan]={}/{}/{} "
+                "nativeAttempt={} nativeTrue={} nativeFalse={} nativeMissing={} "
+                "burstSecond={} burstThird={} burstFourth={}",
                 stats->count(E::Tick),stats->count(E::Auto),
                 stats->count(E::Manual),stats->count(E::Range),
                 stats->count(E::NoTarget),stats->count(E::NoMaterial),
@@ -142,7 +144,11 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->averageUs(S::Ray),stats->maximumUs(S::Ray),
                 stats->averageUs(S::Plan),stats->maximumUs(S::Plan),
                 stats->above4ms(S::Tick),stats->above4ms(S::Ray),
-                stats->above4ms(S::Plan)
+                stats->above4ms(S::Plan),
+                stats->count(E::NativeAttempt),stats->count(E::NativeReturnedTrue),
+                stats->count(E::NativeReturnedFalse),stats->count(E::NativeNoGameMode),
+                stats->count(E::BurstSecond),stats->count(E::BurstThird),
+                stats->count(E::BurstFourth)
             );
         }
     }, [](char const* reason) noexcept {

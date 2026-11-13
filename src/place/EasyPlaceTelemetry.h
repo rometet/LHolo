@@ -17,6 +17,8 @@ enum class Event : std::size_t {
     ConnectivityAccepted, ConnectivityRejected,
     StairQueued, StairPlanRejected, StairRotationDrift,
     InventorySwapBlocked, InventorySwapResolved,
+    NativeAttempt, NativeReturnedTrue, NativeReturnedFalse, NativeNoGameMode,
+    BurstSecond, BurstThird, BurstFourth,
     Count
 };
 

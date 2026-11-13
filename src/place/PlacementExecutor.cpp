@@ -663,6 +663,38 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     auto& region = player.getDimensionBlockSource();
     if (!region.getBlock(target.cell).isAir()) return detail::PlacementDispatchResult::Rejected;
 
+    // Prefer the 26.60 native client placement path for experimental opaque
+    // Easy Place bursts. The previous handwritten multi-use ItemUse packets
+    // reported four submissions but BDS accepted only one, then waited for
+    // 500ms retry locks. GameMode::buildBlock is the same in-game placement
+    // entry point used by the Bedrock Baritone builder. It owns the selected
+    // item / inventory authority and wire serialization; never emit a second
+    // synthetic transaction as fallback after a native attempt.
+    // Manual, Range, oriented blocks and default 1/tick keep the old path.
+    bool const useNativeBuild = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && placementState().easyPlaceMaxPerTick() > 1
+        && !target.interactionRotation
+        && isFastOpaquePlacementCandidate(*target.block);
+    if (useNativeBuild) {
+        auto const& gameMode = player.mGameMode.get();
+        if (!gameMode) {
+            telemetry::count(telemetry::Event::NativeNoGameMode);
+            return detail::PlacementDispatchResult::Rejected;
+        }
+        telemetry::count(telemetry::Event::NativeAttempt);
+        // The actual 26.60 LeviLamina virtual signature is
+        // (clicked support, face, HandSlot, isSimTick). No raw ABI casts.
+        bool const submitted = gameMode->buildBlock(
+            target.at, target.face, HandSlot::Mainhand, false
+        );
+        telemetry::count(submitted ? telemetry::Event::NativeReturnedTrue
+                                   : telemetry::Event::NativeReturnedFalse);
+        if (!submitted) return detail::PlacementDispatchResult::Rejected;
+        placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
+        return detail::PlacementDispatchResult::Sent; // NOT a BDS acknowledgment
+    }
+
     // Server-authoritative placement: build an ItemUseInventoryTransaction and
     // deliver it through the client's packet sender (LoopbackPacketSender in
     // single-player, the network sender on a real server). GameMode::useItemOn
@@ -1697,6 +1729,9 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         burstAux = found.item->getIdAux();
     }
     ++sentInTick;
+    if (sentInTick == 2) telemetry::count(telemetry::Event::BurstSecond);
+    else if (sentInTick == 3) telemetry::count(telemetry::Event::BurstThird);
+    else if (sentInTick == 4) telemetry::count(telemetry::Event::BurstFourth);
     // Manual repeat bookkeeping: record this placement and mark the current
     // press as having placed its first block (so holding then auto-repeats).
     placementState().setLastManualPlaceAt(now);

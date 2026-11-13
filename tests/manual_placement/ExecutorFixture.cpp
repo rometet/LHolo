@@ -39,6 +39,14 @@ struct BlockPos {
 struct ActorRuntimeID { std::uint64_t rawID{}; bool operator==(ActorRuntimeID const&) const=default; };
 struct Level {};
 struct Player;
+enum class HandSlot : int;
+struct GameMode {
+    bool buildBlock(BlockPos const& pos, uchar face, HandSlot hand, bool isSimTick);
+};
+struct MockNativeModeStorage {
+    std::shared_ptr<GameMode> value = std::make_shared<GameMode>();
+    std::shared_ptr<GameMode>& get() { return value; }
+};
 enum class BlockProperty { Door };
 struct Facing {
     enum class Name { Down=0,Up=1,North=2,South=3,West=4,East=5 };
@@ -88,6 +96,7 @@ struct Player {
     Vec2 rotation{17,0};
     Vec3 eye{}, view{1,0,0}; float reach=4;
     Inventory inventory; int selected{}, setSlotCalls{}; BlockSource region;
+    MockNativeModeStorage mGameMode;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
     void setSelectedSlot(int i) { ++setSlotCalls; selected=i; }
@@ -225,6 +234,13 @@ int normalFactoryCalls{};
 struct SentAction {PlayerActionType action;BlockPos pos;std::uint64_t time;};
 std::vector<SentAction> sentActions;
 std::vector<Sent> sent;
+struct NativeBuildSent { BlockPos pos; uchar face; HandSlot hand; std::uint64_t time; bool isSimTick; };
+std::vector<NativeBuildSent> nativeSent;
+bool nativeBuildSucceeds = true;
+bool GameMode::buildBlock(BlockPos const& pos, uchar face, HandSlot hand, bool isSimTick) {
+    nativeSent.push_back({pos,face,hand,fixtureTime,isSimTick});
+    return nativeBuildSucceeds;
+}
 std::vector<SwapSent> swapSent;
 int swaps{}, planned{};
 std::vector<int> plannedCells;
@@ -441,7 +457,7 @@ void reset(Player& p) {
     placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
     p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();sentActions.clear();gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
+    sent.clear();sentActions.clear();nativeSent.clear();nativeBuildSucceeds=true;gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
@@ -648,19 +664,20 @@ int main() {
         }
         planOutcomes[2]=true;
         tickEasyPlaceImpl(player);
-        check(sent.size()==4,"source ray + executor submit exactly four column cells");
-        if(sent.size()==4) {
+        check(nativeSent.size()==4 && sent.empty(),
+            "source ray + native build submit exactly four real-game actions");
+        if(nativeSent.size()==4) {
             bool correct=true;
             for(int i=0;i<4;++i)
-                correct=correct && sent[i].pos==BlockPos{2,64+i,4}
-                    && sent[i].item.count==4-i && sent[i].time==1000;
-            check(correct,"source ray + executor submit Y64,Y65,Y66,Y67 in one tick");
+                correct=correct && nativeSent[i].pos==BlockPos{2,64+i,4}
+                    && nativeSent[i].time==1000 && !nativeSent[i].isSimTick;
+            check(correct,"native build preserves bottom-to-top Y64..Y67 in one tick");
         }
     }
 
-    // Production tick/dispatch bodies: verify four distinct same-slot sends
-    // in one tick with successively predicted stack counts, then no duplicates.
-    // This is an offline packet fixture, not proof of BDS acceptance.
+    // Experimental opaque full blocks delegate to the REAL client GameMode
+    // rather than handwritten inventory transactions. This tests actual
+    // source scheduling and stubbed virtual dispatch, not a real BDS ACK.
     reset(player);
     state.setEnabled(true);
     state.setEasyPlaceMaxPerTick(4);
@@ -671,71 +688,112 @@ int main() {
             {static_cast<float>(x)+.5f,.25f,.5f}});
     }
     tickEasyPlaceImpl(player);
-    check(sent.size()==4,"EasyPlace burst sends four distinct cells in one tick");
-    check(sentActions.size()==4,"BDS lifecycle sends four StartItemUseOn actions before transactions finish");
-    for (auto const& action : sentActions)
-        check(action.action==PlayerActionType::StartItemUseOn && action.time==1000,
-            "BDS lifecycle uses StartItemUseOn at the dispatch tick");
-    if (sent.size()==4) {
-        bool distinct=true,counts=true,sameTick=true;
-        for (int i=0;i<4;++i) {
-            distinct=distinct&&sent[i].pos.x==i;
-            counts=counts&&sent[i].item.count==4-i;
-            sameTick=sameTick&&sent[i].time==1000;
+    check(nativeSent.size()==4 && sent.empty() && sentActions.empty(),
+        "four distinct opaque cells dispatch through native GameMode");
+    if(nativeSent.size()==4) {
+        bool distinct=true,sameTick=true;
+        for(int i=0;i<4;++i) {
+            distinct=distinct && nativeSent[i].pos==BlockPos{i,0,0}
+                && nativeSent[i].hand==HandSlot::Mainhand && nativeSent[i].face==1;
+            sameTick=sameTick && nativeSent[i].time==1000
+                && !nativeSent[i].isSimTick;
         }
-        check(distinct,"EasyPlace burst never repeats the same cell");
-        check(counts,"EasyPlace burst predicts decreasing transaction item counts");
-        check(sameTick,"EasyPlace sends all four packets within the same game tick");
+        check(distinct,"native call preserves position/face/hand for every cell");
+        check(sameTick,"four native build attempts occur in one game tick");
     }
-    // The built-in 500ms cell locks also hold when a subsequent ray reuses a
-    // previously sent coordinate; no fifth packet can leak within the window.
     fixtureTime=1050;
     aimedSequenceIndex=0;
     tickEasyPlaceImpl(player);
-    check(sent.size()==4,"EasyPlace burst duplicate lock survives next tick");
-    check(sentActions.size()==4,"BDS stop actions are delayed at 50ms");
-    fixtureTime=1150;
-    tickEasyPlaceImpl(player);
-    check(sentActions.size()==8,"BDS matching stop actions are emitted at 150ms");
-    if (sentActions.size()==8) for (int i=0;i<4;++i) {
-        check(sentActions[4+i].action==PlayerActionType::StopItemUseOn,
-            "BDS lifecycle finishes each in-flight placement");
-        check(sentActions[4+i].time==1150,
-            "BDS stop is delayed by at least 150ms");
-    }
+    check(nativeSent.size()==4,"native placement duplicate lock survives next tick");
+    fixtureTime=1150;tickEasyPlaceImpl(player);
+    check(sentActions.empty(),"native placement emits no synthetic BDS stop actions");
 
-    // A one-item stack cannot fund four concurrent transactions; default
-    // count=1 also preserves legacy behaviour when extra targets exist.
+    // No invented inventory mutation; prevent oversubscribing the hotbar.
     reset(player);
     state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
     player.inventory.items[0]={1,0,1};
-    for (int x=0; x<4; ++x) {
+    for(int x=0;x<4;++x) {
         planOutcomes[x]=true;
         aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
             {static_cast<float>(x)+.5f,.25f,.5f}});
     }
     tickEasyPlaceImpl(player);
-    check(sent.size()==1 && sent[0].item.count==1,
-        "EasyPlace never oversubscribes a one-item stack");
+    check(nativeSent.size()==1,"one remaining item allows one native placement");
+
+    // A failed native virtual call NEVER falls through to the manual legacy
+    // packet (otherwise failed attempts could double-place).
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;nativeBuildSucceeds=false;
+    tickEasyPlaceImpl(player);
+    check(nativeSent.size()==1 && sent.empty() && sentActions.empty(),
+        "failed native build does not send synthetic packet");
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(nativeSent.size()==2,"false native result does not permanently lock the cell");
+
+    // Missing GameMode is fail-closed; neither dereference nor fallback.
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    player.mGameMode.value.reset();
+    tickEasyPlaceImpl(player);
+    check(nativeSent.empty() && sent.empty(),"missing GameMode is fail-closed");
+
+    // Default 1/tick retains historical legacy transaction behaviour.
     reset(player);
     state.setEnabled(true);state.setEasyPlaceMaxPerTick(1);
     player.inventory.items[0]={1,0,64};
-    for (int x=0; x<4; ++x) {
+    for(int x=0;x<4;++x) {
         planOutcomes[x]=true;
         aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
             {static_cast<float>(x)+.5f,.25f,.5f}});
     }
     tickEasyPlaceImpl(player);
-    check(sent.size()==1,"EasyPlace default sends only one per tick");
-    reset(player);
-    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    check(sent.size()==1 && nativeSent.empty(),
+        "default one/tick retains server ItemUse transaction");
+
+    // Never change selected material mid-tick.
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
     Block another{.name="minecraft:dirt",.states={},.mNetworkId=3,.material=2};
     player.inventory.items[0]={1,0,64};player.inventory.items[1]={2,0,64};
     planOutcomes[0]=planOutcomes[1]=true;
     aimedSequence.push_back(ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}});
     aimedSequence.push_back(ProjectionTarget{{1,0,0},{1,0,0},1,&another,{1.5f,.25f,.5f}});
     tickEasyPlaceImpl(player);
-    check(sent.size()==1 && player.selected==0,"EasyPlace burst never swaps material mid-tick");
+    check(nativeSent.size()==1 && player.selected==0,
+        "native burst never changes material mid-tick");
+
+    // Connectivity blocks still use the existing start/transaction/stop
+    // path rather than imposing GameMode builds on view-sensitive material.
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    Block wall{.name="minecraft:cobblestone_wall",.states={},.mNetworkId=5,.material=1};
+    player.inventory.items[0]={1,0,4};
+    for(int x=0;x<4;++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&wall,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==4 && sentActions.size()==4 && nativeSent.empty(),
+        "connectivity wall retains staged BDS ItemUse path");
+    if(sent.size()==4) {
+        bool counts=true;
+        for(int i=0;i<4;++i)
+            counts=counts && sent[i].item.count==4-i && sent[i].time==1000;
+        check(counts,"legacy connectivity burst retains predicted stack limits");
+    }
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(sentActions.size()==4,"BDS stop actions remain delayed at 50ms");
+    fixtureTime=1150;tickEasyPlaceImpl(player);
+    check(sentActions.size()==8,"BDS legacy stops are emitted at 150ms");
+    if(sentActions.size()==8) for(int i=0;i<4;++i) {
+        check(sentActions[4+i].action==PlayerActionType::StopItemUseOn,
+            "legacy use lifecycle finishes each placement");
+    }
 
     // Real send guard + unchanged 500ms window, next tick inventory boundary.
     reset(player);player.inventory.items[19]={1,0,64};projection::candidates={{0,0,0,&stone}};planOutcomes[0]=true;
