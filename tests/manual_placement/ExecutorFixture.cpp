@@ -201,10 +201,10 @@ struct InventoryTransactionPacketPayload {
 enum class PlayerActionType { StartItemUseOn=28, StopItemUseOn=29 };
 struct PlayerActionPacket {
     Field<ActorRuntimeID> mRuntimeId;
-    Field<PlayerActionType> mAction;
+    PlayerActionType mAction{};
     Field<BlockPos> mPos,mResultPos;
-    Field<int> mFace;
-    Field<bool> mIsFromServerPlayerMovementSystem;
+    int mFace{};
+    bool mIsFromServerPlayerMovementSystem{};
 };
 struct InventoryTransactionPacket {
     InventoryTransactionPacketPayload payload;
@@ -231,7 +231,7 @@ bool useActualPlanner{};
 bool queueRotationOnPlan{};
 struct PacketSender {
     void sendToServer(PlayerActionPacket const& packet) {
-        sentActions.push_back({packet.mAction.value,packet.mPos.value,fixtureTime});
+        sentActions.push_back({packet.mAction,packet.mPos.value,fixtureTime});
     }
     void sendToServer(InventoryTransactionPacket const& packet) {
         if(packet.payload.tx->fixtureType==ComplexInventoryTransaction::Type::NormalTransaction) {
