@@ -133,6 +133,18 @@ void testEasyPlaceBurstPolicy() {
     LHOLO_CHECK(!burstCanContinue(1, true, false, true, false));
     LHOLO_CHECK(!burstCanContinue(1, true, true, false, false));
     LHOLO_CHECK(!burstCanContinue(1, true, true, true, true));
+    using lholo::place::detail::firstEligibleBottomUpColumnOffset;
+    std::vector<int> order;
+    auto const lowest=firstEligibleBottomUpColumnOffset(4,[&](int offset){
+        order.push_back(offset);return offset==2;
+    });
+    LHOLO_CHECK(lowest==2 && order==std::vector<int>({3,2}));
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==3;})==3);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int){return false;})==-1);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(1,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(0,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==4;})==-1);
 }
 
 void testEasyPlaceColumnLookup() {

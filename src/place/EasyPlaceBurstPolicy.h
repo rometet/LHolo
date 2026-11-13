@@ -27,4 +27,17 @@ namespace lholo::place::detail {
             && !nativeRotationRequired);
 }
 
+// A projected upper-layer cell is the user's AIM, not necessarily the next
+// cell to submit.  Return the first eligible offset in the column with the
+// lowest Y coordinate.  The predicate must reject occupied/pending cells;
+// columnDepth=1 preserves the existing single-cell behaviour.
+template <class Eligible>
+[[nodiscard]] int firstEligibleBottomUpColumnOffset(int columnDepth, Eligible&& eligible) {
+    int const depth = (std::clamp)(columnDepth, 1, 4);
+    for (int offset = depth - 1; offset >= 0; --offset) {
+        if (eligible(offset)) return offset;
+    }
+    return -1;
+}
+
 } // namespace lholo::place::detail

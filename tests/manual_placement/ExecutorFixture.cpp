@@ -9,6 +9,7 @@
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementDispatchResult.h"
 #include "place/EasyPlaceBurstPolicy.h"
+#include "place/VoxelRayAxis.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -85,14 +86,15 @@ struct BlockSource {
 struct Inventory { std::array<ItemStack,36> items{}; ItemStack const& getItem(int i) const { return items.at(i); } };
 struct Player {
     Vec2 rotation{17,0};
+    Vec3 eye{}, view{1,0,0}; float reach=4;
     Inventory inventory; int selected{}, setSlotCalls{}; BlockSource region;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
     void setSelectedSlot(int i) { ++setSlotCalls; selected=i; }
     Vec3 getPosition() const { return {}; }
-    Vec3 getEyePos() const { return {}; }
-    Vec3 getViewVector(float) const { return {1,0,0}; }
-    float getPickRange() const { return 4; }
+    Vec3 getEyePos() const { return eye; }
+    Vec3 getViewVector(float) const { return view; }
+    float getPickRange() const { return reach; }
     ActorRuntimeID getRuntimeID() const { return {555}; }
     Level& getLevel() const { static Level testLevel; return testLevel; }
     Vec2 const& getRotation() const { return rotation; }
@@ -268,6 +270,7 @@ struct PlacementContext { Vec3 eye; float reachSquared; std::int64_t eyeX{},eyeY
 namespace projection {
 struct Candidate { int x{},y{},z{};Block const* block{};bool missing=true; };
 std::vector<Candidate> candidates;
+std::map<BlockPos,Block const*> columnBlocks;
 int rangeQueries{};
 std::vector<Candidate> queryMissingCellsInRange(Player&,Vec3 const&,float) {
     ++rangeQueries;return candidates;
@@ -279,8 +282,20 @@ Candidate queryProjection(Player&,BlockPos const& p) {
 Candidate queryPlacementProjection(Player& player,BlockPos const& p) {
     return queryProjection(player,p);
 }
+Candidate queryEasyPlaceColumnCell(Player& player,BlockPos const& p) {
+    auto it=columnBlocks.find(p);
+    if (it==columnBlocks.end()) return {};
+    return {p.x,p.y,p.z,it->second,player.region.getBlock(p).isAir()};
+}
 namespace detail {
-bool checkedVoxelRayOrigin(std::array<float,3>,std::array<float,3>,float) { return true; }
+std::optional<std::array<int,3>> checkedVoxelRayOrigin(
+    std::array<float,3> origin,std::array<float,3> dir,float reach
+) {
+    if (!(reach > 0) || !(std::isfinite(origin[0]) && std::isfinite(origin[1]) && std::isfinite(origin[2]))
+        || !(std::isfinite(dir[0]) && std::isfinite(dir[1]) && std::isfinite(dir[2]))) return {};
+    return std::array<int,3>{static_cast<int>(std::floor(origin[0])),
+        static_cast<int>(std::floor(origin[1])),static_cast<int>(std::floor(origin[2]))};
+}
 }
 }
 namespace structure {
@@ -324,6 +339,7 @@ struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec
 std::optional<ProjectionTarget> aimed;
 std::vector<ProjectionTarget> aimedSequence;
 std::size_t aimedSequenceIndex{};
+bool useActualRay{};
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
 uchar oppositeFace(uchar f) { return Facing::OPPOSITE_FACING().at(f); }
@@ -368,6 +384,12 @@ bool placementPredictionMatches(Block const&,Block const&,Block const*);
 #define resolveOrientedPlacement resolveOrientedPlacementActual
 #include "PlannerBody.inc"
 #undef resolveOrientedPlacement
+// Include unchanged production Voxel DDA/column chooser, not a handwritten mock.
+// Its recent-placement guard is defined in the extracted ExecutorBodies section.
+bool recentlyPlaced(BlockPos const& cell,std::uint64_t now);
+#define findProjectionTarget findProjectionTargetActual
+#include "RaycastBody.inc"
+#undef findProjectionTarget
 #include "SwapBody.inc"
 bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContext const& context,BlockPos const& cell,
     Block const& b,int aux,ProjectionTarget& target) {
@@ -382,7 +404,8 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
 PlacementContext makePlacementContext(Vec3 const& eye,Vec3 const&,float range) { return {eye,range*range}; }
 void consumeBrokenProjectionCells(Player&,std::uint64_t) {}
 void updateAimedProjectedBlockName(Block const*) {}
-std::optional<ProjectionTarget> findProjectionTarget(Player&,Vec3 const&,Vec3 const&,float,int = 1) {
+std::optional<ProjectionTarget> findProjectionTarget(Player& player,Vec3 const& origin,Vec3 const& dir,float distance,int depth = 1) {
+    if (useActualRay) return findProjectionTargetActual(player,origin,dir,distance,depth);
     if (!aimedSequence.empty()) {
         if (aimedSequenceIndex >= aimedSequence.size()) return aimedSequence.back();
         return aimedSequence[aimedSequenceIndex++];
@@ -418,7 +441,7 @@ void reset(Player& p) {
     placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
     p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();sentActions.clear();gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;
+    sent.clear();sentActions.clear();gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
@@ -554,6 +577,86 @@ int main() {
     check(state.beginManualPress(1000,state.manualInputEpoch()),"quick tap admitted");state.releaseManualPress();
     tickEasyPlaceImpl(player);fixtureTime=1050;tickEasyPlaceImpl(player);
     check(sent.size()==1&&!state.manualPlaceRequested(),"quick tap sends once after release");
+
+    // The production raycaster (not the test's aimedSequence double) must
+    // translate a top Y-layer crosshair hit into bottom->top column cells.
+    // A solid support wall is present one block behind the hidden projection.
+    {
+        reset(player);
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            auto target=findProjectionTargetActual(player,player.eye,player.view,5,4);
+            check(target.has_value() && target->cell==BlockPos{2,y,4},
+                "production ray picks same column bottom to top, even before server confirmation");
+            if(target) markPlaced(target->cell,fixtureTime);
+        }
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "production ray does not resubmit four in-flight column cells");
+        // ACK of the bottom two cells never changes the ordering of later cells.
+        reset(player);
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        player.region.cells[{2,64,4}]=stone;
+        player.region.cells[{2,65,4}]=stone;
+        auto partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,66,4},
+            "server-acknowledged bottom cells skip to the next higher cell");
+        // Complete upper anchor (non-air) may still uncover unfinished lower cells.
+        player.region.cells[{2,67,4}]=stone;
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,66,4},
+            "placed upper block remains a valid column anchor");
+        Block wrong{.name="minecraft:dirt",.states={},.mNetworkId=777};
+        player.region.cells[{2,67,4}]=wrong;
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "unrelated solid at upper position cannot unlock hidden-column placement");
+        player.region.cells.erase({2,67,4});
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,1);
+        check(partial.has_value() && partial->cell==BlockPos{2,67,4},
+            "depth one preserves top-only placement");
+        // No hidden-column lookup in wrong Y/X/Z or different XZ columns.
+        projection::columnBlocks.clear();
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,67,4},
+            "disabled hidden-cell lookup cannot escape visible top layer");
+        projection::candidates.clear();
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "unrelated wall cannot anchor an invisible column");
+    }
+
+    // End-to-end offline scheduler: production ray returns lower Y each time,
+    // producer marks it in-flight, and all four use transactions retain X/Z.
+    // Server acceptance is still a separate live BDS measurement.
+    {
+        reset(player);state.setEnabled(true);state.setEasyPlaceColumnDepth(4);
+        state.setEasyPlaceMaxPerTick(4);useActualRay=true;
+        player.inventory.items[0]={1,0,4};
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        planOutcomes[2]=true;
+        tickEasyPlaceImpl(player);
+        check(sent.size()==4,"source ray + executor submit exactly four column cells");
+        if(sent.size()==4) {
+            bool correct=true;
+            for(int i=0;i<4;++i)
+                correct=correct && sent[i].pos==BlockPos{2,64+i,4}
+                    && sent[i].item.count==4-i && sent[i].time==1000;
+            check(correct,"source ray + executor submit Y64,Y65,Y66,Y67 in one tick");
+        }
+    }
 
     // Production tick/dispatch bodies: verify four distinct same-slot sends
     // in one tick with successively predicted stack counts, then no duplicates.

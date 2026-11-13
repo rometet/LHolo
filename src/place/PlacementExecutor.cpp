@@ -512,22 +512,26 @@ std::optional<ProjectionTarget> findProjectionTarget(
     if (!rayOrigin) return std::nullopt;
     auto& region = player.getDimensionBlockSource();
 
-    // A placement request can be in flight for several ticks on remote BDS.
-    // Advance through other cells in the column without waiting for that RTT:
-    // the per-cell lock prevents duplicate sends, and native placement planning
-    // still validates each lower cell's reach, support and resulting states.
-    auto const tryColumnBelow = [&](BlockPos const& top) -> std::optional<ProjectionTarget> {
-        if (columnDepth <= 1) return {};
-        for (int offset = 1; offset < columnDepth; ++offset) {
-            if (top.y < (std::numeric_limits<int>::min)() + offset) break;
-            BlockPos const below{top.x, top.y - offset, top.z};
-            if (recentlyPlaced(below, GetTickCount64())) continue;
-            auto const lower = projection::queryEasyPlaceColumnCell(player, below);
-            if (lower.block && lower.missing) {
-                return selectPlacementTarget(region, below, dir, lower.block);
-            }
-        }
-        return {};
+    // An aimed upper ghost (or an already built upper anchor) identifies ONE
+    // X/Z column.  Unlike the previous top-first implementation, scan the
+    // eligible 1..4 cells from BOTTOM TO TOP.  Never retarget other columns:
+    // only the exact visible aimed cell can open this hidden-layer lookup.
+    // Recently transmitted cells are pending, not server acknowledgements;
+    // skip those to allow a bounded same-tick burst without duplicate sends.
+    auto const selectColumnBottomUp = [&](BlockPos const& upper)
+        -> std::optional<ProjectionTarget> {
+        if (columnDepth <= 1) return std::nullopt;
+        std::optional<ProjectionTarget> selected;
+        int const chosenOffset = detail::firstEligibleBottomUpColumnOffset(columnDepth, [&](int offset) {
+            if (upper.y < (std::numeric_limits<int>::min)() + offset) return false;
+            BlockPos const cell{upper.x, upper.y - offset, upper.z};
+            if (recentlyPlaced(cell, GetTickCount64())) return false;
+            auto const query = projection::queryEasyPlaceColumnCell(player, cell);
+            if (!query.block || !query.missing) return false;
+            selected = selectPlacementTarget(region, cell, dir, query.block);
+            return true;
+        });
+        return chosenOffset >= 0 ? selected : std::nullopt;
     };
 
     auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
@@ -571,13 +575,13 @@ std::optional<ProjectionTarget> findProjectionTarget(
             BlockPos const neighbor = neighborOf(cell, entryFace);
             auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
-                return ProjectionTarget{neighbor, cell, entryFace, query.block};
+                if (auto lower = selectColumnBottomUp(neighbor)) return lower;
+                if (!recentlyPlaced(neighbor, GetTickCount64()))
+                    return ProjectionTarget{neighbor, cell, entryFace, query.block};
             }
-            // Java-style downward column placement: after the visible top
-            // block is built, it occludes the ghost beneath it. Resolve a
-            // matching visible top against the CURRENT world and inspect only
-            // its 1..N-1 cells below in the same X/Z column. Never expand the
-            // projection's actual visible/rendered layer.
+            // A completed upper layer may physically occlude the missing
+            // blocks beneath it.  Only an exact matching projection block
+            // may be used as a column anchor (not an arbitrary solid wall).
             if (columnDepth > 1) {
                 auto const top = projection::queryProjection(player, cell);
                 auto const& placedTop = region.getBlock(cell);
@@ -585,7 +589,7 @@ std::optional<ProjectionTarget> findProjectionTarget(
                     || (detail::isVanillaConnectivityPlacementBlock(top.block->getTypeName())
                         && placedTop.getTypeName() == top.block->getTypeName()
                         && manualSerializedPlacementMatches(placedTop, *top.block)))) {
-                    if (auto below = tryColumnBelow(cell)) return below;
+                    if (auto lower = selectColumnBottomUp(cell)) return lower;
                 }
             }
             break;
@@ -593,16 +597,12 @@ std::optional<ProjectionTarget> findProjectionTarget(
         auto const query = projection::queryPlacementProjection(player, cell);
         if (!query.block || !query.missing) continue;
 
-        // While the upper placement is still awaiting its server round-trip,
-        // treat the recently sent upper ghost as a column anchor rather than
-        // repeatedly hitting its 500ms duplicate-send guard.
-        if (columnDepth > 1 && recentlyPlaced(cell, GetTickCount64())) {
-            if (auto below = tryColumnBelow(cell)) return below;
-        }
-
-        // The ghost itself is the target; reuse the shared support selection
-        // (real neighbor preferred, air-mPos fallback when floating).
-        return selectPlacementTarget(region, cell, dir, query.block);
+        // An aimed upper ghost stays the anchor even after sending the lower
+        // cells.  The next burst slot advances bottom-up instead of treating
+        // the freshly sent top cell as the only reachable target.
+        if (auto lower = selectColumnBottomUp(cell)) return lower;
+        if (!recentlyPlaced(cell, GetTickCount64()))
+            return selectPlacementTarget(region, cell, dir, query.block);
     }
     return std::nullopt;
 }

@@ -33,6 +33,8 @@ planner_parts=[section('ProjectionTarget selectPlacementTarget','// Voxel raycas
                section('template <class F>\nvoid forEachClickCandidate','// Read a serialized Bedrock'),
                section('bool resolveOrientedPlacement','void tickRangePlaceImpl')]
 (out/'PlannerBody.inc').write_text('\n'.join(planner_parts),encoding='utf-8')
+raycast_part=section('std::optional<ProjectionTarget> findProjectionTarget(','// Predeclared: fast opaque classification')
+(out/'RaycastBody.inc').write_text(raycast_part,encoding='utf-8')
 swap_part=section('// Server-synced slot exchange','// A projected ghost cell')
 (out/'SwapBody.inc').write_text(swap_part,encoding='utf-8')
 helper=(src/'src/place/PlaceHelper.cpp').read_text(encoding='utf-8')
@@ -58,7 +60,7 @@ fixture=Path(__file__).resolve().parents[1]/'tests/manual_placement/ExecutorFixt
 argv=[str(cl),'/nologo','/std:c++20','/EHsc','/O2','/W4','/WX','/MD','/utf-8','/I'+str(src/'src'),'/I'+str(Path(__file__).resolve().parents[1]/'src'),'/I'+str(out),'/Fe:'+str(out/'executor-fixture.exe'),str(fixture),str(src/'src/place/PlacementState.cpp')]
 t=time.perf_counter();r=subprocess.run(argv,cwd=out,env=env,capture_output=True)
 (out/'build.log').write_bytes(r.stdout+r.stderr)
-rec={'source':str(src),'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip(), 'scope':'offline actual bodies, boundary doubles; NOT native prediction/BDS/server apply', 'body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in parts], 'planner_body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in planner_parts], 'swap_body_sha256':hashlib.sha256(swap_part.encode()).hexdigest(),'start_build_body_sha256':hashlib.sha256(hook_body.encode()).hexdigest(),'identity_body_sha256':hashlib.sha256(identity.encode()).hexdigest(), 'argv':argv,'build_exit':r.returncode,'build_seconds':time.perf_counter()-t}
+rec={'source':str(src),'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip(), 'scope':'offline actual bodies, boundary doubles; NOT native prediction/BDS/server apply', 'body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in parts], 'planner_body_sha256':[hashlib.sha256(p.encode()).hexdigest() for p in planner_parts],'raycast_body_sha256':hashlib.sha256(raycast_part.encode()).hexdigest(), 'swap_body_sha256':hashlib.sha256(swap_part.encode()).hexdigest(),'start_build_body_sha256':hashlib.sha256(hook_body.encode()).hexdigest(),'identity_body_sha256':hashlib.sha256(identity.encode()).hexdigest(), 'argv':argv,'build_exit':r.returncode,'build_seconds':time.perf_counter()-t}
 if not r.returncode:
  t=time.perf_counter();r=subprocess.run([str(out/'executor-fixture.exe')],cwd=out,env=env,capture_output=True)
  (out/'run.log').write_bytes(r.stdout+r.stderr)
