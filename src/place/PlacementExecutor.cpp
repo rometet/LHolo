@@ -616,7 +616,7 @@ struct PendingBdsItemUseStop {
     BlockPos target;
     ActorRuntimeID runtimeId;
     LocalPlayer* player;
-    std::uint64_t inputEpoch;
+    Level* level;
     std::uint64_t stopAt;
 };
 std::vector<PendingBdsItemUseStop> gPendingBdsStops;
@@ -635,11 +635,10 @@ void sendBdsUseAction(PacketSender& sender, ActorRuntimeID id,
 }
 void flushPendingBdsUseStops(LocalPlayer& player, PacketSender& sender) {
     auto const now = GetTickCount64();
-    auto const epoch = placementState().manualInputEpoch();
     auto const id = player.getRuntimeID();
     for (auto it = gPendingBdsStops.begin(); it != gPendingBdsStops.end();) {
         // Never send an old world's stop action to the new world/session.
-        if (it->player != &player || it->inputEpoch != epoch
+        if (it->player != &player || it->level != &player.getLevel()
             || it->runtimeId != id) {
             it = gPendingBdsStops.erase(it);
         } else if (now >= it->stopAt) {
@@ -743,8 +742,8 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
         sendBdsUseAction(sender,id,PlayerActionType::StartItemUseOn,
             target.at,target.cell,static_cast<int>(target.face));
         // Keep the matching Stop even if forwarding the transaction raises.
-        gPendingBdsStops.push_back({target.cell,id,&player,
-            placementState().manualInputEpoch(),GetTickCount64()+kBdsItemUseStopDelayMs});
+        gPendingBdsStops.push_back({target.cell,id,&player,&player.getLevel(),
+            GetTickCount64()+kBdsItemUseStopDelayMs});
     }
     sender.sendToServer(packet);
     telemetry::count(telemetry::Event::PacketSent);
