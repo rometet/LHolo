@@ -35,6 +35,7 @@ struct BlockPos {
     bool operator<(BlockPos const& p) const { return std::tie(x,y,z)<std::tie(p.x,p.y,p.z); }
     BlockPos operator+(BlockPos const& p) const { return {x+p.x,y+p.y,z+p.z}; }
 };
+struct ActorRuntimeID { std::uint64_t rawID{}; bool operator==(ActorRuntimeID const&) const=default; };
 struct Player;
 enum class BlockProperty { Door };
 struct Facing {
@@ -91,6 +92,7 @@ struct Player {
     Vec3 getEyePos() const { return {}; }
     Vec3 getViewVector(float) const { return {1,0,0}; }
     float getPickRange() const { return 4; }
+    ActorRuntimeID getRuntimeID() const { return {555}; }
     Vec2 const& getRotation() const { return rotation; }
     BlockSource& getDimensionBlockSource() { return region; }
 };
@@ -194,6 +196,14 @@ struct InventoryTransactionPacketPayload {
     std::unique_ptr<ComplexInventoryTransaction> tx;
     InventoryTransactionPacketPayload(std::unique_ptr<ComplexInventoryTransaction> p,bool):tx(std::move(p)) {}
 };
+enum class PlayerActionType { StartItemUseOn=28, StopItemUseOn=29 };
+struct PlayerActionPacket {
+    Field<ActorRuntimeID> mRuntimeId;
+    Field<PlayerActionType> mAction;
+    Field<BlockPos> mPos,mResultPos;
+    Field<int> mFace;
+    Field<bool> mIsFromServerPlayerMovementSystem;
+};
 struct InventoryTransactionPacket {
     InventoryTransactionPacketPayload payload;
     explicit InventoryTransactionPacket(InventoryTransactionPacketPayload p):payload(std::move(p)) {}
@@ -208,6 +218,8 @@ std::uint64_t GetTickCount64() { return fixtureTime; }
 bool factoryAvailable=true, clientAvailable=true, fixtureGui{}, heldExempt{};
 bool normalFactoryAvailable=true;
 int normalFactoryCalls{};
+struct SentAction {PlayerActionType action;BlockPos pos;std::uint64_t time;};
+std::vector<SentAction> sentActions;
 std::vector<Sent> sent;
 std::vector<SwapSent> swapSent;
 int swaps{}, planned{};
@@ -216,6 +228,9 @@ std::map<int,bool> planOutcomes;
 bool useActualPlanner{};
 bool queueRotationOnPlan{};
 struct PacketSender {
+    void sendToServer(PlayerActionPacket const& packet) {
+        sentActions.push_back({packet.mAction.value,packet.mPos.value,fixtureTime});
+    }
     void sendToServer(InventoryTransactionPacket const& packet) {
         if(packet.payload.tx->fixtureType==ComplexInventoryTransaction::Type::NormalTransaction) {
             ++swaps;swapSent.push_back({packet.payload.tx->mTransaction.value.actions,fixtureTime});return;
@@ -401,7 +416,7 @@ void reset(Player& p) {
     placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
     p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;
+    sent.clear();sentActions.clear();gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;
     predictionInputs.clear();suppliedPrediction=nullptr;
     useActualPlanner=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
