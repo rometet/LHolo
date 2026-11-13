@@ -44,6 +44,7 @@
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/network/PacketSender.h"
 #include "mc/network/packet/InventoryTransactionPacket.h"
+#include "mc/network/packet/PlayerActionPacket.h"
 #include "mc/world/Facing.h"
 #include "mc/world/gamemode/GameMode.h"
 #include "mc/world/ContainerID.h"
@@ -82,6 +83,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace lholo::place {
 
@@ -605,6 +607,49 @@ std::optional<ProjectionTarget> findProjectionTarget(
     return std::nullopt;
 }
 
+// BDS item-use lifecycle staging. Vanilla 1.26.51 captures pair a
+// StartItemUseOn action with ItemUse and send StopItemUseOn ~150ms later.
+// The older direct inventory transaction remains the default for 1/tick.
+// Only the explicitly experimental multi-send Easy Place path uses this.
+// Running exclusively on the local player's game tick avoids new hooks/threads.
+struct PendingBdsItemUseStop {
+    BlockPos target;
+    ActorRuntimeID runtimeId;
+    LocalPlayer* player;
+    std::uint64_t inputEpoch;
+    std::uint64_t stopAt;
+};
+std::vector<PendingBdsItemUseStop> gPendingBdsStops;
+constexpr std::uint64_t kBdsItemUseStopDelayMs = 150;
+void sendBdsUseAction(PacketSender& sender, ActorRuntimeID id,
+                      PlayerActionType action, BlockPos const& pos,
+                      BlockPos const& resultPos, int face) {
+    PlayerActionPacket packet;
+    packet.mRuntimeId.get() = id;
+    packet.mAction.get() = action;
+    packet.mPos.get() = pos;
+    packet.mResultPos.get() = resultPos;
+    packet.mFace.get() = face;
+    packet.mIsFromServerPlayerMovementSystem.get() = false;
+    sender.sendToServer(packet);
+}
+void flushPendingBdsUseStops(LocalPlayer& player, PacketSender& sender) {
+    auto const now = GetTickCount64();
+    auto const epoch = placementState().manualInputEpoch();
+    auto const id = player.getRuntimeID();
+    for (auto it = gPendingBdsStops.begin(); it != gPendingBdsStops.end();) {
+        // Never send an old world's stop action to the new world/session.
+        if (it->player != &player || it->inputEpoch != epoch
+            || it->runtimeId != id) {
+            it = gPendingBdsStops.erase(it);
+        } else if (now >= it->stopAt) {
+            sendBdsUseAction(sender,id,PlayerActionType::StopItemUseOn,
+                it->target,BlockPos{0,0,0},0);
+            it = gPendingBdsStops.erase(it);
+        } else ++it;
+    }
+}
+
 detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, ItemStack const& item) {
     // Never serialize an out-of-range face. Facing's lookup tables are fixed
     // six-entry arrays and an invalid face would be both an OOB read locally
@@ -681,7 +726,27 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     );
     auto client = ll::service::getClientInstance();
     if (!client) return detail::PlacementDispatchResult::Rejected;
-    client->getPacketSender().sendToServer(packet);
+    auto& sender = client->getPacketSender();
+    // Only the experimental 2..4/tick path changes the wire protocol.
+    // A true vanilla start/use/stop action is more likely to be recognized by
+    // BDS than extra independent ItemUse packets with no use lifecycle.
+    bool const bdsLifecycle = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && placementState().easyPlaceMaxPerTick() > 1
+        && (isFastOpaquePlacementCandidate(*target.block)
+            || detail::isVanillaConnectivityPlacementBlock(target.block->getTypeName()));
+    if (bdsLifecycle) {
+        auto const id = player.getRuntimeID();
+        // Reserve first so allocation cannot fail after Start reaches BDS.
+        if (gPendingBdsStops.size() >= 32) return detail::PlacementDispatchResult::Rejected;
+        gPendingBdsStops.reserve((std::max)(gPendingBdsStops.capacity(), std::size_t{32}));
+        sendBdsUseAction(sender,id,PlayerActionType::StartItemUseOn,
+            target.at,target.cell,static_cast<int>(target.face));
+        // Keep the matching Stop even if forwarding the transaction raises.
+        gPendingBdsStops.push_back({target.cell,id,&player,
+            placementState().manualInputEpoch(),GetTickCount64()+kBdsItemUseStopDelayMs});
+    }
+    sender.sendToServer(packet);
     telemetry::count(telemetry::Event::PacketSent);
     placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
     return detail::PlacementDispatchResult::Sent;
@@ -1364,6 +1429,9 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
     auto const tickNow = GetTickCount64();
+    // Finish prior vanilla action lifecycles even after the user closes the
+    // placement UI or changes mode, provided the same local world is active.
+    flushPendingBdsUseStops(*player, client->getPacketSender());
     consumeBrokenProjectionCells(*player, tickNow);
     // Only act during gameplay: menus, pause screens and the LHolo GUI itself
     // disable in-game input.
