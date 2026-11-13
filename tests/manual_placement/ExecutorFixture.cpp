@@ -9,6 +9,7 @@
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementDispatchResult.h"
 #include "place/EasyPlaceBurstPolicy.h"
+#include "place/EasyPlaceSweepPolicy.h"
 #include "place/VoxelRayAxis.h"
 #include <algorithm>
 #include <array>
@@ -384,7 +385,11 @@ bool isDoubleSlab(Block const& b) { return b.doubleSlab; }
 bool manualSerializedPlacementMatches(Block const& p,Block const& g) {
     return detail::manualPlacementStateMapsMatch(g.name,g.states,p.states);
 }
-bool isFastOpaquePlacementCandidate(Block const& b) { return b.name=="minecraft:stone"; }
+bool isFastOpaquePlacementCandidate(Block const& b) {
+    return b.name=="minecraft:stone" || b.name=="minecraft:cobbled_deepslate"
+        || b.name=="minecraft:polished_blackstone_bricks"
+        || b.name=="minecraft:stone_bricks";
+}
 bool isViewSensitivePlan(Block const& b) { return !isFastOpaquePlacementCandidate(b); }
 std::optional<uchar> deterministicSupportDirection(Block const& b) {
     auto facing=serializedState(b,"facing_direction");
@@ -401,12 +406,12 @@ bool placementPredictionMatches(Block const&,Block const&,Block const*);
 #define resolveOrientedPlacement resolveOrientedPlacementActual
 #include "PlannerBody.inc"
 #undef resolveOrientedPlacement
-// Include unchanged production Voxel DDA/column chooser, not a handwritten mock.
-// Its recent-placement guard is defined in the extracted ExecutorBodies section.
-bool recentlyPlaced(BlockPos const& cell,std::uint64_t now);
-#define findProjectionTarget findProjectionTargetActual
-#include "RaycastBody.inc"
-#undef findProjectionTarget
+// The original production ray body calls findItemSlot, whose unchanged source
+// body is in ExecutorBodies.inc. Forward-declare it here; include it after
+// ExecutorBodies so the test actually exercises the real inventory lookup.
+std::optional<ProjectionTarget> findProjectionTargetActual(
+    Player&,Vec3 const&,Vec3 const&,float,int
+);
 #include "SwapBody.inc"
 bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContext const& context,BlockPos const& cell,
     Block const& b,int aux,ProjectionTarget& target) {
@@ -415,10 +420,14 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
     if(!planOutcomes[cell.x]) return false;
     target={cell,cell,1,&b,{static_cast<float>(cell.x)+0.5f,0.25f,0.5f}};
     if (fixtureRealSupportForNative) {
-        BlockPos const support{cell.x,cell.y,cell.z+1};
+        bool const floor=player.view.y<-0.5f;
+        BlockPos const support=floor
+            ? BlockPos{cell.x,cell.y-1,cell.z}
+            : BlockPos{cell.x,cell.y,cell.z+1};
         region.cells[support]=b;
         target.at=support;
-        target.face=static_cast<uchar>(Facing::Name::North);
+        target.face=static_cast<uchar>(
+            floor?Facing::Name::Up:Facing::Name::North);
     }
     if (queueRotationOnPlan && b.name=="minecraft:piston")
         target.interactionRotation=detail::PlacementInteractionAngles{17.F,90.F};
@@ -437,6 +446,9 @@ std::optional<ProjectionTarget> findProjectionTarget(Player& player,Vec3 const& 
 }
 bool isManualPlacementHeldItemAllowed(Player&) { return heldExempt; }
 #include "ExecutorBodies.inc"
+#define findProjectionTarget findProjectionTargetActual
+#include "RaycastBody.inc"
+#undef findProjectionTarget
 struct FixtureGameMode;
 bool isLocalManualBuild(FixtureGameMode&);
 bool aimedBlockAcceptsRightClick(FixtureGameMode&,BlockPos const&);
@@ -605,7 +617,7 @@ int main() {
     // translate a top Y-layer crosshair hit into bottom->top column cells.
     // A solid support wall is present one block behind the hidden projection.
     {
-        reset(player);
+        reset(player);player.inventory.items[0]={1,0,64};
         player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
         for(int y=64;y<=67;++y) {
             projection::columnBlocks[{2,y,4}]=&stone;
@@ -621,7 +633,7 @@ int main() {
         check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
             "production ray does not resubmit four in-flight column cells");
         // ACK of the bottom two cells never changes the ordering of later cells.
-        reset(player);
+        reset(player);player.inventory.items[0]={1,0,64};
         player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
         projection::candidates={{2,67,4,&stone}};
         for(int y=64;y<=67;++y) {
@@ -654,6 +666,187 @@ int main() {
         projection::candidates.clear();
         check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
             "unrelated wall cannot anchor an invisible column");
+    }
+
+    // Surface policy: only vertical entry faces enable an XZ patch. A
+    // horizontal wall ray remains vertical-column-only.
+    {
+        auto p=detail::easyPlaceFloorOffsets(1.f,-1.f);
+        check(p[0]==detail::FloorOffset{0,0}
+            && p[1]==detail::FloorOffset{1,0}
+            && p[2]==detail::FloorOffset{0,-1}
+            && p[3]==detail::FloorOffset{1,-1},
+            "floor footprint follows signed view quadrant");
+        check(detail::easyPlaceFloorFace(0) && detail::easyPlaceFloorFace(1)
+            && !detail::easyPlaceFloorFace(2) && !detail::easyPlaceFloorFace(5),
+            "only top/bottom entry face requests floor sweep");
+        check(!detail::easyPlaceOffsetFits(INT_MAX,1)
+            && !detail::easyPlaceOffsetFits(INT_MIN,-1)
+            && detail::easyPlaceOffsetFits(4,-1),
+            "floor footprint rejects world-coordinate overflow");
+    }
+    {
+        reset(player);player.inventory.items[0]={1,0,64};
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        auto floorCells=std::array{
+            BlockPos{2,64,4},BlockPos{3,64,4},
+            BlockPos{2,64,5},BlockPos{3,64,5}};
+        for(auto const& c:floorCells) {
+            projection::candidates.push_back({c.x,c.y,c.z,&stone});
+            player.region.cells[{c.x,63,c.z}]=stone;
+        }
+        for(auto const& expected:floorCells) {
+            auto next=findProjectionTargetActual(player,player.eye,player.view,4,4);
+            check(next && next->cell==expected,
+                "production ray traces 2x2 floor footprint in stable order");
+            if(next) markPlaced(next->cell,fixtureTime);
+        }
+        check(!findProjectionTargetActual(player,player.eye,player.view,4,4),
+            "floor patch prevents same-tick duplicate placements");
+        reset(player);player.inventory.items[0]={1,0,64};
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        for(auto const& c:floorCells) projection::candidates.push_back({c.x,c.y,c.z,&stone});
+        auto one=findProjectionTargetActual(player,player.eye,player.view,4,1);
+        check(one && one->cell==floorCells[0],
+            "depth one preserves only aimed floor target");
+        player.region.cells[{2,64,4}]=stone;
+        auto built=findProjectionTargetActual(player,player.eye,player.view,4,4);
+        check(built && built->cell==floorCells[1],
+            "placed floor anchor reveals other missing cells in patch");
+        player.region.cells[{2,64,4}]=Block{
+            .name="minecraft:dirt",.states={},.mNetworkId=999,.material=3
+        };
+        check(!findProjectionTargetActual(player,player.eye,player.view,4,4),
+            "wrong real floor block does not expose adjacent projected cells");
+        projection::candidates.clear();
+        check(!findProjectionTargetActual(player,player.eye,player.view,4,4),
+            "floor sweep cannot leak into non-projection world cells");
+    }
+    // Exact source scheduler + source DDA: a four-stone floor patch uses the
+    // native build path in one bounded game tick (BDS still a separate test).
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceColumnDepth(4);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[0]={1,0,4};useActualRay=true;
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        fixtureRealSupportForNative=true;planOutcomes[2]=planOutcomes[3]=true;
+        for(auto c:std::array{BlockPos{2,64,4},BlockPos{3,64,4},
+                              BlockPos{2,64,5},BlockPos{3,64,5}}) {
+            projection::candidates.push_back({c.x,c.y,c.z,&stone});
+            player.region.cells[{c.x,63,c.z}]=stone;
+        }
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==4 && sent.empty(),
+            "floor patch sends four native build attempts in one tick");
+        if(nativeSent.size()==4)
+            check(nativeSent[0].pos==BlockPos{2,63,4}
+                && nativeSent[1].pos==BlockPos{3,63,4}
+                && nativeSent[2].pos==BlockPos{2,63,5}
+                && nativeSent[3].pos==BlockPos{3,63,5},
+                "floor patch native sends stay inside exact XZ footprint");
+    }
+    // Real-source mixed floor: same material batches even when the four
+    // schematic cells alternate, and slot changes wait for the next tick.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceColumnDepth(4);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[0]={1,0,8};player.inventory.items[1]={2,0,8};
+        useActualRay=true;fixtureRealSupportForNative=true;
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=11,.material=2};
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        planOutcomes[2]=planOutcomes[3]=true;
+        projection::candidates={{2,64,4,&stone},{3,64,4,&blackstone},
+            {2,64,5,&stone},{3,64,5,&blackstone}};
+        for(auto const& c:projection::candidates)
+            player.region.cells[{c.x,63,c.z}]=stone;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==2 && player.selected==0,
+            "mixed floor groups two selected material blocks in one tick");
+        fixtureTime=1050;tickEasyPlaceImpl(player);
+        check(nativeSent.size()==2 && player.selected==1,
+            "mixed floor waits one tick after hotbar material change");
+        fixtureTime=1100;tickEasyPlaceImpl(player);
+        check(nativeSent.size()==4 && player.selected==1,
+            "mixed floor places second material after synchronized selection");
+        if(nativeSent.size()==4)
+            check(nativeSent[2].pos==BlockPos{3,63,4}
+                && nativeSent[3].pos==BlockPos{3,63,5},
+                "second material batch still follows floor patch positions");
+        // Absent secondary material should never block the available subset.
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceColumnDepth(4);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[0]={1,0,8};useActualRay=true;
+        fixtureRealSupportForNative=true;
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        planOutcomes[2]=planOutcomes[3]=true;
+        projection::candidates={{2,64,4,&stone},{3,64,4,&blackstone},
+            {2,64,5,&stone},{3,64,5,&blackstone}};
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==2 && sent.empty(),
+            "floor with missing material still builds available two blocks");
+    }
+    // Crosshair intent wins over matching already-held material elsewhere
+    // in the 2x2 patch. Never place a neighbor before the aimed block.
+    {
+        reset(player);player.eye={2.5f,66.5f,4.5f};
+        player.view={0,-1,0};player.reach=4;
+        player.inventory.items[0]={1,0,8};player.inventory.items[1]={2,0,8};
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=11,.material=2};
+        projection::candidates={{2,64,4,&blackstone},{3,64,4,&stone},
+            {2,64,5,&stone},{3,64,5,&stone}};
+        auto first=findProjectionTargetActual(player,player.eye,player.view,4,4);
+        check(first && first->cell==BlockPos{2,64,4},
+            "mixed floor always starts with available crosshair block");
+    }
+    // Stairs/slabs and non-full shape blocks must NEVER enter native
+    // 4/tick mode; orientation verification remains on the safe path.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceColumnDepth(4);state.setEasyPlaceMaxPerTick(4);
+        useActualRay=true;fixtureRealSupportForNative=true;
+        Block slab{.name="minecraft:deepslate_brick_slab",
+            .states={{"minecraft:vertical_half","bottom"}},
+            .mNetworkId=43,.material=3};
+        player.eye={2.5f,66.5f,4.5f};player.view={0,-1,0};player.reach=4;
+        player.inventory.items[0]={3,0,16};
+        projection::candidates={{2,64,4,&slab},{3,64,4,&slab},
+            {2,64,5,&slab},{3,64,5,&slab}};
+        planOutcomes[2]=planOutcomes[3]=true;
+        tickEasyPlaceImpl(player);
+        check(sent.size()==1 && nativeSent.empty(),
+            "non-full slab floor uses single safe packet per tick");
+    }
+
+    // A mixed wall preserves the bottom-up Y order across hotbar switches.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceColumnDepth(4);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[0]={1,0,8};player.inventory.items[1]={2,0,8};
+        useActualRay=true;fixtureRealSupportForNative=true;
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=11,.material=2};
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=(y%2==0?&stone:&blackstone);
+            player.region.cells[{2,y,5}]=stone;
+        }
+        projection::candidates={{2,67,4,&blackstone}};
+        planOutcomes[2]=true;
+        tickEasyPlaceImpl(player);
+        for(int t=1050;t<=1450;t+=50) {
+            fixtureTime=t;
+            tickEasyPlaceImpl(player);
+        }
+        check(nativeSent.size()==4,
+            "mixed wall eventually submits four materials across ticks");
+        if(nativeSent.size()==4) {
+            bool correct=true;
+            for(int i=0;i<4;++i)
+                correct=correct && nativeSent[i].pos==BlockPos{2,64+i,5};
+            check(correct,"mixed wall retains strict bottom-up Y order");
+        }
     }
 
     // End-to-end offline scheduler: production ray returns lower Y each time,

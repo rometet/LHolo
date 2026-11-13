@@ -24,6 +24,7 @@
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementDispatchResult.h"
 #include "place/EasyPlaceBurstPolicy.h"
+#include "place/EasyPlaceSweepPolicy.h"
 #include "place/EasyPlaceTelemetry.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
@@ -528,10 +529,44 @@ std::optional<ProjectionTarget> findProjectionTarget(
             if (recentlyPlaced(cell, GetTickCount64())) return false;
             auto const query = projection::queryEasyPlaceColumnCell(player, cell);
             if (!query.block || !query.missing) return false;
+            if (findItemSlot(player,*query.block).slot<0) return false;
             selected = selectPlacementTarget(region, cell, dir, query.block);
             return true;
         });
         return chosenOffset >= 0 ? selected : std::nullopt;
+    };
+
+    // A vertical ray into the visible floor patch fixes the XZ anchor and
+    // limits placement to a 2x2 footprint on that SAME, visible Y layer.
+    // Preserve selected-slot batches for mixed materials: select all
+    // available matching cells first, change to another slot only between
+    // ticks, and skip missing materials rather than blocking the whole patch.
+    auto const selectFloorPatch = [&](BlockPos const& anchor)
+        -> std::optional<ProjectionTarget> {
+        if (columnDepth <= 1) return std::nullopt;
+        auto const offsets = detail::easyPlaceFloorOffsets(dir.x, dir.z);
+        auto const selectedSlot = player.getSelectedItemSlot();
+        std::optional<ProjectionTarget> fallback;
+        for (int i = 0; i < columnDepth && i < 4; ++i) {
+            auto const& o=offsets[static_cast<std::size_t>(i)];
+            if (!detail::easyPlaceOffsetFits(anchor.x,o[0])
+                || !detail::easyPlaceOffsetFits(anchor.z,o[1])) continue;
+            BlockPos const cell{anchor.x+o[0],anchor.y,anchor.z+o[1]};
+            if (recentlyPlaced(cell,GetTickCount64())
+                || !region.getBlock(cell).isAir()) continue;
+            // Visible-layer query: never place hidden floors / side slices.
+            auto const query=projection::queryPlacementProjection(player,cell);
+            if (!query.block || !query.missing) continue;
+            auto const material=findItemSlot(player,*query.block);
+            if (material.slot<0) continue;
+            auto const planned=selectPlacementTarget(region,cell,dir,query.block);
+            // The crosshair cell takes priority when it is still missing
+            // and its material exists. Never surprise the user by starting
+            // on a different adjacent material merely because it is held.
+            if (i==0 || material.slot==selectedSlot) return planned;
+            if (!fallback) fallback=planned;
+        }
+        return fallback;
     };
 
     auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
@@ -575,7 +610,9 @@ std::optional<ProjectionTarget> findProjectionTarget(
             BlockPos const neighbor = neighborOf(cell, entryFace);
             auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
-                if (auto lower = selectColumnBottomUp(neighbor)) return lower;
+                if (detail::easyPlaceFloorFace(entryFace)) {
+                    if (auto floor=selectFloorPatch(neighbor)) return floor;
+                } else if (auto lower=selectColumnBottomUp(neighbor)) return lower;
                 if (!recentlyPlaced(neighbor, GetTickCount64()))
                     return ProjectionTarget{neighbor, cell, entryFace, query.block};
             }
@@ -589,7 +626,9 @@ std::optional<ProjectionTarget> findProjectionTarget(
                     || (detail::isVanillaConnectivityPlacementBlock(top.block->getTypeName())
                         && placedTop.getTypeName() == top.block->getTypeName()
                         && manualSerializedPlacementMatches(placedTop, *top.block)))) {
-                    if (auto lower = selectColumnBottomUp(cell)) return lower;
+                    if (detail::easyPlaceFloorFace(entryFace)) {
+                        if (auto floor=selectFloorPatch(cell)) return floor;
+                    } else if (auto lower=selectColumnBottomUp(cell)) return lower;
                 }
             }
             break;
@@ -600,7 +639,9 @@ std::optional<ProjectionTarget> findProjectionTarget(
         // An aimed upper ghost stays the anchor even after sending the lower
         // cells.  The next burst slot advances bottom-up instead of treating
         // the freshly sent top cell as the only reachable target.
-        if (auto lower = selectColumnBottomUp(cell)) return lower;
+        if (detail::easyPlaceFloorFace(entryFace)) {
+            if (auto floor=selectFloorPatch(cell)) return floor;
+        } else if (auto lower=selectColumnBottomUp(cell)) return lower;
         if (!recentlyPlaced(cell, GetTickCount64()))
             return selectPlacementTarget(region, cell, dir, query.block);
     }
@@ -1699,9 +1740,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
 
     if (player->getSelectedItemSlot() != found.slot) {
         player->setSelectedSlot(found.slot);
-        // Let the native selected-slot update propagate before queuing the
-        // stair use transaction; never assume immediate remote synchronization.
-        if (placement.requireNativeRotationSync) return;
+        // Mixed materials require a hotbar change. Never send the first
+        // build against a newly selected slot in this very game tick:
+        // the server must see the slot update before a native placement.
+        // This applies only to automatic Easy Place; manual semantics stay.
+        if (!manualPlacement || placement.requireNativeRotationSync) return;
     }
     // A native rotation needs a synchronized PlayerAuthInput slot. Never
     // queue it after another ItemUse packet in the same game tick.

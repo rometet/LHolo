@@ -48,6 +48,31 @@ int runMcstructureInputTests() try {
         "fixture contains a complete little-endian compound root");
     check(expected.find("minecraft:smooth_stone") != std::string::npos, "native palette survives decoding");
 
+    // Mixed-material wall and floor fixtures derived from real Bedrock
+    // palette entries. Import remains independent of display/placement axis;
+    // these tests are byte-level native NBT transport, not BDS acceptance.
+    for (auto const name : {
+        "LHolo_Mixed_Wall_4x4.mcstructure",
+        "LHolo_Mixed_Floor_4x4.mcstructure"
+    }) {
+        auto const raw = fixture(name);
+        check(raw.size() == 514 && raw.starts_with(
+            std::string_view{"\x0a\0\0",3}),
+            "mixed schematic is complete little-endian root NBT");
+        for (auto const required : {
+            "minecraft:cobbled_deepslate",
+            "minecraft:polished_blackstone_bricks",
+            "minecraft:stone_bricks",
+            "minecraft:andesite"
+        }) check(raw.find(required) != std::string::npos,
+            "four mixed full-block materials preserved in native palette");
+        error.clear();
+        auto const encoded = compress(raw);
+        auto const roundtrip = inflateMcstructureTag(encoded,raw.size(),error);
+        check(roundtrip && *roundtrip == raw,
+            "mixed native wall/floor schematic roundtrips exactly");
+    }
+
     auto reject = [&](std::string const& bytes, std::size_t limit, char const* message) {
         error.clear();
         check(!inflateMcstructureTag(bytes, limit, error) && !error.empty(), message);
