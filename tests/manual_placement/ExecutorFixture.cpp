@@ -36,6 +36,7 @@ struct BlockPos {
     BlockPos operator+(BlockPos const& p) const { return {x+p.x,y+p.y,z+p.z}; }
 };
 struct ActorRuntimeID { std::uint64_t rawID{}; bool operator==(ActorRuntimeID const&) const=default; };
+struct Level {};
 struct Player;
 enum class BlockProperty { Door };
 struct Facing {
@@ -93,6 +94,7 @@ struct Player {
     Vec3 getViewVector(float) const { return {1,0,0}; }
     float getPickRange() const { return 4; }
     ActorRuntimeID getRuntimeID() const { return {555}; }
+    Level& getLevel() const { static Level testLevel; return testLevel; }
     Vec2 const& getRotation() const { return rotation; }
     BlockSource& getDimensionBlockSource() { return region; }
 };
@@ -567,6 +569,10 @@ int main() {
     }
     tickEasyPlaceImpl(player);
     check(sent.size()==4,"EasyPlace burst sends four distinct cells in one tick");
+    check(sentActions.size()==4,"BDS lifecycle sends four StartItemUseOn actions before transactions finish");
+    for (auto const& action : sentActions)
+        check(action.action==PlayerActionType::StartItemUseOn && action.time==1000,
+            "BDS lifecycle uses StartItemUseOn at the dispatch tick");
     if (sent.size()==4) {
         bool distinct=true,counts=true,sameTick=true;
         for (int i=0;i<4;++i) {
@@ -584,6 +590,16 @@ int main() {
     aimedSequenceIndex=0;
     tickEasyPlaceImpl(player);
     check(sent.size()==4,"EasyPlace burst duplicate lock survives next tick");
+    check(sentActions.size()==4,"BDS stop actions are delayed at 50ms");
+    fixtureTime=1150;
+    tickEasyPlaceImpl(player);
+    check(sentActions.size()==8,"BDS matching stop actions are emitted at 150ms");
+    if (sentActions.size()==8) for (int i=0;i<4;++i) {
+        check(sentActions[4+i].action==PlayerActionType::StopItemUseOn,
+            "BDS lifecycle finishes each in-flight placement");
+        check(sentActions[4+i].time==1150,
+            "BDS stop is delayed by at least 150ms");
+    }
 
     // A one-item stack cannot fund four concurrent transactions; default
     // count=1 also preserves legacy behaviour when extra targets exist.
