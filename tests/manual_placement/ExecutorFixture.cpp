@@ -246,6 +246,7 @@ int swaps{}, planned{};
 std::vector<int> plannedCells;
 std::map<int,bool> planOutcomes;
 bool useActualPlanner{};
+bool fixtureRealSupportForNative{};
 bool queueRotationOnPlan{};
 struct PacketSender {
     void sendToServer(PlayerActionPacket const& packet) {
@@ -413,6 +414,12 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
     if(useActualPlanner) return resolveOrientedPlacementActual(player,region,context,cell,b,aux,target);
     if(!planOutcomes[cell.x]) return false;
     target={cell,cell,1,&b,{static_cast<float>(cell.x)+0.5f,0.25f,0.5f}};
+    if (fixtureRealSupportForNative) {
+        BlockPos const support{cell.x,cell.y,cell.z+1};
+        region.cells[support]=b;
+        target.at=support;
+        target.face=static_cast<uchar>(Facing::Name::North);
+    }
     if (queueRotationOnPlan && b.name=="minecraft:piston")
         target.interactionRotation=detail::PlacementInteractionAngles{17.F,90.F};
     return true;
@@ -459,7 +466,7 @@ void reset(Player& p) {
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
     sent.clear();sentActions.clear();nativeSent.clear();nativeBuildSucceeds=true;gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
     predictionInputs.clear();suppliedPrediction=nullptr;
-    useActualPlanner=false;queueRotationOnPlan=false;
+    useActualPlanner=false;fixtureRealSupportForNative=false;queueRotationOnPlan=false;
     orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
     detail::rotatedQueueYaw=0;detail::rotatedQueueStrict=false;detail::rotatedQueueStair=false;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
@@ -663,13 +670,14 @@ int main() {
             player.region.cells[{2,y,5}]=stone;
         }
         planOutcomes[2]=true;
+        fixtureRealSupportForNative=true;
         tickEasyPlaceImpl(player);
         check(nativeSent.size()==4 && sent.empty(),
             "source ray + native build submit exactly four real-game actions");
         if(nativeSent.size()==4) {
             bool correct=true;
             for(int i=0;i<4;++i)
-                correct=correct && nativeSent[i].pos==BlockPos{2,64+i,4}
+                correct=correct && nativeSent[i].pos==BlockPos{2,64+i,5}
                     && nativeSent[i].time==1000 && !nativeSent[i].isSimTick;
             check(correct,"native build preserves bottom-to-top Y64..Y67 in one tick");
         }
@@ -682,6 +690,7 @@ int main() {
     state.setEnabled(true);
     state.setEasyPlaceMaxPerTick(4);
     player.inventory.items[0]={1,0,4};
+    fixtureRealSupportForNative=true;
     for (int x=0; x<4; ++x) {
         planOutcomes[x]=true;
         aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
@@ -693,8 +702,8 @@ int main() {
     if(nativeSent.size()==4) {
         bool distinct=true,sameTick=true;
         for(int i=0;i<4;++i) {
-            distinct=distinct && nativeSent[i].pos==BlockPos{i,0,0}
-                && nativeSent[i].hand==HandSlot::Mainhand && nativeSent[i].face==1;
+            distinct=distinct && nativeSent[i].pos==BlockPos{i,0,1}
+                && nativeSent[i].hand==HandSlot::Mainhand && nativeSent[i].face==2;
             sameTick=sameTick && nativeSent[i].time==1000
                 && !nativeSent[i].isSimTick;
         }
@@ -710,7 +719,7 @@ int main() {
 
     // No invented inventory mutation; prevent oversubscribing the hotbar.
     reset(player);
-    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
     player.inventory.items[0]={1,0,1};
     for(int x=0;x<4;++x) {
         planOutcomes[x]=true;
@@ -723,7 +732,7 @@ int main() {
     // A failed native virtual call NEVER falls through to the manual legacy
     // packet (otherwise failed attempts could double-place).
     reset(player);
-    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
     player.inventory.items[0]={1,0,5};
     aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
     planOutcomes[0]=true;nativeBuildSucceeds=false;
@@ -735,13 +744,23 @@ int main() {
 
     // Missing GameMode is fail-closed; neither dereference nor fallback.
     reset(player);
-    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
     player.inventory.items[0]={1,0,5};
     aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
     planOutcomes[0]=true;
     player.mGameMode.value.reset();
     tickEasyPlaceImpl(player);
     check(nativeSent.empty() && sent.empty(),"missing GameMode is fail-closed");
+
+    // Floating opaque placement cannot use GameMode::buildBlock against
+    // an air support; keep the legacy synthetic click path for this case.
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    tickEasyPlaceImpl(player);
+    check(nativeSent.empty() && sent.size()==1,
+        "floating ordinary block falls back to legacy transaction");
 
     // Default 1/tick retains historical legacy transaction behaviour.
     reset(player);
@@ -757,7 +776,7 @@ int main() {
         "default one/tick retains server ItemUse transaction");
 
     // Never change selected material mid-tick.
-    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
     Block another{.name="minecraft:dirt",.states={},.mNetworkId=3,.material=2};
     player.inventory.items[0]={1,0,64};player.inventory.items[1]={2,0,64};
     planOutcomes[0]=planOutcomes[1]=true;

@@ -675,6 +675,8 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
         && !placementState().manualMode() && !placementState().rangeEnabled()
         && placementState().easyPlaceMaxPerTick() > 1
         && !target.interactionRotation
+        && target.at != target.cell
+        && !region.getBlock(target.at).isAir()
         && isFastOpaquePlacementCandidate(*target.block);
     if (useNativeBuild) {
         auto const& gameMode = player.mGameMode.get();
