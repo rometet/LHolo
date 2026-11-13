@@ -364,7 +364,7 @@ bool sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, Item
 
 // Pick which hotbar slot a backpack item should swap into. Prefer an empty slot
 // so the player's held items are never evicted, and so two materials never
-// thrash through a single slot — each lands in its own empty slot and stays
+// thrash through a single slot 窶・each lands in its own empty slot and stays
 // there (next tick it is already in the bar, no further swap). Only when the
 // hotbar is completely full do we fall back to the currently selected slot.
 int chooseHotbarSwapTarget(Player& player) {
@@ -980,7 +980,7 @@ bool placementPredictionMatches(
             && sameSerializedState(predicted, ghost, "upside_down_bit");
     }
     // A slab's top/bottom half is chosen by the click face and hit height, so it
-    // must be matched explicitly — otherwise a bottom-slab prediction (the first
+    // must be matched explicitly 窶・otherwise a bottom-slab prediction (the first
     // click candidate) can satisfy a top-slab ghost and place the wrong half.
     // Newer versions store the half as minecraft:vertical_half, older ones as
     // top_slot_bit; a double slab has neither and stays on the strict compare.
@@ -1081,7 +1081,7 @@ bool resolveOrientedPlacement(
         if (!region.getBlock(upperCell).isAir()) return false;
         // When the upper half is visible we use its hinge to verify the placement
         // exactly. When a layer cut hides it, the cell is not in the query-able
-        // virtual world (hasBlock=false) — we still place the door and let the
+        // virtual world (hasBlock=false) 窶・we still place the door and let the
         // hinge be best-effort, since one DoorItem use creates both halves anyway.
         auto const upper = projection::queryPlacementProjection(player, upperCell);
         if (upper.block && upper.missing && upper.block->getTypeName() == ghost.getTypeName()
@@ -1209,7 +1209,7 @@ bool resolveOrientedPlacement(
         // upper half itself; never use the floating/air-mPos fallback for doors.
         if (isDoor) return false;
         // A slab's half follows the click height, but this air-mPos fallback
-        // predicts from the clicked face — the two diverge (a low click for a top
+        // predicts from the clicked face 窶・the two diverge (a low click for a top
         // slab passes the predictor yet the server places the bottom half). Slabs
         // place through a real support above/beside (handled above); skip the
         // fallback so a wrong-half slab is never sent.
@@ -1557,7 +1557,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
 
-    // Single-crosshair placement: auto (轻松放置) or manual (手动放置), which are
+    // Single-crosshair placement: auto (霓ｻ譚ｾ謾ｾ鄂ｮ) or manual (謇句勘謾ｾ鄂ｮ), which are
     // mutually exclusive in the UI. Manual mode accepts the first block from
     // the press request, then repeats after the hold delay; the buildBlock hook
     // cancels vanilla placement so nothing is placed twice.
@@ -1723,6 +1723,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     }
     if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
         telemetry::count(telemetry::Event::ConnectivityAccepted);
+    telemetry::count(telemetry::Event::PlanAccepted);
 
     // Resolve the EXACT native-eligible path before changing the held item.
     // Never mix native builds with synthetic inventory transactions in a tick.
@@ -1732,6 +1733,15 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         && placement.at!=placement.cell
         && !region.getBlock(placement.at).isAir()
         && isFastOpaquePlacementCandidate(*placement.block);
+    if (!nativeCandidate) {
+        telemetry::count(telemetry::Event::CandidateLegacy);
+        if (placement.at==placement.cell
+            || region.getBlock(placement.at).isAir())
+            telemetry::count(telemetry::Event::CandidateNoSupport);
+        if (!isFastOpaquePlacementCandidate(*placement.block)) {
+            telemetry::count(telemetry::Event::CandidateNonOpaque);
+        }
+    }
     if (sentInTick>0 && nativeBurst!=nativeCandidate) return;
     if (sentInTick>0 && !nativeCandidate
         && (found.slot!=burstSlot || found.item->getIdAux()!=burstAux)) return;
@@ -1743,22 +1753,42 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         countAtStart[found.slot]=swapCount(*found.item);
         auxAtStart[found.slot]=found.item->getIdAux();
     }
-    if (auxAtStart[found.slot]!=found.item->getIdAux()) return;
+    if (auxAtStart[found.slot]!=found.item->getIdAux()) {
+        telemetry::count(telemetry::Event::AuxChanged);
+        return;
+    }
     int const predictedCount=detail::burstPacketStackCount(
         countAtStart[found.slot],swapCount(*found.item),
         sentPerSlot[found.slot]);
-    if (predictedCount==0) return;
+    if (predictedCount==0) {
+        telemetry::count(telemetry::Event::CountBudgetZero);
+        return;
+    }
 
     if (player->getSelectedItemSlot()!=found.slot) {
         // Native prediction reads the real selected slot, not a forged item
         // descriptor. Keep client selection and ordered BDS equipment message
         // synchronized before every material change, even inside one tick.
         player->setSelectedSlot(found.slot);
-        if (nativeCandidate) {
-            if (!sendEquipmentBeforeNativeBuild(*player,found.slot,*found.item)) return;
+        telemetry::count(telemetry::Event::SelectedSlotChanged);
+        // Synchronize the selected slot in all automatic modes, including
+        // legacy fallback. Native same-tick builds can immediately follow
+        // equipment; nonnative paths must wait for the next tick.
+        if (nativeCandidate || !manualPlacement) {
+            if (!sendEquipmentBeforeNativeBuild(*player,found.slot,*found.item)) {
+                telemetry::count(telemetry::Event::EquipmentFailed);
+                return;
+            }
+            telemetry::count(telemetry::Event::EquipmentSent);
             if (client->getLocalPlayer()!=player
-                || player->getSelectedItemSlot()!=found.slot) return;
-        } else if (!manualPlacement || placement.requireNativeRotationSync) {
+                || player->getSelectedItemSlot()!=found.slot) {
+                telemetry::count(telemetry::Event::SelectedSlotMismatch);
+                return;
+            }
+        }
+        if (!nativeCandidate && (!manualPlacement
+            || placement.requireNativeRotationSync)) {
+            telemetry::count(telemetry::Event::LegacySlotDeferred);
             return;
         }
     }
@@ -1767,6 +1797,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     ItemStack packetItem=*found.item;
     if (!nativeCandidate && sentPerSlot[found.slot]>0)
         setBurstPacketItemCount(packetItem,predictedCount);
+    telemetry::count(telemetry::Event::BeforeDispatch);
     auto const submit = placeBlock(*player, placement, found.slot, packetItem);
     // Queued rotations will mark the cell only in the actual native
     // forwarding hook; the pending manual press remains open meanwhile.

@@ -786,6 +786,27 @@ int main() {
     check(nativeSent.empty() && sent.size()==1,
         "floating ordinary block falls back to legacy transaction");
 
+    // A nonnative/floating target must still send a real equipment change
+    // and then attempt legacy placement on the following tick. Previously
+    // the automatic mode changed the slot locally but returned with no
+    // equipment packet; BDS could keep the old (stone) item indefinitely.
+    {
+        reset(player);
+        state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[1]={1,0,4};
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+        planOutcomes[0]=true;
+        tickEasyPlaceImpl(player);
+        check(sent.empty() && nativeSent.empty()
+            && fixtureWireOrder==std::vector<std::pair<std::string,int>>(
+                 {{"equip",1}}),
+            "nonnative automatic slot change sends equipment before deferring");
+        fixtureTime=1050;
+        tickEasyPlaceImpl(player);
+        check(sent.size()==1 && nativeSent.empty() && player.selected==1,
+            "nonnative deferred cell is sent with correct selected item next tick");
+    }
+
     // Default 1/tick retains historical legacy transaction behaviour.
     reset(player);
     state.setEnabled(true);state.setEasyPlaceMaxPerTick(1);

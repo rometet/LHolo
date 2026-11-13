@@ -126,7 +126,10 @@ LL_TYPE_INSTANCE_HOOK(
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
                 "over4ms[tick,ray,plan]={}/{}/{} "
                 "nativeAttempt={} nativeTrue={} nativeFalse={} nativeMissing={} "
-                "burstSecond={} burstThird={} burstFourth={}",
+                "burstSecond={} burstThird={} burstFourth={} "
+                "planOK={} legacy={} noSupport={} nonOpaque={} noStates={} "
+                "budgetZero={} auxChanged={} selectedChanged={} equipmentSent={} "
+                "equipmentFailed={} selectMismatch={} legacyDeferred={} beforeDispatch={}",
                 stats->count(E::Tick),stats->count(E::Auto),
                 stats->count(E::Manual),stats->count(E::Range),
                 stats->count(E::NoTarget),stats->count(E::NoMaterial),
@@ -148,7 +151,19 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::NativeAttempt),stats->count(E::NativeReturnedTrue),
                 stats->count(E::NativeReturnedFalse),stats->count(E::NativeNoGameMode),
                 stats->count(E::BurstSecond),stats->count(E::BurstThird),
-                stats->count(E::BurstFourth)
+                stats->count(E::BurstFourth),
+                stats->count(E::PlanAccepted),stats->count(E::CandidateLegacy),
+                stats->count(E::CandidateNoSupport),
+                stats->count(E::CandidateNonOpaque),
+                stats->count(E::CandidateStatesMissing),
+                stats->count(E::CountBudgetZero),
+                stats->count(E::AuxChanged),
+                stats->count(E::SelectedSlotChanged),
+                stats->count(E::EquipmentSent),
+                stats->count(E::EquipmentFailed),
+                stats->count(E::SelectedSlotMismatch),
+                stats->count(E::LegacySlotDeferred),
+                stats->count(E::BeforeDispatch)
             );
         }
     }, [](char const* reason) noexcept {
