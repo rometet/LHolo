@@ -33,7 +33,7 @@ namespace lholo::place::detail {
 // columnDepth=1 preserves the existing single-cell behaviour.
 template <class Eligible>
 [[nodiscard]] int firstEligibleBottomUpColumnOffset(int columnDepth, Eligible&& eligible) {
-    int const depth = (std::clamp)(columnDepth, 1, 4);
+    int const depth = (std::clamp)(columnDepth, 1, 8);
     for (int offset = depth - 1; offset >= 0; --offset) {
         if (eligible(offset)) return offset;
     }

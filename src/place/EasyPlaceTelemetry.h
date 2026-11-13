@@ -18,7 +18,7 @@ enum class Event : std::size_t {
     StairQueued, StairPlanRejected, StairRotationDrift,
     InventorySwapBlocked, InventorySwapResolved,
     NativeAttempt, NativeReturnedTrue, NativeReturnedFalse, NativeNoGameMode,
-    BurstSecond, BurstThird, BurstFourth,
+    BurstSecond, BurstThird, BurstFourth, BurstEighth,
     PlanAccepted, CandidateLegacy, CandidateNoSupport,
     CandidateNonOpaque, CandidateStatesMissing,
     CountBudgetZero, AuxChanged, SelectedSlotChanged,

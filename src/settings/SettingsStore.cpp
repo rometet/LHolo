@@ -315,8 +315,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(
             settings.manualPlacementAllowedItems).value_or(std::vector<std::string>{})},
         {"placementRadius", settings.placementRadius},
-        {"easyPlaceColumnDepth", std::clamp(settings.easyPlaceColumnDepth, 1, 4)},
-        {"easyPlaceMaxPerTick", std::clamp(settings.easyPlaceMaxPerTick, 1, 4)},
+        {"easyPlaceColumnDepth", std::clamp(settings.easyPlaceColumnDepth, 1, 8)},
+        {"easyPlaceMaxPerTick", std::clamp(settings.easyPlaceMaxPerTick, 1, 8)},
         {"autoPlacementBreakCooldownSeconds", settings.autoPlacementBreakCooldownSeconds},
         {"hudEnabled", settings.hudEnabled},
         {"hudShowFileName", settings.hudShowFileName},

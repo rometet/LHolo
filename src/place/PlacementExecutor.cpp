@@ -547,7 +547,7 @@ std::optional<ProjectionTarget> findProjectionTarget(
 
     // An aimed upper ghost (or an already built upper anchor) identifies ONE
     // X/Z column.  Unlike the previous top-first implementation, scan the
-    // eligible 1..4 cells from BOTTOM TO TOP.  Never retarget other columns:
+    // eligible 1..8 cells from BOTTOM TO TOP.  Never retarget other columns:
     // only the exact visible aimed cell can open this hidden-layer lookup.
     // Recently transmitted cells are pending, not server acknowledgements;
     // skip those to allow a bounded same-tick burst without duplicate sends.
@@ -796,7 +796,7 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     auto client = ll::service::getClientInstance();
     if (!client) return detail::PlacementDispatchResult::Rejected;
     auto& sender = client->getPacketSender();
-    // Only the experimental 2..4/tick path changes the wire protocol.
+    // Only the experimental 2..8/tick path changes the wire protocol.
     // A true vanilla start/use/stop action is more likely to be recognized by
     // BDS than extra independent ItemUse packets with no use lifecycle.
     bool const bdsLifecycle = placementState().enabled()
@@ -1830,6 +1830,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     if (sentInTick == 2) telemetry::count(telemetry::Event::BurstSecond);
     else if (sentInTick == 3) telemetry::count(telemetry::Event::BurstThird);
     else if (sentInTick == 4) telemetry::count(telemetry::Event::BurstFourth);
+    else if (sentInTick == 8) telemetry::count(telemetry::Event::BurstEighth);
     // Manual repeat bookkeeping: record this placement and mark the current
     // press as having placed its first block (so holding then auto-repeats).
     placementState().setLastManualPlaceAt(now);

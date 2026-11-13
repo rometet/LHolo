@@ -1331,8 +1331,8 @@ void loadSettings() {
         place::setRangeEnabled(false);
         place::setManualPlacementAllowedItems(settings.manualPlacementAllowedItems);
         place::setPlacementRadius(std::clamp(settings.placementRadius, 1, 4));
-        place::setEasyPlaceColumnDepth(std::clamp(settings.easyPlaceColumnDepth, 1, 4));
-        place::setEasyPlaceMaxPerTick(std::clamp(settings.easyPlaceMaxPerTick, 1, 4));
+        place::setEasyPlaceColumnDepth(std::clamp(settings.easyPlaceColumnDepth, 1, 8));
+        place::setEasyPlaceMaxPerTick(std::clamp(settings.easyPlaceMaxPerTick, 1, 8));
         place::setAutoPlacementBreakCooldownSeconds(
             std::clamp(settings.autoPlacementBreakCooldownSeconds, 0, 60)
         );

@@ -47,6 +47,23 @@ int runMcstructureInputTests() try {
     check(expected.size() == 322 && expected.starts_with(std::string_view{"\x0a\0\0", 3}),
         "fixture contains a complete little-endian compound root");
     check(expected.find("minecraft:smooth_stone") != std::string::npos, "native palette survives decoding");
+    // Eight-high four-material wall used for the dedicated BDS acceptance run.
+    // Native little-endian NBT must survive exactly; the palette is unchanged
+    // from the prior 4x4 server-verified wall.
+    auto const mixed = fixture("LHolo_Mixed_Wall_8x8_8perTick.mcstructure");
+    check(mixed.size()==706 && mixed.starts_with(std::string_view{"\x0a\0\0",3}),
+        "mixed 8x8 fixture contains complete little-endian root NBT");
+    for(auto const type: {"minecraft:cobbled_deepslate",
+                           "minecraft:polished_blackstone_bricks",
+                           "minecraft:stone_bricks","minecraft:andesite"})
+        check(mixed.find(type)!=std::string::npos,
+            "8x8 native palette contains each of four mixed materials");
+    auto const packedMixed=compress(mixed);
+    error.clear();
+    auto const restored=inflateMcstructureTag(packedMixed,mixed.size(),error);
+    check(restored && *restored==mixed,
+        "8x8 native mixed material structure roundtrips exactly");
+
 
     auto reject = [&](std::string const& bytes, std::size_t limit, char const* message) {
         error.clear();

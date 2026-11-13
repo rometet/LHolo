@@ -253,12 +253,12 @@ void applyStructureMenuModel(MenuModel const& model, float effectiveUiScale) {
     (void)place::applyPlacementModes({model.easyPlaceEnabled, model.manualPlace,
         model.rangeEnabled, model.placementModesRevision});
     changed = place::setManualPlacementAllowedItems(model.manualPlacementAllowedItems) || changed;
-    auto const maxPerTick = std::clamp(model.easyPlaceMaxPerTick, 1, 4);
+    auto const maxPerTick = std::clamp(model.easyPlaceMaxPerTick, 1, 8);
     if (place::getEasyPlaceMaxPerTick() != maxPerTick) {
         place::setEasyPlaceMaxPerTick(maxPerTick);
         changed = true;
     }
-    auto const columnDepth = std::clamp(model.easyPlaceColumnDepth, 1, 4);
+    auto const columnDepth = std::clamp(model.easyPlaceColumnDepth, 1, 8);
     if (place::getEasyPlaceColumnDepth() != columnDepth) {
         place::setEasyPlaceColumnDepth(columnDepth);
         changed = true;

@@ -144,7 +144,13 @@ void testEasyPlaceBurstPolicy() {
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int){return false;})==-1);
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(1,[](int o){return o==0;})==0);
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(0,[](int o){return o==0;})==0);
-    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==4;})==-1);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==8;})==-1);
+    std::vector<int> deepOrder;
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[&](int offset) {
+        deepOrder.push_back(offset);return offset==2;
+    })==2 && deepOrder==std::vector<int>({7,6,5,4,3,2}));
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[](int o){return o==7;})==7);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[](int o){return o==0;})==0);
 }
 
 void testEasyPlaceColumnLookup() {
@@ -182,7 +188,17 @@ void testEasyPlaceColumnLookup() {
     state.setEasyPlaceColumnDepth(0);
     LHOLO_CHECK(state.easyPlaceColumnDepth() == 1);
     state.setEasyPlaceColumnDepth(100);
-    LHOLO_CHECK(state.easyPlaceColumnDepth() == 4);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 8);
+    state.setEasyPlaceColumnDepth(8);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 8);
+    auto const savedMax=state.easyPlaceMaxPerTick();
+    state.setEasyPlaceMaxPerTick(8);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 8);
+    state.setEasyPlaceMaxPerTick(100);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 8);
+    state.setEasyPlaceMaxPerTick(0);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 1);
+    state.setEasyPlaceMaxPerTick(savedMax);
     state.setEasyPlaceColumnDepth(original);
 }
 

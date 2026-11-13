@@ -126,7 +126,7 @@ LL_TYPE_INSTANCE_HOOK(
                 "usAvgMax[tick]={}/{} usAvgMax[ray]={}/{} usAvgMax[plan]={}/{} "
                 "over4ms[tick,ray,plan]={}/{}/{} "
                 "nativeAttempt={} nativeTrue={} nativeFalse={} nativeMissing={} "
-                "burstSecond={} burstThird={} burstFourth={} "
+                "burstSecond={} burstThird={} burstFourth={} burstEighth={} "
                 "planOK={} legacy={} noSupport={} nonOpaque={} noStates={} "
                 "budgetZero={} auxChanged={} selectedChanged={} equipmentSent={} "
                 "equipmentFailed={} selectMismatch={} legacyDeferred={} beforeDispatch={}",
@@ -151,7 +151,7 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::NativeAttempt),stats->count(E::NativeReturnedTrue),
                 stats->count(E::NativeReturnedFalse),stats->count(E::NativeNoGameMode),
                 stats->count(E::BurstSecond),stats->count(E::BurstThird),
-                stats->count(E::BurstFourth),
+                stats->count(E::BurstFourth),stats->count(E::BurstEighth),
                 stats->count(E::PlanAccepted),stats->count(E::CandidateLegacy),
                 stats->count(E::CandidateNoSupport),
                 stats->count(E::CandidateNonOpaque),

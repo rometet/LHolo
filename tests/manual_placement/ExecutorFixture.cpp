@@ -908,6 +908,70 @@ int main() {
             "hotbar changes are bounded and match final selected material");
     }
 
+    // Eight high: use the unchanged native GameMode and production DDA
+    // scheduler, not a synthetic eight-event counter. Full eight-cell
+    // column is sent bottom-up, with mixed materials equipped before builds.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceMaxPerTick(8);state.setEasyPlaceColumnDepth(8);
+        fixtureRealSupportForNative=true;useActualRay=true;
+        Block deepslate{.name="minecraft:cobbled_deepslate",
+            .states={},.mNetworkId=23,.material=3};
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=22,.material=2};
+        Block bricks{.name="minecraft:stone_bricks",
+            .states={},.mNetworkId=24,.material=4};
+        std::array<Block const*,4> palette{{&stone,&blackstone,&bricks,&deepslate}};
+        for(int slot=0;slot<4;++slot)
+            player.inventory.items[slot]={slot+1,0,16};
+        // Top face is the user's visible anchor; only cells at X=2/Z=4
+        // may be selected, never neighboring X=3 even with ample budget.
+        player.eye={2.5f,71.5f,1.5f};
+        player.view={0,0,1};player.reach=5;
+        for(int y=64;y<=71;++y) {
+            auto const* block=palette[static_cast<std::size_t>((y-64)%4)];
+            projection::columnBlocks[{2,y,4}]=block;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        projection::candidates={{2,71,4,palette[3]}};
+        planOutcomes[2]=true;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==8 && sent.empty(),
+            "8-depth wall sends eight native full-block builds in one client tick");
+        if(nativeSent.size()==8) {
+            bool ordered=true;
+            for(int i=0;i<8;++i)
+                ordered &= nativeSent[i].pos==BlockPos{2,64+i,5}
+                    && nativeSent[i].time==1000;
+            check(ordered,"eight mixed blocks remain bottom-up within one column");
+        }
+        std::vector<std::pair<std::string,int>> expected{{"build",0}};
+        for(int i=1;i<8;++i){
+            auto const slot=std::array<int,4>{0,1,3,2}[i%4];
+            expected.emplace_back("equip",slot);
+            expected.emplace_back("build",slot);
+        }
+        check(fixtureWireOrder==expected && fixtureSuppliesSelectCalls==7,
+            "eight-material sequence publishes seven ordered equipment updates");
+        check(player.inventory.items[0].count==16
+            && player.inventory.items[3].count==16,
+            "eight-build burst never directly mutates survival item counts");
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceMaxPerTick(4);state.setEasyPlaceColumnDepth(8);
+        fixtureRealSupportForNative=true;useActualRay=true;
+        player.inventory.items[0]={1,0,16};
+        player.eye={2.5f,71.5f,1.5f};player.view={0,0,1};player.reach=5;
+        projection::candidates={{2,71,4,&stone}};
+        for(int y=64;y<=71;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        planOutcomes[2]=true;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==4,
+            "four-per-tick setting caps eight-high schematic to four builds");
+    }
+
     // A one-item stack cannot be spent twice even if selected away and back
     // to it within a burst. No speculative inventory count mutation.
     {

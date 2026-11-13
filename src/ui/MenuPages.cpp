@@ -788,7 +788,7 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
             i18n::tr(i18n::TextKey::LabelEasyPlaceMaxPerTick),
             model.easyPlaceMaxPerTick,
             1,
-            4,
+            8,
             metrics
         );
         ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintEasyPlaceMaxPerTick));
@@ -797,7 +797,7 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
             i18n::tr(i18n::TextKey::LabelEasyPlaceColumnDepth),
             model.easyPlaceColumnDepth,
             1,
-            4,
+            8,
             metrics
         );
         ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintEasyPlaceColumnDepth));
