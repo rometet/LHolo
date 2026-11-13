@@ -607,6 +607,9 @@ std::optional<ProjectionTarget> findProjectionTarget(
     return std::nullopt;
 }
 
+// Predeclared: fast opaque classification is defined below the send path.
+bool isFastOpaquePlacementCandidate(Block const& block);
+
 // BDS item-use lifecycle staging. Vanilla 1.26.51 captures pair a
 // StartItemUseOn action with ItemUse and send StopItemUseOn ~150ms later.
 // The older direct inventory transaction remains the default for 1/tick.
@@ -626,11 +629,11 @@ void sendBdsUseAction(PacketSender& sender, ActorRuntimeID id,
                       BlockPos const& resultPos, int face) {
     PlayerActionPacket packet;
     packet.mRuntimeId.get() = id;
-    packet.mAction.get() = action;
+    packet.mAction = action;
     packet.mPos.get() = pos;
     packet.mResultPos.get() = resultPos;
-    packet.mFace.get() = face;
-    packet.mIsFromServerPlayerMovementSystem.get() = false;
+    packet.mFace = face;
+    packet.mIsFromServerPlayerMovementSystem = false;
     sender.sendToServer(packet);
 }
 void flushPendingBdsUseStops(LocalPlayer& player, PacketSender& sender) {
