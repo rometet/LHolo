@@ -38,7 +38,6 @@
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
 #include "place/EasyPlaceBurstPolicy.h"
-#include "place/EasyPlaceSweepPolicy.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionTransparentOrder.h"
@@ -146,21 +145,6 @@ void testEasyPlaceBurstPolicy() {
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(1,[](int o){return o==0;})==0);
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(0,[](int o){return o==0;})==0);
     LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==4;})==-1);
-    using lholo::place::detail::easyPlaceFloorOffsets;
-    using lholo::place::detail::easyPlaceFloorFace;
-    using lholo::place::detail::easyPlaceOffsetFits;
-    auto const forward=easyPlaceFloorOffsets(1.f,1.f);
-    auto const reverse=easyPlaceFloorOffsets(-1.f,-1.f);
-    LHOLO_CHECK(forward[0]==lholo::place::detail::FloorOffset({0,0}));
-    LHOLO_CHECK(forward[1]==lholo::place::detail::FloorOffset({1,0}));
-    LHOLO_CHECK(forward[2]==lholo::place::detail::FloorOffset({0,1}));
-    LHOLO_CHECK(forward[3]==lholo::place::detail::FloorOffset({1,1}));
-    LHOLO_CHECK(reverse[3]==lholo::place::detail::FloorOffset({-1,-1}));
-    LHOLO_CHECK(easyPlaceFloorFace(0)&&easyPlaceFloorFace(1));
-    LHOLO_CHECK(!easyPlaceFloorFace(2)&&!easyPlaceFloorFace(5));
-    LHOLO_CHECK(!easyPlaceOffsetFits((std::numeric_limits<int>::max)(),1));
-    LHOLO_CHECK(!easyPlaceOffsetFits((std::numeric_limits<int>::min)(),-1));
-    LHOLO_CHECK(easyPlaceOffsetFits(2,-1));
 }
 
 void testEasyPlaceColumnLookup() {

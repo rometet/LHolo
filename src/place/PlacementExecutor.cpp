@@ -24,7 +24,6 @@
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementDispatchResult.h"
 #include "place/EasyPlaceBurstPolicy.h"
-#include "place/EasyPlaceSweepPolicy.h"
 #include "place/EasyPlaceTelemetry.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
@@ -45,6 +44,7 @@
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/network/PacketSender.h"
 #include "mc/network/packet/InventoryTransactionPacket.h"
+#include "mc/network/packet/MobEquipmentPacket.h"
 #include "mc/network/packet/PlayerActionPacket.h"
 #include "mc/world/Facing.h"
 #include "mc/world/gamemode/GameMode.h"
@@ -76,6 +76,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -391,6 +392,21 @@ void preselectPendingEmptyHotbarSlot(Player& player,int hotbarSlot) {
     player.setSelectedSlot(hotbarSlot);
 }
 
+// The Bedrock client sends MobEquipment (not PlayerHotbar) when the hotbar
+// selection changes. Explicitly publish the selected item BEFORE the native
+// build call for this experimental mixed-material same-tick sequence. The
+// server remains authoritative; this is a transmission, not an acceptance.
+bool sendEquipmentBeforeNativeBuild(LocalPlayer& player, int slot, ItemStack const& item) {
+    auto client=ll::service::getClientInstance();
+    if (!client || client->getLocalPlayer()!=&player
+        || slot<0 || slot>=kHotbarSlots || item.isNull()) return false;
+    MobEquipmentPacket packet(MobEquipmentPacketPayload(
+        player.getRuntimeID(),item,slot,slot,ContainerID::Inventory
+    ));
+    client->getPacketSender().sendToServer(packet);
+    return true;
+}
+
 // Inventory acknowledgements are observed through both local slot images. A
 // completed swap may unlock the next material immediately rather than waiting
 // out the former unconditional 200ms throttle. A missing/rejected response
@@ -529,44 +545,10 @@ std::optional<ProjectionTarget> findProjectionTarget(
             if (recentlyPlaced(cell, GetTickCount64())) return false;
             auto const query = projection::queryEasyPlaceColumnCell(player, cell);
             if (!query.block || !query.missing) return false;
-            if (findItemSlot(player,*query.block).slot<0) return false;
             selected = selectPlacementTarget(region, cell, dir, query.block);
             return true;
         });
         return chosenOffset >= 0 ? selected : std::nullopt;
-    };
-
-    // A vertical ray into the visible floor patch fixes the XZ anchor and
-    // limits placement to a 2x2 footprint on that SAME, visible Y layer.
-    // Preserve selected-slot batches for mixed materials: select all
-    // available matching cells first, change to another slot only between
-    // ticks, and skip missing materials rather than blocking the whole patch.
-    auto const selectFloorPatch = [&](BlockPos const& anchor)
-        -> std::optional<ProjectionTarget> {
-        if (columnDepth <= 1) return std::nullopt;
-        auto const offsets = detail::easyPlaceFloorOffsets(dir.x, dir.z);
-        auto const selectedSlot = player.getSelectedItemSlot();
-        std::optional<ProjectionTarget> fallback;
-        for (int i = 0; i < columnDepth && i < 4; ++i) {
-            auto const& o=offsets[static_cast<std::size_t>(i)];
-            if (!detail::easyPlaceOffsetFits(anchor.x,o[0])
-                || !detail::easyPlaceOffsetFits(anchor.z,o[1])) continue;
-            BlockPos const cell{anchor.x+o[0],anchor.y,anchor.z+o[1]};
-            if (recentlyPlaced(cell,GetTickCount64())
-                || !region.getBlock(cell).isAir()) continue;
-            // Visible-layer query: never place hidden floors / side slices.
-            auto const query=projection::queryPlacementProjection(player,cell);
-            if (!query.block || !query.missing) continue;
-            auto const material=findItemSlot(player,*query.block);
-            if (material.slot<0) continue;
-            auto const planned=selectPlacementTarget(region,cell,dir,query.block);
-            // The crosshair cell takes priority when it is still missing
-            // and its material exists. Never surprise the user by starting
-            // on a different adjacent material merely because it is held.
-            if (i==0 || material.slot==selectedSlot) return planned;
-            if (!fallback) fallback=planned;
-        }
-        return fallback;
     };
 
     auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
@@ -610,9 +592,7 @@ std::optional<ProjectionTarget> findProjectionTarget(
             BlockPos const neighbor = neighborOf(cell, entryFace);
             auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
-                if (detail::easyPlaceFloorFace(entryFace)) {
-                    if (auto floor=selectFloorPatch(neighbor)) return floor;
-                } else if (auto lower=selectColumnBottomUp(neighbor)) return lower;
+                if (auto lower = selectColumnBottomUp(neighbor)) return lower;
                 if (!recentlyPlaced(neighbor, GetTickCount64()))
                     return ProjectionTarget{neighbor, cell, entryFace, query.block};
             }
@@ -626,9 +606,7 @@ std::optional<ProjectionTarget> findProjectionTarget(
                     || (detail::isVanillaConnectivityPlacementBlock(top.block->getTypeName())
                         && placedTop.getTypeName() == top.block->getTypeName()
                         && manualSerializedPlacementMatches(placedTop, *top.block)))) {
-                    if (detail::easyPlaceFloorFace(entryFace)) {
-                        if (auto floor=selectFloorPatch(cell)) return floor;
-                    } else if (auto lower=selectColumnBottomUp(cell)) return lower;
+                    if (auto lower = selectColumnBottomUp(cell)) return lower;
                 }
             }
             break;
@@ -639,9 +617,7 @@ std::optional<ProjectionTarget> findProjectionTarget(
         // An aimed upper ghost stays the anchor even after sending the lower
         // cells.  The next burst slot advances bottom-up instead of treating
         // the freshly sent top cell as the only reachable target.
-        if (detail::easyPlaceFloorFace(entryFace)) {
-            if (auto floor=selectFloorPatch(cell)) return floor;
-        } else if (auto lower=selectColumnBottomUp(cell)) return lower;
+        if (auto lower = selectColumnBottomUp(cell)) return lower;
         if (!recentlyPlaced(cell, GetTickCount64()))
             return selectPlacementTarget(region, cell, dir, query.block);
     }
@@ -1616,15 +1592,20 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
 
-    // A vanilla-style bounded burst retries the fresh projected ray after
-    // each successful send, rather than sending the same cell repeatedly.
-    // Manual and Range remain deliberately single-send; inventory swaps or
-    // native rotation queues never execute inside a multi-placement batch.
+    // The aimed Y column is rescanned after each accepted native submission.
+    // Mixed full-block hotbar slots may switch within the SAME client tick via
+    // ordered MobEquipment -> GameMode::buildBlock transmissions. Inventory
+    // backpack swaps and native rotation queues remain single-send only.
     int const maxPerTick = manualPlacement ? 1 : placementState().easyPlaceMaxPerTick();
     int sentInTick = 0;
     int burstSlot = -1;
     int burstAux = -1;
-    int initialStackCount = 0;
+    bool nativeBurst = false;
+    std::array<int,kHotbarSlots> countAtStart;
+    std::array<int,kHotbarSlots> auxAtStart;
+    std::array<int,kHotbarSlots> sentPerSlot{};
+    countAtStart.fill(-1);
+    auxAtStart.fill(-1);
     for (int attempt = 0; attempt < maxPerTick; ++attempt) {
         if (attempt != 0) {
             // Packet sending can dispatch callbacks/reentrant state changes.
@@ -1632,9 +1613,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
             if (!placementState().enabled() || placementState().manualMode()
                 || placementState().rangeEnabled() || !client->isInGameInputEnabled()
                 || structure::isGuiVisible() || client->getLocalPlayer() != player) return;
-            // A previous item must have been physically transmitted, and the
-            // hand may not be changed between transactions in this burst.
-            if (sentInTick == 0 || player->getSelectedItemSlot() != burstSlot) return;
+            if (sentInTick == 0) return;
+            // A legacy connection-block burst cannot interleave hotbar items
+            // or transaction families. Native full cubes can, after explicit
+            // selected-equipment notifications and per-slot budgeting.
+            if (!nativeBurst && player->getSelectedItemSlot() != burstSlot) return;
             target = findProjectionTarget(*player, origin, dir, pickRange, columnDepth);
             if (!target) return;
         }
@@ -1660,13 +1643,16 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         telemetry::count(telemetry::Event::NoMaterial);
         return;
     }
-    // Never change material/selected slot mid-tick. The same net-ID and stack
-    // item must be used throughout a burst; all other targets wait next tick.
+    // A previous *native* full-block send permits a new hotbar material; a
+    // legacy connection/shape send retains the original single-stack rule.
     bool const simpleBurstTarget = isFastOpaquePlacementCandidate(*target->block)
         || detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName());
-    if (!detail::burstCanContinue(
-            sentInTick, found.slot == burstSlot,
-            found.item->getIdAux() == burstAux, simpleBurstTarget, false)) return;
+    if (sentInTick>0 && nativeBurst
+        && !isFastOpaquePlacementCandidate(*target->block)) return;
+    if (sentInTick>0 && !nativeBurst
+        && !detail::burstCanContinue(
+            sentInTick, found.slot==burstSlot,
+            found.item->getIdAux()==burstAux, simpleBurstTarget, false)) return;
     // R19: start the server-synchronized inventory exchange at the FIRST
     // eligible aimed game tick. The old path spent time on full native-facing
     // planning first, then swapped, discarded the plan and waited another
@@ -1738,41 +1724,58 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
         telemetry::count(telemetry::Event::ConnectivityAccepted);
 
-    if (player->getSelectedItemSlot() != found.slot) {
+    // Resolve the EXACT native-eligible path before changing the held item.
+    // Never mix native builds with synthetic inventory transactions in a tick.
+    bool const nativeCandidate = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && maxPerTick>1 && !placement.interactionRotation
+        && placement.at!=placement.cell
+        && !region.getBlock(placement.at).isAir()
+        && isFastOpaquePlacementCandidate(*placement.block);
+    if (sentInTick>0 && nativeBurst!=nativeCandidate) return;
+    if (sentInTick>0 && !nativeCandidate
+        && (found.slot!=burstSlot || found.item->getIdAux()!=burstAux)) return;
+
+    // Observe a starting quantity/identity for EACH hotbar stack. A stone ->
+    // deepslate -> stone batch cannot spend the same 1-item stack twice.
+    // Local inventory is never modified to simulate placement.
+    if (countAtStart[found.slot]<0) {
+        countAtStart[found.slot]=swapCount(*found.item);
+        auxAtStart[found.slot]=found.item->getIdAux();
+    }
+    if (auxAtStart[found.slot]!=found.item->getIdAux()) return;
+    int const predictedCount=detail::burstPacketStackCount(
+        countAtStart[found.slot],swapCount(*found.item),
+        sentPerSlot[found.slot]);
+    if (predictedCount==0) return;
+
+    if (player->getSelectedItemSlot()!=found.slot) {
+        // Native prediction reads the real selected slot, not a forged item
+        // descriptor. Keep client selection and ordered BDS equipment message
+        // synchronized before every material change, even inside one tick.
         player->setSelectedSlot(found.slot);
-        // Mixed materials require a hotbar change. Never send the first
-        // build against a newly selected slot in this very game tick:
-        // the server must see the slot update before a native placement.
-        // This applies only to automatic Easy Place; manual semantics stay.
-        if (!manualPlacement || placement.requireNativeRotationSync) return;
+        if (nativeCandidate) {
+            if (!sendEquipmentBeforeNativeBuild(*player,found.slot,*found.item)) return;
+            if (client->getLocalPlayer()!=player
+                || player->getSelectedItemSlot()!=found.slot) return;
+        } else if (!manualPlacement || placement.requireNativeRotationSync) {
+            return;
+        }
     }
-    // A native rotation needs a synchronized PlayerAuthInput slot. Never
-    // queue it after another ItemUse packet in the same game tick.
-    if (sentInTick > 0 && placement.requireNativeRotationSync) return;
+    if (sentInTick>0 && placement.requireNativeRotationSync) return;
 
-    // Each consecutive ItemUse transaction describes the predicted stack
-    // after the previous successful submission. The local inventory itself
-    // must NEVER be modified speculatively. Server echoes can update it
-    // during an integrated-server send; choose the smaller actual/predicted
-    // count in that case. No oversubscription beyond the original stack.
-    ItemStack packetItem = *found.item;
-    if (sentInTick == 0) initialStackCount = swapCount(*found.item);
-    int const predictedCount = detail::burstPacketStackCount(
-        initialStackCount, swapCount(*found.item), sentInTick);
-    if (predictedCount == 0) return;
-    if (sentInTick > 0) {
-        setBurstPacketItemCount(packetItem, predictedCount);
-    }
-
+    ItemStack packetItem=*found.item;
+    if (!nativeCandidate && sentPerSlot[found.slot]>0)
+        setBurstPacketItemCount(packetItem,predictedCount);
     auto const submit = placeBlock(*player, placement, found.slot, packetItem);
     // Queued rotations will mark the cell only in the actual native
     // forwarding hook; the pending manual press remains open meanwhile.
     if (!detail::isPlacementSent(submit)) return;
     markPlaced(placement.cell, now);
-    if (sentInTick == 0) {
-        burstSlot = found.slot;
-        burstAux = found.item->getIdAux();
-    }
+    if (sentInTick==0) nativeBurst=nativeCandidate;
+    burstSlot=found.slot;
+    burstAux=found.item->getIdAux();
+    ++sentPerSlot[found.slot];
     ++sentInTick;
     if (sentInTick == 2) telemetry::count(telemetry::Event::BurstSecond);
     else if (sentInTick == 3) telemetry::count(telemetry::Event::BurstThird);
