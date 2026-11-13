@@ -51,6 +51,7 @@
 #include "mc/world/ContainerID.h"
 #include "mc/world/actor/player/Inventory.h"
 #include "mc/world/actor/player/Player.h"
+#include "mc/world/actor/player/PlayerInventory.h"
 #include "mc/world/inventory/transaction/ComplexInventoryTransaction.h"
 #include "mc/world/inventory/transaction/InventoryAction.h"
 #include "mc/world/inventory/transaction/InventorySource.h"
@@ -390,6 +391,21 @@ void preselectPendingEmptyHotbarSlot(Player& player,int hotbarSlot) {
         || hotbarSlot==player.getSelectedItemSlot())return;
     if(!player.getInventory().getItem(hotbarSlot).isNull())return;
     player.setSelectedSlot(hotbarSlot);
+}
+
+// The canonical selected-slot field is PlayerInventory::mSelected (the
+// implementation of Player::getSelectedItemSlot() reads that field). On a
+// native client, Player::setSelectedSlot() can return without changing it;
+// the 2026-11-13 live probe counted selectMismatch=55/55. Use the actual
+// PlayerInventory::selectSlot API, then verify its result before any network
+// notification or placement. Never attempt a build using a stale item.
+bool selectActualHotbarSlot(LocalPlayer& player, int slot) {
+    if (slot<0 || slot>=kHotbarSlots) return false;
+    if (player.getSelectedItemSlot()==slot) return true;
+    auto const& supplies=player.mInventory.get();
+    if (!supplies || !supplies->selectSlot(slot,ContainerID::Inventory))
+        return false;
+    return player.getSelectedItemSlot()==slot;
 }
 
 // The Bedrock client sends MobEquipment (not PlayerHotbar) when the hotbar
@@ -1769,8 +1785,11 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         // Native prediction reads the real selected slot, not a forged item
         // descriptor. Keep client selection and ordered BDS equipment message
         // synchronized before every material change, even inside one tick.
-        player->setSelectedSlot(found.slot);
         telemetry::count(telemetry::Event::SelectedSlotChanged);
+        if (!selectActualHotbarSlot(*player,found.slot)) {
+            telemetry::count(telemetry::Event::SelectedSlotMismatch);
+            return;
+        }
         // Synchronize the selected slot in all automatic modes, including
         // legacy fallback. Native same-tick builds can immediately follow
         // equipment; nonnative paths must wait for the next tick.

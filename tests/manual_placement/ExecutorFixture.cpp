@@ -31,6 +31,8 @@ struct Vec3 { float x{},y{},z{}; };
 struct Vec2 { float x{},y{};bool operator==(Vec2 const&) const=default; };
 bool orientationProbe{},throwOnOverride{};
 int fixtureHeldSlot{};
+bool fixtureLegacySlotSetterNoop{};
+int fixtureSuppliesSelectCalls{};
 std::vector<std::pair<std::string,int>> fixtureWireOrder;
 struct BlockPos {
     int x{},y{},z{};
@@ -41,6 +43,15 @@ struct BlockPos {
 struct ActorRuntimeID { std::uint64_t rawID{}; bool operator==(ActorRuntimeID const&) const=default; };
 struct Level {};
 struct Player;
+enum class ContainerID;
+struct MockSupplies {
+    Player* owner{};
+    bool selectSlot(int slot, ContainerID container);
+};
+struct MockSuppliesStorage {
+    std::shared_ptr<MockSupplies> ptr=std::make_shared<MockSupplies>();
+    std::shared_ptr<MockSupplies>& get() { return ptr; }
+};
 enum class HandSlot : int;
 struct GameMode {
     bool buildBlock(BlockPos const& pos, uchar face, HandSlot hand, bool isSimTick);
@@ -99,9 +110,13 @@ struct Player {
     Vec3 eye{}, view{1,0,0}; float reach=4;
     Inventory inventory; int selected{}, setSlotCalls{}; BlockSource region;
     MockNativeModeStorage mGameMode;
+    MockSuppliesStorage mInventory;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
-    void setSelectedSlot(int i) { ++setSlotCalls; selected=i; fixtureHeldSlot=i; }
+    void setSelectedSlot(int i) {
+        ++setSlotCalls;
+        if (!fixtureLegacySlotSetterNoop) { selected=i; fixtureHeldSlot=i; }
+    }
     Vec3 getPosition() const { return {}; }
     Vec3 getEyePos() const { return eye; }
     Vec3 getViewVector(float) const { return view; }
@@ -176,6 +191,14 @@ Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,
 }
 template<class T> struct Field { T value{}; T& get() { return value; } };
 enum class ContainerID { Inventory };
+bool MockSupplies::selectSlot(int slot,ContainerID container) {
+    ++fixtureSuppliesSelectCalls;
+    if(!owner || container!=ContainerID::Inventory || slot<0 || slot>=9)
+        return false;
+    owner->selected=slot;fixtureHeldSlot=slot;
+    ++owner->setSlotCalls;
+    return true;
+}
 enum class InventorySourceType { ContainerInventory };
 struct InventorySource {
     enum class InventorySourceFlags { NoFlag };
@@ -485,8 +508,10 @@ void check(bool ok,char const* message) {
 using namespace lholo::place;
 void reset(Player& p) {
     placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
-    p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
-    fixtureHeldSlot=0;fixtureWireOrder.clear();
+    p=Player{};p.mInventory.get()->owner=&p;
+    fixtureClient.player=&p;fixtureClient.inputEnabled=true;
+    fixtureHeldSlot=0;fixtureLegacySlotSetterNoop=false;
+    fixtureSuppliesSelectCalls=0;fixtureWireOrder.clear();
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
     sent.clear();sentActions.clear();nativeSent.clear();nativeBuildSucceeds=true;gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
     predictionInputs.clear();suppliedPrediction=nullptr;
@@ -785,6 +810,27 @@ int main() {
     tickEasyPlaceImpl(player);
     check(nativeSent.empty() && sent.size()==1,
         "floating ordinary block falls back to legacy transaction");
+
+    // 2026-11-13 LIVE BUG: Player::setSelectedSlot can be ineffective on
+    // the client, while Player::getSelectedItemSlot reads the supplies field.
+    // Verify the REAL production helper bypasses the faulty setter and changes
+    // the exact field GameMode::buildBlock uses, even in the same tick.
+    {
+        reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+        fixtureLegacySlotSetterNoop=true;
+        fixtureRealSupportForNative=true;
+        player.inventory.items[1]={1,0,4};
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+        planOutcomes[0]=true;
+        tickEasyPlaceImpl(player);
+        check(player.selected==1 && fixtureSuppliesSelectCalls==1,
+            "real supplies selectSlot fixes broken Player setter");
+        check(nativeSent.size()==1 && sent.empty(),
+            "real supplies selection permits same-tick native build");
+        check(fixtureWireOrder==
+            std::vector<std::pair<std::string,int>>({{"equip",1},{"build",1}}),
+            "real selection precedes equipment then native build");
+    }
 
     // A nonnative/floating target must still send a real equipment change
     // and then attempt legacy placement on the following tick. Previously
