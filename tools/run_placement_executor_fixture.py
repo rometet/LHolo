@@ -20,7 +20,7 @@ parts=[section('constexpr int kHotbarSlots','std::int64_t packBlockPos'),
        section('std::int64_t packBlockPos','void consumeBrokenProjectionCells'),
        section('struct ItemFind','constexpr uchar kInvalidFace'),
        section('FailedPlanKey makeFailedPlanKey','// Server-synced slot exchange'),
-       section('detail::PlacementDispatchResult placeBlock','// Candidate click points'),
+       section('// BDS item-use lifecycle staging','// Candidate click points'),
        section('bool placementPredictionMatches','bool resolveOrientedPlacement'),
        section('void tickRangePlaceImpl','void tickEasyPlaceImpl'),
        section('void tickEasyPlaceImpl','} // namespace\n')]
