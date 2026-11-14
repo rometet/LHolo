@@ -129,7 +129,8 @@ LL_TYPE_INSTANCE_HOOK(
                 "burstSecond={} burstThird={} burstFourth={} burstEighth={} "
                 "planOK={} legacy={} noSupport={} nonOpaque={} noStates={} "
                 "budgetZero={} auxChanged={} selectedChanged={} equipmentSent={} "
-                "equipmentFailed={} selectMismatch={} legacyDeferred={} beforeDispatch={}",
+                "equipmentFailed={} selectMismatch={} legacyDeferred={} beforeDispatch={} "
+                "reachFiltered={} plannerReachReject={} predictorMismatch={}",
                 stats->count(E::Tick),stats->count(E::Auto),
                 stats->count(E::Manual),stats->count(E::Range),
                 stats->count(E::NoTarget),stats->count(E::NoMaterial),
@@ -163,7 +164,10 @@ LL_TYPE_INSTANCE_HOOK(
                 stats->count(E::EquipmentFailed),
                 stats->count(E::SelectedSlotMismatch),
                 stats->count(E::LegacySlotDeferred),
-                stats->count(E::BeforeDispatch)
+                stats->count(E::BeforeDispatch),
+                stats->count(E::ReachFiltered),
+                stats->count(E::PlannerReachRejected),
+                stats->count(E::PlannerPredictionMismatch)
             );
         }
     }, [](char const* reason) noexcept {

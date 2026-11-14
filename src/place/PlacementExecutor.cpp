@@ -545,6 +545,54 @@ std::optional<ProjectionTarget> findProjectionTarget(
     if (!rayOrigin) return std::nullopt;
     auto& region = player.getDimensionBlockSource();
 
+    // An 8-high wall can straddle the reach boundary. The old chooser
+    // always selected the lowest missing cell even when EVERY real support
+    // click was outside vanilla pickRange. The planner would then reject it
+    // forever and none of the higher reachable blocks would be attempted.
+    // This applies only to the opted-in deeper-than-four scan. It evaluates
+    // the SAME center/quarter click points used by the real planner,
+    // without relaxing official placement or orientation checks.
+    auto const reachableSupportedCell = [&](BlockPos const& cell) {
+        float const reachSq = maxDist * maxDist;
+        auto const within = [&](Vec3 const& pos) {
+            float const dx = pos.x - origin.x;
+            float const dy = pos.y - origin.y;
+            float const dz = pos.z - origin.z;
+            return dx * dx + dy * dy + dz * dz <= reachSq;
+        };
+        float const cx=static_cast<float>(cell.x)+0.5f;
+        float const cy=static_cast<float>(cell.y);
+        float const cz=static_cast<float>(cell.z)+0.5f;
+        for (uchar sf=0;sf<6;++sf) {
+            if (region.getBlock(neighborOf(cell,sf)).isAir()) continue;
+            switch (static_cast<Facing::Name>(sf)) {
+            case Facing::Name::Down:
+                if (within({cx,cy,cz})) return true;
+                break;
+            case Facing::Name::Up:
+                if (within({cx,cy+1.f,cz})) return true;
+                break;
+            case Facing::Name::North:
+            case Facing::Name::South: {
+                float const z=static_cast<Facing::Name>(sf)==Facing::Name::North
+                    ? static_cast<float>(cell.z) : static_cast<float>(cell.z)+1.f;
+                if (within({cx,cy+0.25f,z})
+                    || within({cx,cy+0.75f,z})) return true;
+                break;
+            }
+            case Facing::Name::West:
+            case Facing::Name::East: {
+                float const x=static_cast<Facing::Name>(sf)==Facing::Name::West
+                    ? static_cast<float>(cell.x) : static_cast<float>(cell.x)+1.f;
+                if (within({x,cy+0.25f,cz})
+                    || within({x,cy+0.75f,cz})) return true;
+                break;
+            }
+            }
+        }
+        return false;
+    };
+
     // An aimed upper ghost (or an already built upper anchor) identifies ONE
     // X/Z column.  Unlike the previous top-first implementation, scan the
     // eligible 1..8 cells from BOTTOM TO TOP.  Never retarget other columns:
@@ -561,6 +609,12 @@ std::optional<ProjectionTarget> findProjectionTarget(
             if (recentlyPlaced(cell, GetTickCount64())) return false;
             auto const query = projection::queryEasyPlaceColumnCell(player, cell);
             if (!query.block || !query.missing) return false;
+            // Let a reachable higher cell proceed when the bottommost cell
+            // is too far away, instead of returning PlanRejected every tick.
+            if (columnDepth > 4 && !reachableSupportedCell(cell)) {
+                telemetry::count(telemetry::Event::ReachFiltered);
+                return false;
+            }
             selected = selectPlacementTarget(region, cell, dir, query.block);
             return true;
         });
@@ -1119,7 +1173,10 @@ bool resolveOrientedPlacement(
         // Stairs must click a REAL support block, not the synthetic air-mPos
         // fallback: unsupported air interactions can resolve a different half.
         if (strictStairs && at == cell) return false;
-        if (!isWithinPlacementReach(context, clickPos)) return false;
+        if (!isWithinPlacementReach(context, clickPos)) {
+            telemetry::count(telemetry::Event::PlannerReachRejected);
+            return false;
+        }
 
         // Mirror the official use-on chain: `at` is the block being clicked,
         // matching GameMode::useItemOn(... at, face, hit ...) and the
@@ -1136,7 +1193,10 @@ bool resolveOrientedPlacement(
         Block const& predicted = ghost.getBlockType().getPlacementBlock(
             player, cell, face, relativeClick, itemAux
         );
-        if (!placementPredictionMatches(predicted, ghost, expectedDoorUpper)) return false;
+        if (!placementPredictionMatches(predicted, ghost, expectedDoorUpper)) {
+            telemetry::count(telemetry::Event::PlannerPredictionMismatch);
+            return false;
+        }
 
         result = ProjectionTarget{cell, at, face, &ghost, clickPos};
         return true;

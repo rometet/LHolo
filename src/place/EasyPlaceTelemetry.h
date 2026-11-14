@@ -23,7 +23,8 @@ enum class Event : std::size_t {
     CandidateNonOpaque, CandidateStatesMissing,
     CountBudgetZero, AuxChanged, SelectedSlotChanged,
     EquipmentSent, EquipmentFailed, SelectedSlotMismatch,
-    LegacySlotDeferred, BeforeDispatch,
+    LegacySlotDeferred, BeforeDispatch, ReachFiltered,
+    PlannerReachRejected, PlannerPredictionMismatch,
     Count
 };
 

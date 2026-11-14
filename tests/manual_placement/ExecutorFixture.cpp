@@ -908,6 +908,40 @@ int main() {
             "hotbar changes are bounded and match final selected material");
     }
 
+    // 8-high live failure (2026-11-14): ray found projected materials
+    // but the planner rejected the lowest unreachable cell every tick.
+    // The new selector must skip an out-of-reach bottom and choose the
+    // lowest reachable cell instead, preserving bottom-up order among those
+    // reachable.  No distance limit or server rule is relaxed.
+    {
+        reset(player);player.inventory.items[0]={1,0,64};
+        player.eye={1.5f,69.0f,2.5f};
+        player.view={0.f,0.82f,0.57f};player.reach=4.0f;
+        projection::candidates={{1,71,4,&stone}};
+        for(int y=64;y<=71;++y) {
+            projection::columnBlocks[{1,y,4}]=&stone;
+            player.region.cells[{1,y,5}]=stone;
+        }
+        auto target=findProjectionTargetActual(
+            player,player.eye,player.view,4.0f,8);
+        check(target && target->cell==BlockPos{1,66,4},
+            "eight-depth reach filter selects lowest reachable support cell");
+        auto legacy=findProjectionTargetActual(
+            player,player.eye,player.view,4.0f,4);
+        check(legacy && legacy->cell==BlockPos{1,68,4},
+            "four-depth existing bottom-up selection remains unchanged");
+        suppliedPrediction=&stone;
+        ProjectionTarget planned;
+        auto const context=makePlacementContext(player.eye,player.view,4);
+        check(!resolveOrientedPlacementActual(player,player.region,
+                context,{1,64,4},stone,0,planned),
+            "actual production planner rejects truly unreachable bottom cell");
+        check(resolveOrientedPlacementActual(player,player.region,
+                context,{1,66,4},stone,0,planned)
+            && planned.at==BlockPos{1,66,5},
+            "actual production planner accepts reachable backed cell");
+    }
+
     // Eight high: use the unchanged native GameMode and production DDA
     // scheduler, not a synthetic eight-event counter. Full eight-cell
     // column is sent bottom-up, with mixed materials equipped before builds.
@@ -926,8 +960,10 @@ int main() {
             player.inventory.items[slot]={slot+1,0,16};
         // Top face is the user's visible anchor; only cells at X=2/Z=4
         // may be selected, never neighboring X=3 even with ample budget.
-        player.eye={2.5f,71.5f,1.5f};
-        player.view={0,0,1};player.reach=5;
+        // All eight backing-face clicks are reachable from this
+        // centered, near-wall eye location at 4-block survival range.
+        player.eye={2.5f,67.62f,3.5f};
+        player.view={0.f,0.99f,0.14f};player.reach=4;
         for(int y=64;y<=71;++y) {
             auto const* block=palette[static_cast<std::size_t>((y-64)%4)];
             projection::columnBlocks[{2,y,4}]=block;
