@@ -37,6 +37,7 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "place/EasyPlaceBurstPolicy.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionTransparentOrder.h"
@@ -45,6 +46,7 @@
 #include "projection/core/LiquidReplayRules.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
+#include "projection/world/ProjectionWorldLookup.h"
 #include "render/RenderCameraPosition.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/runtime/ProjectionActivationRequests.h"
@@ -112,6 +114,92 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+void testEasyPlaceBurstPolicy() {
+    using lholo::place::detail::burstPacketStackCount;
+    using lholo::place::detail::burstCanContinue;
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 0) == 64);
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 1) == 63);
+    LHOLO_CHECK(burstPacketStackCount(64, 62, 1) == 62);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 3) == 1);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 4) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 0, 1) == 0);
+    LHOLO_CHECK(burstPacketStackCount(0, 4, 0) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, -1) == 0);
+    LHOLO_CHECK(burstCanContinue(0, false, false, false, true));
+    LHOLO_CHECK(burstCanContinue(1, true, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, false, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, false, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, false, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, true, true));
+    using lholo::place::detail::firstEligibleBottomUpColumnOffset;
+    std::vector<int> order;
+    auto const lowest=firstEligibleBottomUpColumnOffset(4,[&](int offset){
+        order.push_back(offset);return offset==2;
+    });
+    LHOLO_CHECK(lowest==2 && order==std::vector<int>({3,2}));
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==3;})==3);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int){return false;})==-1);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(1,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(0,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==8;})==-1);
+    std::vector<int> deepOrder;
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[&](int offset) {
+        deepOrder.push_back(offset);return offset==2;
+    })==2 && deepOrder==std::vector<int>({7,6,5,4,3,2}));
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[](int o){return o==7;})==7);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(8,[](int o){return o==0;})==0);
+}
+
+void testEasyPlaceColumnLookup() {
+    // Rendering remains restricted to the chosen Y layer. Only the
+    // explicitly opt-in Easy Place downward scan may query hidden layers.
+    auto loaded = std::make_shared<LoadedStructure>();
+    loaded->sizeX = 1;
+    loaded->sizeY = 4;
+    loaded->sizeZ = 1;
+    for (int y = 0; y < 4; ++y) {
+        LoadedStructure::RenderBlock block;
+        block.x = 0;
+        block.y = y;
+        block.z = 0;
+        loaded->renderBlocks.push_back(block);
+    }
+    ProjectionWorldLookup const lookup(
+        loaded, {0, 0, 0}, 0, 0,
+        lholo::structure::LayerAxis::Y,
+        lholo::structure::LayerDisplayMode::Single, 3, {}
+    );
+    LHOLO_CHECK(lookup.indexAt({0, 3, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAt({0, 2, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAt({0, 1, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 2, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 1, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 0, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAtAnyLayer({1, 2, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAtAnyLayer({0, -1, 0}).has_value());
+
+    auto& state = lholo::place::detail::PlacementState::getInstance();
+    auto const original = state.easyPlaceColumnDepth();
+    state.setEasyPlaceColumnDepth(4);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 4);
+    state.setEasyPlaceColumnDepth(0);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 1);
+    state.setEasyPlaceColumnDepth(100);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 8);
+    state.setEasyPlaceColumnDepth(8);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 8);
+    auto const savedMax=state.easyPlaceMaxPerTick();
+    state.setEasyPlaceMaxPerTick(8);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 8);
+    state.setEasyPlaceMaxPerTick(100);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 8);
+    state.setEasyPlaceMaxPerTick(0);
+    LHOLO_CHECK(state.easyPlaceMaxPerTick() == 1);
+    state.setEasyPlaceMaxPerTick(savedMax);
+    state.setEasyPlaceColumnDepth(original);
 }
 
 void testTransparentQuadSort() {
@@ -2575,6 +2663,8 @@ int main() {
     LHOLO_CHECK(runOverlayRenderingTests()==0);
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
+    testEasyPlaceBurstPolicy();
+    testEasyPlaceColumnLookup();
     testTransparentQuadSort();
     lholo::tests::runProjectedMeshSortChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runCorrectionBatchPolicyChecks([](bool ok) { LHOLO_CHECK(ok); });

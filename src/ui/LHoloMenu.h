@@ -119,6 +119,8 @@ struct MenuModel {
     int clientOnlyGrabModifiers{2};
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
+    int easyPlaceColumnDepth{1};
+    int easyPlaceMaxPerTick{1};
     int autoPlacementBreakCooldownSeconds{10};
     int offsetX{};
     int offsetY{};

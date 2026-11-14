@@ -17,6 +17,14 @@ enum class Event : std::size_t {
     ConnectivityAccepted, ConnectivityRejected,
     StairQueued, StairPlanRejected, StairRotationDrift,
     InventorySwapBlocked, InventorySwapResolved,
+    NativeAttempt, NativeReturnedTrue, NativeReturnedFalse, NativeNoGameMode,
+    BurstSecond, BurstThird, BurstFourth, BurstEighth,
+    PlanAccepted, CandidateLegacy, CandidateNoSupport,
+    CandidateNonOpaque, CandidateStatesMissing,
+    CountBudgetZero, AuxChanged, SelectedSlotChanged,
+    EquipmentSent, EquipmentFailed, SelectedSlotMismatch,
+    LegacySlotDeferred, BeforeDispatch, ReachFiltered,
+    PlannerReachRejected, PlannerPredictionMismatch,
     Count
 };
 

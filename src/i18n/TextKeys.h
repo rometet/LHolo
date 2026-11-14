@@ -185,6 +185,10 @@
     LHOLO_TEXT_KEY("hint.assistedDisabledByConsent", HintAssistedDisabledByConsent, "")                  \
     LHOLO_TEXT_KEY("hint.assistedDisabled", HintAssistedDisabled, "")                                    \
     LHOLO_TEXT_KEY("label.placementRadius", LabelPlacementRadius, "")                                    \
+    LHOLO_TEXT_KEY("label.easyPlaceColumnDepth", LabelEasyPlaceColumnDepth, "")                        \
+    LHOLO_TEXT_KEY("label.easyPlaceMaxPerTick", LabelEasyPlaceMaxPerTick, "")                          \
+    LHOLO_TEXT_KEY("hint.easyPlaceMaxPerTick", HintEasyPlaceMaxPerTick, "")                            \
+    LHOLO_TEXT_KEY("hint.easyPlaceColumnDepth", HintEasyPlaceColumnDepth, "")                          \
     LHOLO_TEXT_KEY("label.autoPlacementCooldown", LabelAutoPlacementCooldown, "")                        \
                                                                                                          \
     /* Interface settings page */                                                                        \

@@ -6,6 +6,7 @@
 #include "projection/core/ComparisonStyle.h"
 #include "place/ManualPlacementRules.h"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <atomic>
@@ -148,6 +149,16 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         }
     }
     parsed.placementRadius = json.value("placementRadius", parsed.placementRadius);
+    if (auto const count = json.find("easyPlaceMaxPerTick");
+        count != json.end() && count->is_number_integer()) {
+        parsed.easyPlaceMaxPerTick = static_cast<int>(
+            std::clamp(count->get<double>(), 1.0, 4.0));
+    }
+    if (auto const depth = json.find("easyPlaceColumnDepth");
+        depth != json.end() && depth->is_number_integer()) {
+        parsed.easyPlaceColumnDepth = static_cast<int>(
+            std::clamp(depth->get<double>(), 1.0, 4.0));
+    }
     parsed.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
         parsed.autoPlacementBreakCooldownSeconds
@@ -304,6 +315,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(
             settings.manualPlacementAllowedItems).value_or(std::vector<std::string>{})},
         {"placementRadius", settings.placementRadius},
+        {"easyPlaceColumnDepth", std::clamp(settings.easyPlaceColumnDepth, 1, 8)},
+        {"easyPlaceMaxPerTick", std::clamp(settings.easyPlaceMaxPerTick, 1, 8)},
         {"autoPlacementBreakCooldownSeconds", settings.autoPlacementBreakCooldownSeconds},
         {"hudEnabled", settings.hudEnabled},
         {"hudShowFileName", settings.hudShowFileName},

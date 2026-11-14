@@ -784,6 +784,24 @@ void renderExperimentalPage(MenuModel& model, MenuActions const& actions, UiMetr
         ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintClientOnlyGrab));
         ImGui::Dummy(ImVec2(0.0f, metrics.gap * 0.25f));
         renderSteppedInt(
+            "EasyPlaceMaxPerTick",
+            i18n::tr(i18n::TextKey::LabelEasyPlaceMaxPerTick),
+            model.easyPlaceMaxPerTick,
+            1,
+            8,
+            metrics
+        );
+        ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintEasyPlaceMaxPerTick));
+        renderSteppedInt(
+            "EasyPlaceColumnDepth",
+            i18n::tr(i18n::TextKey::LabelEasyPlaceColumnDepth),
+            model.easyPlaceColumnDepth,
+            1,
+            8,
+            metrics
+        );
+        ImGui::TextWrapped("%s", i18n::tr(i18n::TextKey::HintEasyPlaceColumnDepth));
+        renderSteppedInt(
             "PlacementRadius",
             i18n::tr(i18n::TextKey::LabelPlacementRadius),
             model.placementRadius,

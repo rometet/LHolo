@@ -1331,6 +1331,8 @@ void loadSettings() {
         place::setRangeEnabled(false);
         place::setManualPlacementAllowedItems(settings.manualPlacementAllowedItems);
         place::setPlacementRadius(std::clamp(settings.placementRadius, 1, 4));
+        place::setEasyPlaceColumnDepth(std::clamp(settings.easyPlaceColumnDepth, 1, 8));
+        place::setEasyPlaceMaxPerTick(std::clamp(settings.easyPlaceMaxPerTick, 1, 8));
         place::setAutoPlacementBreakCooldownSeconds(
             std::clamp(settings.autoPlacementBreakCooldownSeconds, 0, 60)
         );
@@ -1434,6 +1436,8 @@ void saveSettings() {
         settings.materialHudPosition = materialHudPosition();
         settings.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
         settings.placementRadius = place::getPlacementRadius();
+        settings.easyPlaceColumnDepth = place::getEasyPlaceColumnDepth();
+        settings.easyPlaceMaxPerTick = place::getEasyPlaceMaxPerTick();
         settings.autoPlacementBreakCooldownSeconds
             = place::getAutoPlacementBreakCooldownSeconds();
         settings.hudEnabled = hud.enabled;
