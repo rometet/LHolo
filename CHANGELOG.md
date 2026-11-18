@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased - Integrated Sync V1 26.60 port (review only)
+
+- Port optional LHolo client/server shared-schematic synchronization to the Bedrock 1.26.60.05 and LeviLamina 26.60.0 SDKs; keep the normal client-only mode available.
+- Preserve the 26.60 client render, multi-region, and Easy Place work from main. Runtime multiplayer verification on 26.60 is still required.
+
+
 ## v26.60.0-port.6 - 2026-11-10
 
 - Port upstream correction state and bounded comparison work with bulk world events, stable progress counts and section-scoped snapshots.

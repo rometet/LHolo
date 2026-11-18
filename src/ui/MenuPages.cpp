@@ -164,11 +164,89 @@ void renderSchematicFilesSection(MenuModel& model, MenuActions const& actions, U
     });
 }
 
+void renderSharedTab(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
+    (void)metrics;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
+    auto const role=static_cast<sync::Role>(model.syncRole);
+    if(!model.syncAvailable){
+        ImGui::TextWrapped("%s",tr(i18n::TextKey::SharedNotConnected));
+    }else{
+        ImGui::Text("%s: %s / %s",tr(i18n::TextKey::SharedStatus),sync::roleName(role),model.syncServerVersion.c_str());
+    }
+    if(ImGui::Button(tr(i18n::TextKey::SharedRefresh)) && actions.refreshShared)actions.refreshShared();
+    ImGui::SameLine();
+    bool const canShare=model.syncAvailable && role!=sync::Role::Viewer && model.schematic.session.document.selected!=0;
+    ImGui::BeginDisabled(!canShare);
+    if(ImGui::Button(tr(i18n::TextKey::SharedShare)) && actions.shareLocalPlacement)actions.shareLocalPlacement();
+    ImGui::EndDisabled();
+
+    if(model.sharedItems.empty()){
+        ImGui::TextWrapped("%s",tr(i18n::TextKey::SharedEmpty));
+    }else{
+        if(ImGui::BeginChild("##SharedCatalog",ImVec2(0,ImGui::GetTextLineHeightWithSpacing()*10),ImGuiChildFlags_Borders)){
+            for(auto const& item:model.sharedItems){
+                ImGui::PushID(item.placementId.toString().c_str());
+                ImGui::TextUnformatted(item.displayName.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s  D%d  [%lld,%lld,%lld]",sync::schematicFormatName(item.format),item.dimension,
+                                    static_cast<long long>(item.originX),static_cast<long long>(item.originY),static_cast<long long>(item.originZ));
+                if(ImGui::SmallButton(tr(i18n::TextKey::SharedLoad)) && actions.loadShared)actions.loadShared(item.placementId);
+                ImGui::SameLine();
+                if(ImGui::SmallButton(tr(i18n::TextKey::SharedDownload)) && actions.downloadShared)actions.downloadShared(item.placementId);
+                ImGui::SameLine();
+                bool const canEdit=model.syncAvailable && role!=sync::Role::Viewer;
+                ImGui::BeginDisabled(!canEdit);
+                if(ImGui::SmallButton(tr(i18n::TextKey::SharedEdit)) && actions.editShared)actions.editShared(item.placementId);
+                ImGui::SameLine();
+                if(ImGui::SmallButton(tr(i18n::TextKey::SharedDelete)) && actions.deleteShared)actions.deleteShared(item.placementId);
+                ImGui::EndDisabled();
+                if(model.sharedEditView && model.sharedEditView->editing(item.placementId)){
+                    auto& draft=*model.sharedEditView;
+                    auto const editPhase=static_cast<sync::EditPhase>(model.syncEditPhase);
+                    renderSection("##SharedEditPanel",tr(i18n::TextKey::SharedEditTitle),metrics,[&]{
+                        ImGui::TextWrapped("%s",tr(i18n::TextKey::SharedEditHint));
+                        char editName[129]{};std::snprintf(editName,sizeof(editName),"%s",draft.name.c_str());
+                        renderValueRow(tr(i18n::TextKey::LabelPlacementName),metrics,[&]{
+                            if(ImGui::InputText("##SharedEditName",editName,sizeof(editName)))draft.name=editName;
+                        });
+                        renderValueRow("X",metrics,[&]{ImGui::InputScalar("##SharedEditX",ImGuiDataType_S64,&draft.x);});
+                        renderValueRow("Y",metrics,[&]{ImGui::InputScalar("##SharedEditY",ImGuiDataType_S64,&draft.y);});
+                        renderValueRow("Z",metrics,[&]{ImGui::InputScalar("##SharedEditZ",ImGuiDataType_S64,&draft.z);});
+                        char const* editRotations[]{"0","90","180","270"};
+                        char const* editMirrors[]{tr(i18n::TextKey::ComboMirrorNone),"X","Z"};
+                        renderValueRow(tr(i18n::TextKey::LabelRotation),metrics,[&]{ImGui::Combo("##SharedEditRotation",&draft.rotation,editRotations,4);});
+                        renderValueRow(tr(i18n::TextKey::LabelMirror),metrics,[&]{ImGui::Combo("##SharedEditMirror",&draft.mirror,editMirrors,3);});
+                        ImGui::TextWrapped("%s: %s",tr(i18n::TextKey::SharedEditState),tr(editPhaseTextKey(editPhase)));
+                        if(!model.syncEditMessage.empty())ImGui::TextWrapped("%s",model.syncEditMessage.c_str());
+                        ImGui::BeginDisabled(!canCommitEdit(editPhase));
+                        if(ImGui::Button(tr(i18n::TextKey::SharedEditCommit)) && canCommitEdit(editPhase) && actions.commitSharedEdit)actions.commitSharedEdit(item.placementId);
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                        if(ImGui::Button(tr(i18n::TextKey::SharedEditCancel)) && actions.cancelSharedEdit)actions.cancelSharedEdit(item.placementId);
+                    });
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::TextWrapped("%s",tr(i18n::TextKey::SharedHint));
+}
+
 void renderSchematicsPage(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics) {
     using namespace structure;
+    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
+    ImGui::RadioButton(tr(i18n::TextKey::SharedTabLocal),&model.schematicsTab,0);
+    ImGui::SameLine();
+    ImGui::RadioButton(tr(i18n::TextKey::SharedTabShared),&model.schematicsTab,1);
+    ImGui::Separator();
+    if(model.schematicsTab==1){
+        renderSharedTab(model,actions,metrics);
+        return;
+    }
     auto const& snap=model.schematic;
     auto const& placements=snap.session.document;
-    auto const tr=[](i18n::TextKey key){return i18n::tr(key);};
     if(!snap.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.status).c_str());
     if(!snap.session.status.empty())ImGui::TextWrapped("%s",presentationStatus(snap.session.status).c_str());
     renderSection("##SchematicPlacements",tr(i18n::TextKey::SchematicPlacements),metrics,[&] {

@@ -419,7 +419,33 @@
     LHOLO_TEXT_KEY("materials.placementTitle", MaterialsPlacementTitle, "") \
     LHOLO_TEXT_KEY("materials.placementHint", MaterialsPlacementHint, "") \
     LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "") \
-    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "")
+    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "") \
+    LHOLO_TEXT_KEY("shared.tab.local", SharedTabLocal, "") \
+    LHOLO_TEXT_KEY("shared.tab.shared", SharedTabShared, "") \
+    LHOLO_TEXT_KEY("shared.status", SharedStatus, "") \
+    LHOLO_TEXT_KEY("shared.refresh", SharedRefresh, "") \
+    LHOLO_TEXT_KEY("shared.load", SharedLoad, "") \
+    LHOLO_TEXT_KEY("shared.download", SharedDownload, "") \
+    LHOLO_TEXT_KEY("shared.share", SharedShare, "") \
+    LHOLO_TEXT_KEY("shared.edit", SharedEdit, "") \
+    LHOLO_TEXT_KEY("shared.delete", SharedDelete, "") \
+    LHOLO_TEXT_KEY("shared.empty", SharedEmpty, "") \
+    LHOLO_TEXT_KEY("shared.notConnected", SharedNotConnected, "") \
+    LHOLO_TEXT_KEY("shared.notCached", SharedNotCached, "") \
+    LHOLO_TEXT_KEY("shared.downloading", SharedDownloading, "") \
+    LHOLO_TEXT_KEY("shared.cached", SharedCached, "") \
+    LHOLO_TEXT_KEY("shared.permissionDenied", SharedPermissionDenied, "") \
+    LHOLO_TEXT_KEY("shared.hint", SharedHint, "") \
+    LHOLO_TEXT_KEY("shared.editTitle", SharedEditTitle, "") \
+    LHOLO_TEXT_KEY("shared.editHint", SharedEditHint, "") \
+    LHOLO_TEXT_KEY("shared.editState", SharedEditState, "") \
+    LHOLO_TEXT_KEY("shared.editCommit", SharedEditCommit, "") \
+    LHOLO_TEXT_KEY("shared.editCancel", SharedEditCancel, "") \
+    LHOLO_TEXT_KEY("shared.editPending", SharedEditPending, "") \
+    LHOLO_TEXT_KEY("shared.editGranted", SharedEditGranted, "") \
+    LHOLO_TEXT_KEY("shared.editCommitting", SharedEditCommitting, "") \
+    LHOLO_TEXT_KEY("shared.editApplied", SharedEditApplied, "") \
+    LHOLO_TEXT_KEY("shared.editFailed", SharedEditFailed, "")
 
 namespace lholo::i18n {
 
