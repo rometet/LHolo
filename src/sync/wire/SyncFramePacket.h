@@ -18,16 +18,16 @@
 // both sides. It includes only shared engine headers (ll/api/network/packet and
 // mc/*BinaryStream), never client-only or server-only headers.
 //
-// On LL 26.51.x there is no Optional packet negotiation (that API arrived in
-// 26.60); custom packets ride on MinecraftPacketIds::LeviLaminaRuntimePacket
-// (201), inside the vanilla "title-specific" id range, so peers lacking the
-// handler ignore them. Discovery is done at the application layer by the LHS1
-// HELLO / HELLO_ACK handshake.
+// LeviLamina 26.60 supports optional custom packet negotiation. Mark this
+// packet optional to avoid requiring the LHolo client mod on every player.
+// The LHS1 HELLO / HELLO_ACK handshake still controls feature activation.
 
 namespace lholo::sync {
 
 class SyncFramePacket : public ll::network::PacketBase<SyncFramePacket> {
 public:
+    // LeviLamina 26.60 negotiates optional custom packets with unmodded peers.
+    static constexpr bool Optional = true;
     std::vector<std::uint8_t> frame;
 
     SyncFramePacket() = default;

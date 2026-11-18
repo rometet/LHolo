@@ -6,8 +6,16 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionSectionBuilder.h"
 #include "projection/mesh/WaterloggedNativeStreamClip.h"
+#include "projection/mesh/LocalCorrectionPriorityGrid.h"
+#include "projection/mesh/OpaqueOutlineEdgeGrid.h"
+#include "projection/mesh/CorrectionFaceMask.h"
+#include "projection/mesh/CorrectionFillRunGrid.h"
+#include "projection/mesh/SectionBlockTransformCache.h"
+#include "projection/mesh/RedstoneNativeRenderPass.h"
+#include "projection/mesh/RedstoneCurrentShapeIsolation.h"
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
 #include "projection/mesh/NativeGeometryProbe.h"
 #endif
@@ -15,6 +23,7 @@
 
 #include "projection/core/ProjectionInternalTypes.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/LiquidProxyRules.h"
@@ -29,8 +38,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <memory>
@@ -44,6 +55,7 @@
 #include <utility>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 
 #include "mc/client/renderer/SupplementaryFieldAutoGenerationMode.h"
 #include "mc/client/renderer/TessellatorQuadInfo.h"
@@ -220,13 +232,6 @@ std::uint32_t modulateAbgr(std::uint32_t color, std::uint32_t tint) {
     return (color & 0xFF000000U) | channel(0) | channel(8) | channel(16);
 }
 
-int correctionPriority(CorrectionState state) {
-    return state == CorrectionState::WrongType ? 4
-        : state == CorrectionState::WrongState ? 3
-        : state == CorrectionState::Missing ? 1
-        : 0;
-}
-
 template <class Value>
 void compactPerVertexField(
     std::vector<Value>&               field,
@@ -394,6 +399,46 @@ NativeLiquidCullOutcome cullNativeLiquidInternalFaces(
     return outcome;
 }
 
+template<class T>
+void compactMissingGlassQuadStream(std::vector<T>& field, std::span<std::uint8_t const> remove) {
+    if (field.empty()) return;
+    std::size_t written{};
+    for (std::size_t quad = 0; quad < remove.size(); ++quad) {
+        if (remove[quad]) continue;
+        for (std::size_t corner = 0; corner < 4; ++corner)
+            field[written++] = std::move(field[quad * 4 + corner]);
+    }
+    field.resize(written);
+}
+
+// Only compact a complete unindexed QuadList with entirely compatible
+// native vertex streams. No user-space byte copies or guesses about the SDK.
+bool cullMissingGlassQuads(mce::MeshData& data, std::span<std::uint8_t const> remove) {
+    auto const count = data.mPositions.get().size();
+    if (data.mMode != mce::PrimitiveMode::QuadList || !data.mIndices.get().empty()
+        || count != remove.size() * 4 || count == 0)
+        return false;
+    std::array<std::size_t, 10> const fieldSizes{
+        data.mNormals.get().size(), data.mTangents.get().size(),
+        data.mColors.get().size(), data.mBoneId0s.get().size(),
+        data.mTextureUVs[0].get().size(), data.mTextureUVs[1].get().size(),
+        data.mTextureUVs[2].get().size(), data.mPBRTextureIndices.get().size(),
+        data.mMERS.get().size(), data.mGeoType.get().size()
+    };
+    if (!nativeLiquidPerVertexFieldCountsMatch(count, fieldSizes)) return false;
+    compactMissingGlassQuadStream(data.mPositions.get(), remove);
+    compactMissingGlassQuadStream(data.mNormals.get(), remove);
+    compactMissingGlassQuadStream(data.mTangents.get(), remove);
+    compactMissingGlassQuadStream(data.mColors.get(), remove);
+    compactMissingGlassQuadStream(data.mBoneId0s.get(), remove);
+    for (std::size_t uv = 0; uv < 3; ++uv)
+        compactMissingGlassQuadStream(data.mTextureUVs[uv].get(), remove);
+    compactMissingGlassQuadStream(data.mPBRTextureIndices.get(), remove);
+    compactMissingGlassQuadStream(data.mMERS.get(), remove);
+    compactMissingGlassQuadStream(data.mGeoType.get(), remove);
+    // AABB and UV AABB stay conservatively larger than the new geometry.
+    return true;
+}
 } // namespace
 
 void buildCorrectionSectionMeshes(
@@ -441,6 +486,32 @@ void buildBlockEntityPlaceholderSectionMesh(
     std::span<std::size_t const>
 );
 
+void buildProjectionCorrectionSection(
+    ProjectionState&                      state,
+    Tessellator&                          tessellator,
+    std::size_t                           section,
+    Tessellator::UploadMode               uploadMode,
+    ProjectionSectionBuildSettings const& settings
+) {
+    detail::buildCorrectionSectionMeshes(state, tessellator, section, uploadMode, settings);
+    // Retain the previous complete bounds and only expand them. This is
+    // conservative when an old marker disappears and never clips kept models.
+    auto&           bounds = state.sections[section].meshBounds;
+    ProjectionBounds update;
+    bool            complete = true;
+    auto            include  = [&](std::unique_ptr<mce::Mesh> const& mesh) {
+        if (!mesh) return;
+        auto const& positions = mesh->mMeshData.get().mPositions.get();
+        if (positions.empty() && mesh->mVertexCount.get().value_or(0u) > 0) complete = false;
+        for (auto const& vertex : positions) update.include({vertex.x, vertex.y, vertex.z});
+    };
+    include(state.warningFillSectionMeshes[section]);
+    include(state.correctionOutlineSectionMeshes[section]);
+    include(state.wrongFillSectionMeshes[section]);
+    include(state.wrongOutlineSectionMeshes[section]);
+    bounds = mergeCorrectionBounds(bounds, update, complete);
+}
+
 void buildProjectionSection(
     ProjectionState&                      state,
     Tessellator&                          tessellator,
@@ -451,10 +522,8 @@ void buildProjectionSection(
     ProjectionSectionBuildSettings const& sectionBuildSettings
 ) {
     if (!state.structure
-        || !state.expectedWorldBlocks
-        || !state.expectedWorldLiquids
+        || !state.worldLookup
         || !state.expectedWorldBlockActors
-        || !state.expectedWorldBlockIndices
         || section >= state.sections.size()
         || section >= state.sectionBlockIndices.size()
         || section >= state.sectionExtraBlockPositions.size()
@@ -475,6 +544,7 @@ void buildProjectionSection(
         return;
     }
 
+    auto const sectionBuildStarted = std::chrono::steady_clock::now();
     auto const blockCount = state.structure->renderBlocks.size();
     if (!state.sectionBlockSnapshot && (state.correctionStates.size() < blockCount
         || state.blockActorRendererAvailable.size() < blockCount)) {
@@ -499,6 +569,11 @@ void buildProjectionSection(
         }
     }
 
+    if (sectionBuildSettings.correctionOnly) {
+        buildProjectionCorrectionSection(state, tessellator, section, uploadMode, sectionBuildSettings);
+        return;
+    }
+    state.sections[section].meshBounds = {};
     auto const mirror                   = sectionBuildSettings.mirror;
     auto const rotation                 = sectionBuildSettings.rotation;
     auto const mirrorMode               = sectionBuildSettings.mirrorMode;
@@ -523,6 +598,7 @@ void buildProjectionSection(
         std::size_t                   structureIndex{};
         std::size_t compositeOutcomeIndex{NoCompositeBodyOutcome};
         bool bubbleColumn{};
+        bool additionalRenderLayer{};
     };
     struct CompositeBodyOutcome {
         std::size_t  structureIndex{};
@@ -533,10 +609,46 @@ void buildProjectionSection(
     // Blocks whose model produced no geometry during tessellation
     // (block-entity blocks such as chests and signs) get a placeholder.
     std::vector<std::size_t> failedTessellationIndices;
-    std::vector<LayeredBlock> layeredBlocks;
+    // Native layers are already classified before tessellation. Store each
+    // block in its actual render bucket instead of visiting every block four
+    // times and allocating four large Tessellator buffers.
+    std::array<std::vector<LayeredBlock>,
+        static_cast<std::size_t>(RenderBucket::Count)> layeredByBucket;
     std::vector<CompositeBodyOutcome> compositeBodyOutcomes;
     std::vector<WaterloggedBodyCellCoverage> bodyFaceCoverage;
-    layeredBlocks.reserve(state.sectionBlockIndices[section].size() * 2);
+    SectionBlockTransformCache<Block> transformCache;
+    struct PaletteRenderingInfo {
+        BlockGraphics const* graphics{};
+        std::uint32_t extraMask{};
+        bool pistonCollision{};
+        bool bubbleColumn{};
+    };
+    // Only cache palette-invariant properties. getRenderLayer() still receives
+    // every world position and BlockSource because its answer may be dynamic.
+    std::unordered_map<Block const*, PaletteRenderingInfo> paletteInfo;
+    // Diodes may be tessellated once for their base and again for an
+    // engine-declared extra render layer. Scope the native flag to exactly
+    // one block invocation; restoring it also handles native exceptions.
+    struct ScopedRedstoneDiodeExtra {
+        BlockTessellator& renderer;
+        bool previous;
+        bool enabled;
+        ScopedRedstoneDiodeExtra(BlockTessellator& renderer,
+                                std::string_view name, bool additional)
+            : renderer(renderer),
+              previous(renderer.mRenderingExtra),
+              enabled(isRedstoneDiodeNativeModel(name)) {
+            if (enabled) {
+                renderer.mRenderingExtra =
+                    diodeNeedsNativeExtraFlag(name, additional);
+            }
+        }
+        ~ScopedRedstoneDiodeExtra() noexcept {
+            if (enabled) renderer.mRenderingExtra = previous;
+        }
+        ScopedRedstoneDiodeExtra(ScopedRedstoneDiodeExtra const&) = delete;
+        ScopedRedstoneDiodeExtra& operator=(ScopedRedstoneDiodeExtra const&) = delete;
+    };
     for (auto const index : state.sectionBlockIndices[section]) {
         // Never draw a projected block model on top of an existing
         // world block. Correct blocks disappear; wrong type/state use
@@ -564,14 +676,30 @@ void buildProjectionSection(
             bodyFaceCoverage.push_back({index, {}});
         }
         auto const appendBlock = [&](Block const* source) {
-            auto const* transformedBlock = transformExpectedBlock(source, sectionTransformSettings, identityTransform);
+            // The native rotation+mirror transform depends only on the
+            // immutable palette block and transform settings, not position.
+            // One mesh task often contains thousands of identical states.
+            auto const* transformedBlock = identityTransform ? source
+                : transformCache.transformed(source, [&](Block const* original) {
+                    return transformExpectedBlock(original, sectionTransformSettings, false);
+                });
             if (!transformedBlock) return;
-            auto const& typeName = transformedBlock->getTypeName();
-            if (typeName == VanillaBlockTypeIds::PistonArmCollision().getString()
-                || typeName == VanillaBlockTypeIds::StickyPistonArmCollision().getString()) {
-                return;
+            auto [cached, first] = paletteInfo.try_emplace(transformedBlock);
+            if (first) {
+                auto const& typeName = transformedBlock->getTypeName();
+                cached->second.pistonCollision =
+                    typeName == VanillaBlockTypeIds::PistonArmCollision().getString()
+                    || typeName == VanillaBlockTypeIds::StickyPistonArmCollision().getString();
+                cached->second.bubbleColumn = typeName == "minecraft:bubble_column";
+                cached->second.graphics = BlockGraphics::getForBlock(*transformedBlock);
+                if (cached->second.graphics) {
+                    cached->second.extraMask = static_cast<std::uint32_t>(
+                        const_cast<BlockGraphics*>(cached->second.graphics)->getExtraRenderLayers());
+                }
             }
-            auto* graphics = BlockGraphics::getForBlock(*transformedBlock);
+            auto const& palette = cached->second;
+            if (palette.pistonCollision) return;
+            auto const* graphics = palette.graphics;
             auto const primaryLayer = graphics
                 ? graphics->getRenderLayer(region, position)
                 : (transformedBlock->getBlockType().mIsOpaqueFullBlock
@@ -582,14 +710,18 @@ void buildProjectionSection(
                 auto const value = static_cast<unsigned int>(layer);
                 if (value >= 32 || (appendedLayerMask & (1U << value)) != 0) return;
                 appendedLayerMask |= 1U << value;
-                layeredBlocks.push_back({
-                    transformedBlock,
-                    position,
-                    layer,
-                    renderBucketFor(layer),
-                    index,
-                    compositeOutcomeIndex,
-                    typeName == "minecraft:bubble_column"
+                // Keep the native tessellation layer unchanged, but submit
+                // projected diode sprites without back-face culling. This
+                // isolates the suspected missing thin torch geometry.
+                auto const nativeBucket = renderBucketFor(layer);
+                auto const bucket = diodeNeedsDoubleSidedGhostMaterial(
+                    transformedBlock->getTypeName(),
+                    nativeBucket == RenderBucket::AlphaOneSided)
+                    ? RenderBucket::Alpha : nativeBucket;
+                layeredByBucket[static_cast<std::size_t>(bucket)].push_back({
+                    transformedBlock, position, layer, bucket, index,
+                    compositeOutcomeIndex, palette.bubbleColumn,
+                    layer != primaryLayer
                 });
             };
             appendLayer(primaryLayer);
@@ -597,13 +729,10 @@ void buildProjectionSection(
                 // This is Minecraft's current BlockGraphics classification,
                 // not an LHolo family guess. A block may request more than
                 // one of the 22 native RenderChunk layers.
-                auto const extraMask = static_cast<std::uint32_t>(
-                    // Fake Headers exposes this native virtual as non-const
-                    // even though getForBlock returns the shared graphics
-                    // object as const. The query is the engine's classifier;
-                    // no LHolo-owned state is written here.
-                    const_cast<BlockGraphics*>(graphics)->getExtraRenderLayers()
-                );
+                // getExtraRenderLayers() is position-independent and its
+                // native virtual is not const in the 26.51 generated header.
+                // Capture it once per Block state in this worker build only.
+                auto const extraMask = palette.extraMask;
                 auto const layerCount = static_cast<unsigned int>(
                     BlockRenderLayer::RenderlayerCount
                 );
@@ -627,18 +756,27 @@ void buildProjectionSection(
             "LHoloAlphaOneSided",
             "LHoloBlend"
         };
+    Block const* diodeVirtualAir{};
+    bool diodeAirLookupAttempted{};
     std::unordered_set<std::size_t> bubbleNativeAttempted;
-    bubbleNativeAttempted.reserve(state.sectionBlockIndices[section].size());
+    // Do not preallocate thousands of hash nodes for overwhelmingly common
+    // sections containing no bubble columns.
+    std::size_t bubbleCellCount{};
+    for (auto const& bucketBlocks : layeredByBucket)
+        for (auto const& layered : bucketBlocks)
+            bubbleCellCount += layered.bubbleColumn ? 1U : 0U;
+    if (bubbleCellCount != 0)
+        bubbleNativeAttempted.reserve(bubbleCellCount);
+    auto const classifiedAt = std::chrono::steady_clock::now();
     ScopedTessellationBlocks tessellationBlocksScope(
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors,
         &state.nativeLiquidTelemetry
     );
 #ifdef LHOLO_WATERLOGGED_GEOMETRY_PROBE
     NativeGeometryProbe geometryProbe;
     if (std::any_of(compositeBodyOutcomes.begin(), compositeBodyOutcomes.end(), [&](auto const& cell) {
-            return state.buildCorrectionState(cell.structureIndex) == CorrectionState::Missing;
+            return state.renderCorrectionState(cell.structureIndex) == CorrectionState::Missing;
         })) {
         geometryProbe.batch = gGeometryProbeBuilds.fetch_add(1, std::memory_order_relaxed);
         geometryProbe.active = geometryProbe.batch < 16;
@@ -651,19 +789,38 @@ void buildProjectionSection(
          bucketIndex < static_cast<std::size_t>(RenderBucket::Count);
          ++bucketIndex) {
         auto const bucket = static_cast<RenderBucket>(bucketIndex);
+        auto const& bucketBlocks = layeredByBucket[bucketIndex];
+        // An empty bucket owns no Tessellator state to finalize; preserve
+        // the existing destination cleanup and Blend source invalidation.
+        if (bucketBlocks.empty()) {
+            state.sections[section].meshes[bucketIndex].reset();
+            if (bucket == RenderBucket::Blend) {
+                state.sections[section].blendSortKeyValid = false;
+                state.sections[section].blendSortUnsupported = false;
+                state.sections[section].blendSource.reset();
+            }
+            continue;
+        }
         tessellator.begin(
             Tessellator::DebugContextCallback{},
             mce::PrimitiveMode::QuadList,
-            std::max(128, static_cast<int>(layeredBlocks.size() * 24)),
+            std::max(128, static_cast<int>(bucketBlocks.size() * 24)),
             false
         );
+        // Keep exact source ownership for complete native Glass cubes.
+        // Only full faces may be hidden against an identical Missing cube.
+        struct GlassRange {
+            std::size_t first{}, last{}, structureIndex{};
+            BlockPos position;
+            Block const* block{};
+        };
+        std::vector<GlassRange> glassRanges;
         bool bucketTessellated{};
         if (bucket == RenderBucket::Blend) {
             state.sections[section].blendSortKeyValid = false;
             state.sections[section].blendSortUnsupported = false;
         }
-        for (auto const& layered : layeredBlocks) {
-            if (layered.bucket != bucket) continue;
+        for (auto const& layered : bucketBlocks) {
             blockTessellator.mRenderingLayer = static_cast<int>(layered.layer);
             auto const tintMethod = layered.block->getBlockType().mTintMethod;
             std::optional<std::uint32_t> foliageTint;
@@ -682,14 +839,11 @@ void buildProjectionSection(
                     nullptr
                 ));
             }
-            // Flattened connection blocks (fences, glass panes, iron bars,
-            // ...) draw their arms from derived states the structure palette
-            // never stores, so a raw palette permutation tessellates as a
-            // bare post no matter which neighbors are visible. Recompute the
-            // connections with the vanilla update against the virtual
-            // neighborhood; inside this scope the hooked BlockSource::getBlock
-            // answers with the projected blocks, and the update's own region
-            // write is suppressed so the real world stays untouched.
+            // Resolve native connection components and legacy wall arms/posts
+            // against the projected neighborhood. Java states may differ
+            // from Bedrock, and palettes can omit derived connection states.
+            // This scope supplies projected blocks to native reads; region
+            // writes attempted by the update are suppressed.
             Block const& renderBlock = withFlattenedConnections(
                 *layered.block, region, layered.position
             );
@@ -699,9 +853,45 @@ void buildProjectionSection(
             auto const firstUv = tessellator.mMeshData->mTextureUVs[0].get().size();
             auto const extraBefore = blockTessellator.mRenderingExtra;
 #endif
-            auto rendered = blockTessellator.tessellateInWorld(
-                tessellator, renderBlock, layered.position, true
-            );
+            ScopedRedstoneDiodeExtra diodeExtra{
+                blockTessellator,
+                layered.block->getTypeName(),
+                layered.additionalRenderLayer
+            };
+            // Avoid carrying a prior full-height native shape across
+            // successive diode cells in the shared section tessellator.
+            ScopedDiodeCurrentShape diodeShape{
+                blockTessellator,
+                isRedstoneDiodeNativeModel(layered.block->getTypeName())
+            };
+            auto nativeRender = [&] {
+                return blockTessellator.tessellateInWorld(
+                    tessellator, renderBlock, layered.position,
+                    useNativeBlockCalculationCache(layered.block->getTypeName())
+                );
+            };
+            bool rendered{};
+            if (isRedstoneDiodeNativeModel(layered.block->getTypeName())) {
+                if (!diodeAirLookupAttempted) {
+                    diodeAirLookupAttempted = true;
+                    // Resolve the authoritative air permutation only when a
+                    // diode occurs. Never keep this native pointer between
+                    // world activations or reuse it after reload.
+                    auto const air = Block::tryGetFromRegistry(HashedString("minecraft:air"));
+                    if (air && air->isAir()) diodeVirtualAir = &*air;
+                }
+                if (diodeVirtualAir) {
+                    // The projected map is intentionally sparse. Missing cells
+                    // must not silently resolve to actual terrain or unrelated
+                    // neighboring blocks when generating redstone diode models.
+                    ScopedDiodeAirNeighborhood airScope{layered.position, diodeVirtualAir};
+                    rendered = nativeRender();
+                } else {
+                    rendered = nativeRender();
+                }
+            } else {
+                rendered = nativeRender();
+            }
             if (layered.bubbleColumn
                 && tessellator.mMeshData->mPositions.get().size() == firstPosition
                 && !bubbleNativeAttempted.contains(layered.structureIndex)) {
@@ -829,6 +1019,17 @@ void buildProjectionSection(
                     colors[colorIndex], structureOpacity
                 );
             }
+            if (bucket == RenderBucket::Blend && geometryAdded
+                && renderBlock.getBlockType().mMaterial.get().mType
+                    == SharedTypes::v1_26_20::MaterialType::Glass) {
+                auto const* glassGraphics = BlockGraphics::getForBlock(renderBlock);
+                if (glassGraphics && glassGraphics->mBlockShape == BlockShape::Block) {
+                    glassRanges.push_back({
+                        firstPosition, tessellator.mMeshData->mPositions.get().size(),
+                        layered.structureIndex, layered.position, &renderBlock
+                    });
+                }
+            }
             bucketTessellated = true;
         }
         auto& destination = state.sections[section].meshes[bucketIndex];
@@ -849,13 +1050,98 @@ void buildProjectionSection(
             vertex.y -= static_cast<float>(origin.y);
             vertex.z -= static_cast<float>(origin.z);
         }
-        // Tessellator::end() can auto-generate supplementary vertex streams.
+        // Backport of upstream ed9944f glass visibility: adjacent identical,
+        // unplaced full glass cubes must not expose duplicate interior faces.
+        // Keep stained colors, partial panes, non-Missing neighbors, and all
+        // liquid geometry unchanged. The native Blend source remains the GPU
+        // authority for everything else.
+        std::vector<std::uint8_t> hiddenGlassFaces;
+        if (bucket == RenderBucket::Blend && !glassRanges.empty()) {
+            auto const& data = tessellator.mMeshData.get();
+            auto const& positions = data.mPositions.get();
+            if (data.mMode == mce::PrimitiveMode::QuadList
+                && data.mIndices.get().empty() && positions.size() % 4 == 0) {
+                hiddenGlassFaces.assign(positions.size() / 4, 0);
+                for (auto const& glass : glassRanges) {
+                    if (state.renderCorrectionState(glass.structureIndex) != CorrectionState::Missing)
+                        continue;
+                    std::array<float, 3> const cell{
+                        static_cast<float>(glass.position.x - origin.x),
+                        static_cast<float>(glass.position.y - origin.y),
+                        static_cast<float>(glass.position.z - origin.z)
+                    };
+                    for (std::size_t face = glass.first / 4; face < glass.last / 4
+                        && face < hiddenGlassFaces.size(); ++face) {
+                        std::array<std::array<float, 3>, 4> vertices{};
+                        for (std::size_t corner = 0; corner < 4; ++corner) {
+                            auto const& pos = positions[face * 4 + corner];
+                            vertices[corner] = {pos.x, pos.y, pos.z};
+                        }
+                        auto const neighborDelta = projectionUnitFaceNeighbor(vertices, cell);
+                        if (!neighborDelta) continue;
+                        auto const neighbor = std::tuple{
+                            glass.position.x + (*neighborDelta)[0],
+                            glass.position.y + (*neighborDelta)[1],
+                            glass.position.z + (*neighborDelta)[2]
+                        };
+                        auto const* found = state.worldLookup->blockAt(neighbor);
+                        auto const index = state.worldLookup->indexAt(neighbor);
+                        if (found == glass.block
+                            && index
+                            && state.renderCorrectionState(*index) == CorrectionState::Missing)
+                            hiddenGlassFaces[face] = 1;
+                    }
+                }
+            }
+        }
+        auto const hiddenGlassCount = static_cast<std::size_t>(
+            std::count(hiddenGlassFaces.begin(), hiddenGlassFaces.end(), std::uint8_t{1}));
+        if (hiddenGlassCount != 0) {
+            // Finalize native bookkeeping before removing source quads. Mesh
+            // construction from the typed CPU fields handles the 26.60 SDK.
+            auto native = tessellator.end(
+                Tessellator::UploadMode::Never,
+                meshNames[bucketIndex], SupplementaryFieldAutoGenerationMode{1});
+            auto& data = native.mMeshData.get();
+            if (cullMissingGlassQuads(data, hiddenGlassFaces)) {
+                auto& glassSection = state.sections[section];
+                glassSection.blendSource.reset();
+                if (data.mPositions.get().empty()) {
+                    destination.reset();
+                } else {
+                    state.sections[section].blendSource = cloneNativeMeshData(data);
+                    if (uploadMode == Tessellator::UploadMode::Never) {
+                        destination = std::make_unique<mce::Mesh>(std::move(native));
+                    } else {
+                        auto service = tessellator.mBufferResourceService.lock();
+                        if (!service) throw std::runtime_error("Native glass mesh GPU service expired");
+                        destination = std::make_unique<mce::Mesh>(
+                            service, std::move(data), false, meshNames[bucketIndex]);
+                        if (!destination->isValid())
+                            throw std::runtime_error("Glass face-cull GPU upload invalid");
+                    }
+                }
+                continue;
+            }
+            // Incompatible native stream: upload the original finalized mesh
+            // unchanged rather than ever risking missing glass geometry.
+            state.sections[section].blendSource = cloneNativeMeshData(data);
+            if (uploadMode == Tessellator::UploadMode::Never)
+                destination = std::make_unique<mce::Mesh>(std::move(native));
+            else {
+                auto service = tessellator.mBufferResourceService.lock();
+                if (!service) throw std::runtime_error("Glass original GPU service expired");
+                destination = std::make_unique<mce::Mesh>(
+                    service, std::move(data), false, meshNames[bucketIndex]);
+            }
+            continue;
+        }        // Tessellator::end() can auto-generate supplementary vertex streams.
         // Prefer its finalized CPU MeshData when available. Buffered mode may
         // consume the source during upload, so keep a pre-end safety copy.
         std::unique_ptr<mce::MeshData> originalSource;
         if (bucket == RenderBucket::Blend
             && uploadMode != Tessellator::UploadMode::Never) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 tessellator.mMeshData.get()
             );
         }
@@ -866,7 +1152,7 @@ void buildProjectionSection(
         ));
         if (bucket == RenderBucket::Blend
             && !builtMesh->mMeshData.get().mPositions.get().empty()) {
-            originalSource = std::make_unique<mce::MeshData>(
+            originalSource = cloneNativeMeshData(
                 builtMesh->mMeshData.get()
             );
         }
@@ -879,6 +1165,7 @@ void buildProjectionSection(
         }
     }
 
+    auto const bodyTessellatedAt = std::chrono::steady_clock::now();
     state.nativeLiquidTelemetry.compositeBodyLiquidCells
         += compositeBodyOutcomes.size();
     std::uint64_t sectionCompositePositive{};
@@ -994,6 +1281,7 @@ void buildProjectionSection(
         sectionBuildSettings,
         liquidOwnership
     );
+    auto const liquidBuiltAt = std::chrono::steady_clock::now();
     detail::buildBlockEntityPlaceholderSectionMesh(
         state,
         tessellator,
@@ -1002,12 +1290,38 @@ void buildProjectionSection(
         sectionBuildSettings,
         failedTessellationIndices
     );
+    auto const correctionStarted = std::chrono::steady_clock::now();
     detail::buildCorrectionSectionMeshes(
         state, tessellator, section, uploadMode, sectionBuildSettings
     );
-    detail::buildStructureBoundsMesh(
-        state, tessellator, uploadMode, sectionBuildSettings
-    );
+    auto& bounds = state.sections[section].meshBounds;
+    bool  completeBounds = true;
+    auto  includeMesh = [&](std::unique_ptr<mce::Mesh> const& mesh) {
+        if (!mesh) return;
+        auto const& positions = mesh->mMeshData.get().mPositions.get();
+        // Some synchronous upload paths release their CPU vertices. In that
+        // case visibility must fail open, never infer bounds from a subset.
+        if (positions.empty() && mesh->mVertexCount.get().value_or(0u) > 0) completeBounds = false;
+        for (auto const& v : positions) bounds.include({v.x, v.y, v.z});
+    };
+    for (auto const& mesh : state.sections[section].meshes) includeMesh(mesh);
+    includeMesh(state.warningFillSectionMeshes[section]);
+    includeMesh(state.correctionOutlineSectionMeshes[section]);
+    includeMesh(state.wrongFillSectionMeshes[section]);
+    includeMesh(state.wrongOutlineSectionMeshes[section]);
+    includeMesh(state.nativeLiquidSectionMeshes[section]);
+    includeMesh(state.liquidProxySectionMeshes[section]);
+    includeMesh(state.blockEntityPlaceholderSectionMeshes[section]);
+    if (!completeBounds) bounds.valid = false;
+    auto micros = [](auto a, auto b) -> std::uint64_t {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(b - a).count());
+    };
+    state.meshBodyClassifyMicros = micros(sectionBuildStarted, classifiedAt);
+    state.meshBodyTessellateMicros = micros(classifiedAt, bodyTessellatedAt);
+    state.meshLiquidMicros = micros(bodyTessellatedAt, liquidBuiltAt);
+    state.meshAuxMicros = micros(liquidBuiltAt, std::chrono::steady_clock::now());
+    state.meshPlaceholderMicros = micros(liquidBuiltAt, correctionStarted);
 }
 
 std::vector<std::size_t> buildNativeLiquidSectionMesh(
@@ -1267,7 +1581,7 @@ std::vector<std::size_t> buildNativeLiquidSectionMesh(
             }
             cellVertices += added;
             liquidKinds.insert(liquidKinds.end(), added,
-                expectedLiquid->getBlockType().mMaterial.mSuperHot
+                expectedLiquid->getBlockType().mMaterial.get().mSuperHot
                     ? PraxisCompatLiquidKind::Lava : PraxisCompatLiquidKind::Water);
             cellUvVertices += addedUvs;
             cellColorVertices += colorsAfter > colorsBefore ? colorsAfter - colorsBefore : 0;
@@ -1561,7 +1875,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         ++state.nativeLiquidTelemetry.praxisCompatTessellationPositive;
         state.nativeLiquidTelemetry.praxisCompatVertices += addedVertices;
         state.nativeLiquidTelemetry.praxisCompatUvRemappedVertices += addedUvs;
-        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.mSuperHot
+        auto const liquidKind = expectedLiquid->getBlockType().mMaterial.get().mSuperHot
             ? PraxisCompatLiquidKind::Lava
             : PraxisCompatLiquidKind::Water;
         liquidKinds.insert(liquidKinds.end(), addedVertices, liquidKind);
@@ -1592,7 +1906,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         std::size_t waterCells{}, lavaCells{}, bubbleCells{};
         for (auto const index : succeeded) {
             auto const& entry = state.structure->renderBlocks[index];
-            if (entry.liquid && entry.liquid->getBlockType().mMaterial.mSuperHot)
+            if (entry.liquid && entry.liquid->getBlockType().mMaterial.get().mSuperHot)
                 ++lavaCells;
             else ++waterCells;
             if (entry.block && entry.block->getTypeName() == "minecraft:bubble_column")
@@ -1732,7 +2046,7 @@ std::vector<std::size_t> buildPraxisCompatLiquidSectionData(
         += waterSeedVertices;
     state.nativeLiquidTelemetry.praxisCompatLavaNativeVertices
         += lavaNativeVertices;
-    compat->nativeStream = std::make_unique<mce::MeshData>(meshData);
+    compat->nativeStream = cloneNativeMeshData(meshData);
     compat->tessellatorState = {
         .isFormatFixed        = tessellator.mIsFormatFixed,
         .hasNormals           = tessellator.mHasNormals,
@@ -1858,9 +2172,6 @@ void buildLiquidProxySectionMesh(
             static_cast<int>(liquidProxyIndices.size() * 24),
             false
         );
-        auto const alpha = static_cast<uint>(std::lround(
-            normalizedLiquidProjectionOpacity(structureOpacity) * 255.0f
-        ));
         for (auto const index : liquidProxyIndices) {
             auto const& entry = state.structure->renderBlocks[index];
             auto const* expectedLiquid = transformExpectedBlock(
@@ -1869,7 +2180,7 @@ void buildLiquidProxySectionMesh(
             if (!expectedLiquid) continue;
 
             bool const isLava = expectedLiquid->getTypeName().find("lava") != std::string::npos
-                || expectedLiquid->getBlockType().mMaterial.mSuperHot;
+                || expectedLiquid->getBlockType().mMaterial.get().mSuperHot;
             auto const* graphics = BlockGraphics::getForBlock(*expectedLiquid);
             auto const* uvSetStill = graphics ? &graphics->getTexture(0, 0) : nullptr;
             auto const* uvSetFlow = graphics ? &graphics->getTexture(2, 0) : nullptr;
@@ -1913,17 +2224,16 @@ void buildLiquidProxySectionMesh(
                 state.anchor.y + offsetY + p.y,
                 state.anchor.z + offsetZ + p.z
             };
-            auto const neighborEntry = [&](int dx, int dy, int dz)
-                -> structure::LoadedStructure::RenderBlock const* {
-                auto const found = state.expectedWorldBlockIndices->find(std::tuple{
-                    worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
+            auto const neighborEntry = [&](int dx,int dy,int dz)
+                -> std::optional<structure::LoadedStructure::RenderBlock> {
+                auto const found=state.worldLookup->indexAt(std::tuple{
+                    worldPosition.x+dx,worldPosition.y+dy,worldPosition.z+dz
                 });
-                return found == state.expectedWorldBlockIndices->end()
-                        || found->second >= state.structure->renderBlocks.size()
-                    ? nullptr : &state.structure->renderBlocks[found->second];
-            };
-            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                if(!found
+                    || *found>=state.structure->renderBlocks.size())return {};
+                return state.structure->renderBlocks[*found];
+            };            auto const neighborIsSameLiquid = [&](int dx, int dy, int dz) {
+                auto const neighbor = neighborEntry(dx, dy, dz);
                 if (!neighbor || !neighbor->liquid) return false;
                 auto const* transformed = transformExpectedBlock(
                     neighbor->liquid, sectionTransformSettings, identityTransform
@@ -1931,14 +2241,29 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return false;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 return neighborIsLava == isLava;
             };
             auto const neighborOccludesFace = [&](int dx, int dy, int dz) {
-                auto const* neighbor = neighborEntry(dx, dy, dz);
+                auto const neighbor = neighborEntry(dx, dy, dz);
+                // Upstream 467d7ed: only cells with a projected model may hide
+                // this face (Missing/Unknown). Correct/WrongType/WrongState
+                // neighbors do not occlude by expectation; real-world
+                // occlusion remains handled by the depth test.
+                auto const neighborCorrection = [&]() -> std::optional<CorrectionState> {
+                    auto const found = state.worldLookup->indexAt(std::tuple{
+                        worldPosition.x + dx, worldPosition.y + dy, worldPosition.z + dz
+                    });
+                    if (!found || *found >= state.structure->renderBlocks.size()) return {};
+                    return state.renderCorrectionState(*found);
+                }();
+                auto const occludingCorrection = neighborCorrection
+                    && (*neighborCorrection == CorrectionState::Missing
+                        || *neighborCorrection == CorrectionState::Unknown);
                 auto const opaqueFullBlock = neighbor && neighbor->block
                     && !neighbor->block->isAir()
-                    && neighbor->block->getBlockType().mIsOpaqueFullBlock;
+                    && neighbor->block->getBlockType().mIsOpaqueFullBlock
+                    && occludingCorrection;
                 return liquidProxyFaceOccluded(
                     opaqueFullBlock,
                     neighborIsSameLiquid(dx, dy, dz)
@@ -1964,8 +2289,8 @@ void buildLiquidProxySectionMesh(
                 return (8.0f - static_cast<float>(depth)) / 9.0f;
             };
             auto const columnHeight = [&](int dx, int dz) -> float {
-                auto const* n = (dx == 0 && dz == 0)
-                    ? &entry : neighborEntry(dx, 0, dz);
+                auto const neighbor=neighborEntry(dx,0,dz);
+                auto const* n=(dx==0 && dz==0) ? &entry : (neighbor ? &*neighbor : nullptr);
                 if (!n) return 0.0f;
                 if (!n->liquid) return -1.0f;
                 auto const* transformed = transformExpectedBlock(
@@ -1974,7 +2299,7 @@ void buildLiquidProxySectionMesh(
                 if (!transformed) return -1.0f;
                 bool const neighborIsLava =
                     transformed->getTypeName().find("lava") != std::string::npos
-                    || transformed->getBlockType().mMaterial.mSuperHot;
+                    || transformed->getBlockType().mMaterial.get().mSuperHot;
                 if (neighborIsLava != isLava) return -1.0f;
                 if (neighborIsSameLiquid(dx, 1, dz)) return 1.0f;
                 return fluidHeight(liquidDepth(*transformed));
@@ -1994,9 +2319,13 @@ void buildLiquidProxySectionMesh(
                 return count > 0 ? sum / static_cast<float>(count) : surface;
             };
 
-            auto const tint = isLava
-                ? (LiquidLavaTintAbgrRgb | (alpha << 24U))
-                : (LiquidWaterTintAbgrRgb | (alpha << 24U));
+            // Native UV/face tint stays unchanged. Derive the same base
+            // alpha used by Exact Replay, then apply structure opacity.
+            auto const baseTint = (isLava ? LiquidLavaTintAbgrRgb : LiquidWaterTintAbgrRgb)
+                | 0xFF000000U;
+            auto const tint = applyLiquidProjectionOpacity(
+                applyPraxisCompatLiquidAlpha(baseTint, !isLava),
+                structureOpacity);
             auto const topColor = liquidProxyFaceColor(tint, LiquidProxyFace::Top);
             auto const bottomColor = liquidProxyFaceColor(tint, LiquidProxyFace::Bottom);
             auto const nsColor = liquidProxyFaceColor(tint, LiquidProxyFace::NorthSouth);
@@ -2095,7 +2424,7 @@ void buildBlockEntityPlaceholderSectionMesh(
     // that render normally (hoppers, beds, ...) are left untouched.
     std::vector<std::size_t> blockEntityIndices;
     for (auto const index : failedTessellationIndices) {
-        if (state.buildCorrectionState(index) != CorrectionState::Missing
+        if (state.renderCorrectionState(index) != CorrectionState::Missing
             || (state.buildMissingLayers(index) & MissingLayerBody) == 0) continue;
         if (state.buildActorRendererAvailable(index)) continue;
         blockEntityIndices.push_back(index);
@@ -2187,6 +2516,17 @@ void buildCorrectionSectionMeshes(
     Tessellator::UploadMode               uploadMode,
     ProjectionSectionBuildSettings const& settings
 ) {
+    auto const overlayStarted = std::chrono::steady_clock::now();
+    state.meshCorrectionSetupMicros = 0;
+    state.meshCorrectionOutlineMicros = 0;
+    state.meshCorrectionFillMicros = 0;
+    state.meshFillCandidateFaces = 0;
+    state.meshFillEmittedFaces = 0;
+    state.meshFillRunOriginalFaces = 0;
+    state.meshFillRunQuads = 0;
+    state.meshOutlineAttemptedEdges = 0;
+    state.meshOutlineEmittedEdges = 0;
+    state.meshOutlineGridBytes = 0;
     // Split the correction geometry into "missing" and "wrong" (WrongType +
     // WrongState) so the see-through option can X-ray only the wrong markers,
     // never the many "missing" outlines.
@@ -2194,14 +2534,36 @@ void buildCorrectionSectionMeshes(
         return correction == CorrectionState::WrongType
             || correction == CorrectionState::WrongState;
     };
-    std::size_t missingCount{};
-    std::size_t wrongCount{};
-    for (auto const index : state.sectionBlockIndices[section]) {
-        auto const correction = state.buildCorrectionState(index);
-        if (isWrongState(correction)) ++wrongCount;
-        else if (correction == CorrectionState::Missing) ++missingCount;
+    struct CorrectionCell {
+        BlockPos position;
+        CorrectionState correction;
+    };
+    // Classify once per section, preserving source order within both groups.
+    // Both outline and fill reuse the exact same transformed positions. This
+    // removes four full section scans and redundant transforms on dense models.
+    std::vector<CorrectionCell> missingCells;
+    std::vector<CorrectionCell> wrongCells;
+    if (normalizeComparisonStrength(settings.comparisonStrength) != 0.0f) {
+        for (auto const index : state.sectionBlockIndices[section]) {
+            auto const correction = state.renderCorrectionState(index);
+            if (correctionPriority(correction) == 0) continue;
+            auto const& entry = state.structure->renderBlocks[index];
+            if (correction == CorrectionState::Missing && !entry.block && entry.liquid) {
+                // Pure liquid already uses the blue native/proxy hull.
+                continue;
+            }
+            CorrectionCell cell{
+                transformStructurePosition(
+                    entry, *state.structure, settings.mirrorMode, settings.rotationTurns),
+                correction
+            };
+            if (isWrongState(correction)) wrongCells.push_back(cell);
+            else missingCells.push_back(cell);
+        }
     }
-    wrongCount += state.sectionExtraBlockPositions[section].size();
+    auto const missingCount = missingCells.size();
+    auto const wrongCount = wrongCells.size()
+        + state.sectionExtraBlockPositions[section].size();
     if ((missingCount == 0 && wrongCount == 0)
         || normalizeComparisonStrength(settings.comparisonStrength) == 0.0f) {
         state.warningFillSectionMeshes[section].reset();
@@ -2211,15 +2573,114 @@ void buildCorrectionSectionMeshes(
         return;
     }
 
+    // Build a bounded 18^3 section-local priority field once instead of doing
+    // six virtual-world hash lookups and six inverse transforms per fill cell.
+    // A worker's existing correction snapshot includes the target and its six
+    // face-neighbor sections, including their extra-block positions. Synchronous
+    // fallback retains the original lookup path.
+    LocalCorrectionPriorityGrid priorityGrid;
+    bool priorityGridReady = false;
+    if (state.sectionBlockSnapshot) {
+        int minX = INT_MAX, minY = INT_MAX, minZ = INT_MAX;
+        int maxX = INT_MIN, maxY = INT_MIN, maxZ = INT_MIN;
+        auto includeTarget = [&](BlockPos const& transformed) {
+            minX = std::min(minX, transformed.x);
+            minY = std::min(minY, transformed.y);
+            minZ = std::min(minZ, transformed.z);
+            maxX = std::max(maxX, transformed.x);
+            maxY = std::max(maxY, transformed.y);
+            maxZ = std::max(maxZ, transformed.z);
+        };
+        for (auto const index : state.sectionBlockIndices[section]) {
+            includeTarget(transformStructurePosition(
+                state.structure->renderBlocks[index], *state.structure,
+                settings.mirrorMode, settings.rotationTurns));
+        }
+        for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
+            includeTarget(transformStructurePosition(
+                BlockPos{x, y, z}, *state.structure,
+                settings.mirrorMode, settings.rotationTurns));
+        }
+        if (minX != INT_MAX) {
+            priorityGridReady = priorityGrid.reset(
+                minX - 1, minY - 1, minZ - 1,
+                maxX + 1, maxY + 1, maxZ + 1);
+            if (priorityGridReady) {
+                state.sectionBlockSnapshot->forEach(
+                    [&](std::size_t index, SectionBlockSnapshot::Value const&) {
+                        // The snapshot's raw correction byte includes hidden
+                        // layers. The exposed-face grid must use the *visible*
+                        // correction snapshot, just like the actual fill cells;
+                        // otherwise a hidden upper layer culls the top face of
+                        // the selected layer (also at section boundaries).
+                        auto const priority = correctionPriority(
+                            state.renderCorrectionState(index));
+                        if (!priority) return;
+                        auto const transformed = transformStructurePosition(
+                            state.structure->renderBlocks[index], *state.structure,
+                            settings.mirrorMode, settings.rotationTurns);
+                        priorityGrid.add(transformed.x, transformed.y, transformed.z,
+                            static_cast<std::uint8_t>(priority));
+                    });
+                for (auto const& [x, y, z] : state.extraBlockPositions) {
+                    auto const transformed = transformStructurePosition(
+                        BlockPos{x, y, z}, *state.structure,
+                        settings.mirrorMode, settings.rotationTurns);
+                    priorityGrid.add(transformed.x, transformed.y, transformed.z, 2);
+                }
+            }
+        }
+    }
+
+    // Reuse transformed extra coordinates for both outline and fill and for
+    // the bounded opaque-edge dedup grid.
+    std::vector<BlockPos> extraCells;
+    extraCells.reserve(state.sectionExtraBlockPositions[section].size());
+    for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section])
+        extraCells.push_back(transformStructurePosition(
+            BlockPos{x,y,z}, *state.structure, settings.mirrorMode, settings.rotationTurns));
+
     constexpr float outlineInset  = 0.0f;
     constexpr float outlineExtent = 1.0f;
     auto const fillOpacity = scaledComparisonAlpha(settings.correctionFillOpacity, settings.comparisonStrength);
     auto const outlineOpacity = scaledComparisonAlpha(settings.correctionOutlineOpacity, settings.comparisonStrength);
     auto const thickOutline = usesThickCorrectionOutline(settings.correctionOutlineWidth);
+    OpaqueOutlineEdgeGrid edgeGrid;
+    // Fully opaque duplicate lines are pixel-identical; translucent lines
+    // compound their opacity, so retain every line in that configuration.
+    if (!thickOutline && outlineOpacity >= 1.0f) {
+        std::int64_t loX=INT64_MAX,loY=INT64_MAX,loZ=INT64_MAX;
+        std::int64_t hiX=INT64_MIN,hiY=INT64_MIN,hiZ=INT64_MIN;
+        auto visit=[&](BlockPos const& p) {
+            loX=std::min(loX,static_cast<std::int64_t>(p.x));
+            loY=std::min(loY,static_cast<std::int64_t>(p.y));
+            loZ=std::min(loZ,static_cast<std::int64_t>(p.z));
+            hiX=std::max(hiX,static_cast<std::int64_t>(p.x));
+            hiY=std::max(hiY,static_cast<std::int64_t>(p.y));
+            hiZ=std::max(hiZ,static_cast<std::int64_t>(p.z));
+        };
+        for (auto const& cell : missingCells) visit(cell.position);
+        for (auto const& cell : wrongCells) visit(cell.position);
+        for (auto const& p : extraCells) visit(p);
+        if (loX != INT64_MAX) edgeGrid.reset(loX,loY,loZ,hiX,hiY,hiZ);
+    }
+    std::uint8_t edgeColorBit{};
+    bool deferMissingEdges{};
+    std::uint64_t outlineEdgesAttempted{},outlineEdgesEmitted{};
     // Every overlay vertex aims at the center of the vanilla 2x2 pure-white
     // texture so the overlay materials' texture lookups stay a neutral opaque
     // (1,1,1,1) instead of sampling the missing-texture checkerboard.
     auto addOutlineEdge = [&](Vec3 const& first, Vec3 const& second) {
+        ++outlineEdgesAttempted;
+        if (edgeGrid.enabled()) {
+            int axis=first.x!=second.x ? 0 : (first.y!=second.y ? 1 : 2);
+            auto const x=static_cast<std::int64_t>(std::min(first.x,second.x));
+            auto const y=static_cast<std::int64_t>(std::min(first.y,second.y));
+            auto const z=static_cast<std::int64_t>(std::min(first.z,second.z));
+            if (!edgeGrid.claim(axis,x,y,z,edgeColorBit)) return;
+            if (deferMissingEdges) return;
+        }
+        ++outlineEdgesEmitted;
         if (thickOutline) {
             emitThickComparisonEdge({first.x, first.y, first.z}, {second.x, second.y, second.z},
                 settings.correctionOutlineWidth, [&](ComparisonQuad const& quad) {
@@ -2237,24 +2698,21 @@ void buildCorrectionSectionMeshes(
     // geometry, not an alpha change or an unsupported D3D line-width setting.
     auto buildOutline = [&](bool wantWrong, std::size_t count) -> std::unique_ptr<mce::Mesh> {
         if (count == 0) return nullptr;
+        std::optional<std::uint32_t> previousColor;
+        auto const originalCapacity = count * static_cast<std::size_t>(thickOutline ? 288 : 24);
+        auto const capacity = edgeGrid.enabled()
+            ? std::min(originalCapacity, edgeGrid.maximumVertexCount(wantWrong ? 3U : 1U))
+            : originalCapacity;
         tessellator.begin(
             Tessellator::DebugContextCallback{},
             thickOutline ? mce::PrimitiveMode::QuadList : mce::PrimitiveMode::LineList,
-            static_cast<int>(count * (thickOutline ? 288 : 24)),
+            static_cast<int>(capacity),
             false
         );
-        for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.buildCorrectionState(index);
-            auto const priority = correctionPriority(correction);
-            if (priority == 0) continue;
-            if (isWrongState(correction) != wantWrong) continue;
-            auto const& entry = state.structure->renderBlocks[index];
-            // A missing pure-liquid cell is already communicated by its blue
-            // translucent proxy hull; skip the duplicate outline.
-            if (correction == CorrectionState::Missing && !entry.block && entry.liquid) continue;
-            auto const p = transformStructurePosition(
-                entry, *state.structure, settings.mirrorMode, settings.rotationTurns
-            );
+        deferMissingEdges = edgeGrid.enabled() && !wantWrong;
+        for (auto const& cell : (wantWrong ? wrongCells : missingCells)) {
+            auto const correction = cell.correction;
+            auto const p = cell.position;
             auto const outlineColor = correction == CorrectionState::Missing
                 ? withAlpha(MissingColorAbgrRgb, outlineOpacity)
                 : correction == CorrectionState::WrongState
@@ -2266,7 +2724,12 @@ void buildCorrectionSectionMeshes(
             float const x1 = static_cast<float>(p.x) + outlineExtent;
             float const y1 = static_cast<float>(p.y) + outlineExtent;
             float const z1 = static_cast<float>(p.z) + outlineExtent;
-            setColorAbgr(tessellator, outlineColor);
+            if (previousColor != outlineColor) {
+                setColorAbgr(tessellator, outlineColor);
+                previousColor = outlineColor;
+            }
+            edgeColorBit = correction == CorrectionState::Missing ? 1U
+                : (correction == CorrectionState::WrongType ? 2U : 4U);
             addOutlineEdge({x0,y0,z0},{x1,y0,z0}); addOutlineEdge({x1,y0,z0},{x1,y1,z0});
             addOutlineEdge({x1,y1,z0},{x0,y1,z0}); addOutlineEdge({x0,y1,z0},{x0,y0,z0});
             addOutlineEdge({x0,y0,z1},{x1,y0,z1}); addOutlineEdge({x1,y0,z1},{x1,y1,z1});
@@ -2278,11 +2741,8 @@ void buildCorrectionSectionMeshes(
             setColorAbgr(tessellator, withAlpha(
                 ExtraColorAbgrRgb, outlineOpacity
             ));
-            for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
-                auto const p = transformStructurePosition(
-                    BlockPos{x, y, z}, *state.structure,
-                    settings.mirrorMode, settings.rotationTurns
-                );
+            edgeColorBit = 8U;
+            for (auto const& p : extraCells) {
                 float const x0 = static_cast<float>(p.x) + outlineInset;
                 float const y0 = static_cast<float>(p.y) + outlineInset;
                 float const z0 = static_cast<float>(p.z) + outlineInset;
@@ -2297,14 +2757,42 @@ void buildCorrectionSectionMeshes(
                 addOutlineEdge({x1,y1,z0},{x1,y1,z1}); addOutlineEdge({x0,y1,z0},{x0,y1,z1});
             }
         }
+        if (deferMissingEdges) {
+            setColorAbgr(tessellator, withAlpha(MissingColorAbgrRgb, outlineOpacity));
+            edgeGrid.forEachMergedRun(1U, [&](int axis, std::int64_t x,
+                std::int64_t y, std::int64_t z, std::size_t length) {
+                float const fx=static_cast<float>(x), fy=static_cast<float>(y);
+                float const fz=static_cast<float>(z), delta=static_cast<float>(length);
+                float const ex=fx+(axis==0 ? delta : 0.0f);
+                float const ey=fy+(axis==1 ? delta : 0.0f);
+                float const ez=fz+(axis==2 ? delta : 0.0f);
+                tessellator.tex2({0.5f,0.5f});
+                tessellator.vertex(fx,fy,fz);
+                tessellator.tex2({0.5f,0.5f});
+                tessellator.vertex(ex,ey,ez);
+                ++outlineEdgesEmitted;
+            });
+            deferMissingEdges = false;
+        }
         return std::make_unique<mce::Mesh>(tessellator.end(
             uploadMode,
             "LHoloCorrectionOutline",
             SupplementaryFieldAutoGenerationMode{0}
         ));
     };
+    auto const overlayReady = std::chrono::steady_clock::now();
+    state.meshCorrectionSetupMicros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            overlayReady - overlayStarted).count());
     state.correctionOutlineSectionMeshes[section] = buildOutline(false, missingCount);
     state.wrongOutlineSectionMeshes[section] = buildOutline(true, wrongCount);
+    auto const outlinesDone = std::chrono::steady_clock::now();
+    state.meshCorrectionOutlineMicros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            outlinesDone - overlayReady).count());
+    state.meshOutlineAttemptedEdges = outlineEdgesAttempted;
+    state.meshOutlineEmittedEdges = outlineEdgesEmitted;
+    state.meshOutlineGridBytes = edgeGrid.bytes();
 
     // Litematica-style correction fill: an exact untextured 1x1x1 cell overlay.
     // Rasterizer bias supplies depth separation at submission time.
@@ -2316,24 +2804,22 @@ void buildCorrectionSectionMeshes(
     };
     auto buildFill = [&](bool wantWrong, std::size_t count) -> std::unique_ptr<mce::Mesh> {
         if (count == 0) return nullptr;
-        tessellator.begin(
-            Tessellator::DebugContextCallback{},
-            mce::PrimitiveMode::QuadList,
-            static_cast<int>(count * 24),
-            false
-        );
         auto const neighborPriority = [&](BlockPos const& p, int dx, int dy, int dz) {
+            if (priorityGridReady) {
+                return static_cast<int>(priorityGrid.get(
+                    p.x + dx, p.y + dy, p.z + dz));
+            }
             BlockPos const worldPosition{
                 state.anchor.x + settings.offsetX + p.x + dx,
                 state.anchor.y + settings.offsetY + p.y + dy,
                 state.anchor.z + settings.offsetZ + p.z + dz
             };
-            auto const expected = state.expectedWorldBlockIndices->find(std::tuple{
+            auto const expected = state.worldLookup->indexAt(std::tuple{
                 worldPosition.x, worldPosition.y, worldPosition.z
             });
-            auto priority = expected == state.expectedWorldBlockIndices->end()
-                    || !state.hasBuildBlockState(expected->second)
-                ? 0 : correctionPriority(state.buildCorrectionState(expected->second));
+            auto priority = !expected
+                    || !state.hasBuildBlockState(*expected)
+                ? 0 : correctionPriority(state.renderCorrectionState(*expected));
             auto const local = inverseTransformStructurePosition(
                 BlockPos{p.x + dx, p.y + dy, p.z + dz},
                 *state.structure,
@@ -2347,16 +2833,109 @@ void buildCorrectionSectionMeshes(
             }
             return priority;
         };
-        for (auto const index : state.sectionBlockIndices[section]) {
-            auto const correction = state.buildCorrectionState(index);
-            auto const priority = correctionPriority(correction);
-            if (priority == 0) continue;
-            if (isWrongState(correction) != wantWrong) continue;
-            auto const& entry = state.structure->renderBlocks[index];
-            if (correction == CorrectionState::Missing && !entry.block && entry.liquid) continue;
-            auto const p = transformStructurePosition(
-                entry, *state.structure, settings.mirrorMode, settings.rotationTurns
-            );
+        std::optional<std::uint32_t> activeFillColor;
+        auto const setFillColor = [&](std::uint32_t color) {
+            if (activeFillColor == color) return;
+            activeFillColor = color;
+            setColorAbgr(tessellator, color);
+        };
+        auto const& cells = wantWrong ? wrongCells : missingCells;
+        // Build exposed faces in one pass. A conservative three-face average
+        // cuts initial capacity in half relative to the old 6-face allocation.
+        // Tessellator grows when a sparse cell needs more, while dense
+        // interiors no longer require a second six-neighbor scan and masks.
+        state.meshFillCandidateFaces += count * 6U;
+        auto const computeMask = [&](BlockPos const& pos, int priority) {
+            auto const mask = correctionExposedFaceMask(priority, [&](int dx, int dy, int dz) {
+                return neighborPriority(pos, dx, dy, dz);
+            });
+            state.meshFillEmittedFaces += static_cast<std::size_t>(
+                std::popcount(static_cast<unsigned int>(mask)));
+            return mask;
+        };
+        // Dense, single-category Missing surfaces contain many identical
+        // adjoining 1x1 quads. Merge only coplanar +X/+Z strips of the same
+        // color after computing the EXACT original six-neighbor face masks.
+        // This keeps every logical surface cell, its orientation and alpha;
+        // any mixed/wrong-category or sparse section uses the old path.
+        if (!wantWrong && wrongCount == 0 && missingCells.size() >= 512
+            && std::all_of(missingCells.begin(), missingCells.end(),
+                [](CorrectionCell const& cell) {
+                    return cell.correction == CorrectionState::Missing;
+                })) {
+            int minX = INT_MAX, minY = INT_MAX, minZ = INT_MAX;
+            int maxX = INT_MIN, maxY = INT_MIN, maxZ = INT_MIN;
+            for (auto const& cell : missingCells) {
+                auto const& p = cell.position;
+                minX = std::min(minX, p.x); minY = std::min(minY, p.y);
+                minZ = std::min(minZ, p.z);
+                maxX = std::max(maxX, p.x); maxY = std::max(maxY, p.y);
+                maxZ = std::max(maxZ, p.z);
+            }
+            CorrectionFillRunGrid runGrid;
+            if (runGrid.reset(minX,minY,minZ,maxX,maxY,maxZ)) {
+                auto const beforeFaces = state.meshFillEmittedFaces;
+                for (auto const& cell : missingCells) {
+                    auto const& p = cell.position;
+                    runGrid.add(p.x,p.y,p.z,
+                                computeMask(p, correctionPriority(cell.correction)));
+                }
+                auto const faces = state.meshFillEmittedFaces - beforeFaces;
+                // Collect each rectangle once. The first pass establishes
+                // exact tessellator capacity; the second simply emits the
+                // saved coordinates without recomputing the greedy scan.
+                std::vector<std::array<int,6>> rectangles;
+                rectangles.reserve(std::min<std::size_t>(faces, 512));
+                runGrid.forEachRectangle([&](int side,int x,int y,int z,
+                                              int width,int height) {
+                    rectangles.push_back({side,x,y,z,width,height});
+                });
+                // Do not use the grid unless it halves the emitted quads.
+                // All unsupported sections keep the original per-cell path.
+                if (!rectangles.empty() && rectangles.size() * 2 < faces) {
+                    state.meshFillRunOriginalFaces += faces;
+                    state.meshFillRunQuads += rectangles.size();
+                    tessellator.begin(
+                        Tessellator::DebugContextCallback{},
+                        mce::PrimitiveMode::QuadList,
+                        static_cast<int>(rectangles.size() * 4U), false);
+                    setFillColor(withAlpha(MissingColorAbgrRgb, fillOpacity));
+                    for (auto const& rect : rectangles) {
+                        auto const [side,x,y,z,width,height] = rect;
+                        float const x0=static_cast<float>(x),y0=static_cast<float>(y);
+                        float const z0=static_cast<float>(z);
+                        float const x1=x0+1.0f,y1=y0+1.0f,z1=z0+1.0f;
+                        float const xEnd=x0+static_cast<float>(width);
+                        float const yEnd=y0+static_cast<float>(height);
+                        float const zEnd=z0+static_cast<float>(width);
+                        float const zWide=z0+static_cast<float>(height);
+                        switch (side) {
+                        case 0: addFillFace({x0,y0,z0},{x0,yEnd,z0},{xEnd,yEnd,z0},{xEnd,y0,z0}); break;
+                        case 1: addFillFace({xEnd,y0,z1},{xEnd,yEnd,z1},{x0,yEnd,z1},{x0,y0,z1}); break;
+                        case 2: addFillFace({x0,y0,zEnd},{x0,yEnd,zEnd},{x0,yEnd,z0},{x0,y0,z0}); break;
+                        case 3: addFillFace({x1,y0,z0},{x1,yEnd,z0},{x1,yEnd,zEnd},{x1,y0,zEnd}); break;
+                        case 4: addFillFace({x0,y0,zWide},{x0,y0,z0},{xEnd,y0,z0},{xEnd,y0,zWide}); break;
+                        case 5: addFillFace({x0,y1,z0},{x0,y1,zWide},{xEnd,y1,zWide},{xEnd,y1,z0}); break;
+                        }
+                    }
+                    return std::make_unique<mce::Mesh>(tessellator.end(
+                        uploadMode, "LHoloWarningFill", SupplementaryFieldAutoGenerationMode{0}));
+                }
+                // Restore counters before the original per-cell fallback.
+                state.meshFillEmittedFaces = beforeFaces;
+            }
+        }
+        tessellator.begin(
+            Tessellator::DebugContextCallback{},
+            mce::PrimitiveMode::QuadList,
+            static_cast<int>(count * 12U),
+            false
+        );
+        for (auto const& cell : cells) {
+            auto const mask = computeMask(cell.position, correctionPriority(cell.correction));
+            if (!mask) continue;
+            auto const correction = cell.correction;
+            auto const p = cell.position;
             // Face-culling stays global across categories so a wrong cell next
             // to a missing cell still hides the lower-priority shared face.
             float const x0 = static_cast<float>(p.x);
@@ -2370,36 +2949,34 @@ void buildCorrectionSectionMeshes(
                 : correction == CorrectionState::WrongState
                     ? withAlpha(WrongStateColorAbgrRgb, fillOpacity)
                     : withAlpha(WrongBlockColorAbgrRgb, fillOpacity);
-            setColorAbgr(tessellator, fillColor);
-            if (priority > neighborPriority(p, 0, 0, -1)) addFillFace({x0,y0,z0}, {x0,y1,z0}, {x1,y1,z0}, {x1,y0,z0});
-            if (priority > neighborPriority(p, 0, 0, 1))  addFillFace({x1,y0,z1}, {x1,y1,z1}, {x0,y1,z1}, {x0,y0,z1});
-            if (priority > neighborPriority(p, -1, 0, 0)) addFillFace({x0,y0,z1}, {x0,y1,z1}, {x0,y1,z0}, {x0,y0,z0});
-            if (priority > neighborPriority(p, 1, 0, 0))  addFillFace({x1,y0,z0}, {x1,y1,z0}, {x1,y1,z1}, {x1,y0,z1});
-            if (priority > neighborPriority(p, 0, -1, 0)) addFillFace({x0,y0,z1}, {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1});
-            if (priority > neighborPriority(p, 0, 1, 0))  addFillFace({x0,y1,z0}, {x0,y1,z1}, {x1,y1,z1}, {x1,y1,z0});
+            setFillColor(fillColor);
+            if ((mask & (1U << 0)) != 0U) addFillFace({x0,y0,z0}, {x0,y1,z0}, {x1,y1,z0}, {x1,y0,z0});
+            if ((mask & (1U << 1)) != 0U)  addFillFace({x1,y0,z1}, {x1,y1,z1}, {x0,y1,z1}, {x0,y0,z1});
+            if ((mask & (1U << 2)) != 0U) addFillFace({x0,y0,z1}, {x0,y1,z1}, {x0,y1,z0}, {x0,y0,z0});
+            if ((mask & (1U << 3)) != 0U)  addFillFace({x1,y0,z0}, {x1,y1,z0}, {x1,y1,z1}, {x1,y0,z1});
+            if ((mask & (1U << 4)) != 0U) addFillFace({x0,y0,z1}, {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1});
+            if ((mask & (1U << 5)) != 0U)  addFillFace({x0,y1,z0}, {x0,y1,z1}, {x1,y1,z1}, {x1,y1,z0});
         }
         if (wantWrong) {
-            constexpr int priority = 2;
-            setColorAbgr(tessellator, withAlpha(
+            setFillColor(withAlpha(
                 ExtraColorAbgrRgb, fillOpacity
             ));
-            for (auto const& [x, y, z] : state.sectionExtraBlockPositions[section]) {
-                auto const p = transformStructurePosition(
-                    BlockPos{x, y, z}, *state.structure,
-                    settings.mirrorMode, settings.rotationTurns
-                );
+            for (std::size_t i=0; i<extraCells.size(); ++i) {
+                auto const mask = computeMask(extraCells[i], 2);
+                if (!mask) continue;
+                auto const& p = extraCells[i];
                 float const x0 = static_cast<float>(p.x);
                 float const y0 = static_cast<float>(p.y);
                 float const z0 = static_cast<float>(p.z);
                 float const x1 = static_cast<float>(p.x + 1);
                 float const y1 = static_cast<float>(p.y + 1);
                 float const z1 = static_cast<float>(p.z + 1);
-                if (priority > neighborPriority(p, 0, 0, -1)) addFillFace({x0,y0,z0}, {x0,y1,z0}, {x1,y1,z0}, {x1,y0,z0});
-                if (priority > neighborPriority(p, 0, 0, 1))  addFillFace({x1,y0,z1}, {x1,y1,z1}, {x0,y1,z1}, {x0,y0,z1});
-                if (priority > neighborPriority(p, -1, 0, 0)) addFillFace({x0,y0,z1}, {x0,y1,z1}, {x0,y1,z0}, {x0,y0,z0});
-                if (priority > neighborPriority(p, 1, 0, 0))  addFillFace({x1,y0,z0}, {x1,y1,z0}, {x1,y1,z1}, {x1,y0,z1});
-                if (priority > neighborPriority(p, 0, -1, 0)) addFillFace({x0,y0,z1}, {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1});
-                if (priority > neighborPriority(p, 0, 1, 0))  addFillFace({x0,y1,z0}, {x0,y1,z1}, {x1,y1,z1}, {x1,y1,z0});
+                if ((mask & (1U << 0)) != 0U) addFillFace({x0,y0,z0}, {x0,y1,z0}, {x1,y1,z0}, {x1,y0,z0});
+                if ((mask & (1U << 1)) != 0U)  addFillFace({x1,y0,z1}, {x1,y1,z1}, {x0,y1,z1}, {x0,y0,z1});
+                if ((mask & (1U << 2)) != 0U) addFillFace({x0,y0,z1}, {x0,y1,z1}, {x0,y1,z0}, {x0,y0,z0});
+                if ((mask & (1U << 3)) != 0U)  addFillFace({x1,y0,z0}, {x1,y1,z0}, {x1,y1,z1}, {x1,y0,z1});
+                if ((mask & (1U << 4)) != 0U) addFillFace({x0,y0,z1}, {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1});
+                if ((mask & (1U << 5)) != 0U)  addFillFace({x0,y1,z0}, {x0,y1,z1}, {x1,y1,z1}, {x1,y1,z0});
             }
         }
         return std::make_unique<mce::Mesh>(tessellator.end(
@@ -2410,6 +2987,9 @@ void buildCorrectionSectionMeshes(
     };
     state.warningFillSectionMeshes[section] = buildFill(false, missingCount);
     state.wrongFillSectionMeshes[section] = buildFill(true, wrongCount);
+    state.meshCorrectionFillMicros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - outlinesDone).count());
 }
 
 void buildStructureBoundsMesh(

@@ -2,8 +2,11 @@
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionShellRules.h"
 #include "projection/core/ProjectionVisibilityRules.h"
+#include "projection/core/ProjectionResidencyScan.h"
 
+#include <algorithm>
 #include <bit>
+#include <array>
 #include <cstdio>
 #include <limits>
 
@@ -70,6 +73,102 @@ void testFrustum() {
     CULL_CHECK(projectionBoundsVisible(identity, prefetch, {}, 16));
 }
 
+void testNativeFarClipStreaming() {
+    ProjectionFrustum const open{};
+    ProjectionBounds bounds;
+    bounds.include({0,0,0});bounds.include({16,16,16});
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{0,0,0},0));
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{-15,0,-15},0));
+    CULL_CHECK(projectionBoundsWithinDistance(bounds,{100,0,0},100));
+    CULL_CHECK(!projectionBoundsWithinDistance(bounds,{101,0,0},100));
+    CULL_CHECK(projectionBoundsWithinDistance({}, {100000,0,100000},1));
+    auto near=classifyProjectionSection(open,bounds,{100,0,0},128);
+    CULL_CHECK(near.renderVisible && near.buildVisible && near.prefetchVisible);
+    CULL_CHECK(near.withinBuildDistance && near.withinRetentionDistance);
+    // Missing/invalid camera matrices must not hard-clip distant overlays.
+    auto edge=classifyProjectionSection(open,bounds,{140,0,0},128);
+    CULL_CHECK(edge.renderVisible && edge.buildVisible);
+    CULL_CHECK(edge.prefetchVisible && edge.withinBuildDistance);
+    CULL_CHECK(edge.withinRetentionDistance);
+    auto far=classifyProjectionSection(open,bounds,{180,0,0},128);
+    CULL_CHECK(far.renderVisible && far.prefetchVisible);
+    CULL_CHECK(far.withinBuildDistance && far.withinRetentionDistance);
+    // The native side-only frustum may see beyond Camera::mZFar. These
+    // projected Missing overlays must not be culled or retired there.
+    glm::mat4 projection{0};
+    projection[0][0]=projection[1][1]=1.0f;
+    projection[2][2]=-1.002f;
+    projection[2][3]=-1.0f;
+    projection[3][2]=-0.2f;
+    auto const sideOnly=ProjectionFrustum::fromViewProjection(projection);
+    CULL_CHECK(sideOnly.isValid());
+    ProjectionBounds distant;
+    distant.include({-8.0f,-8.0f,-410.0f});
+    distant.include({8.0f,8.0f,-390.0f});
+    CULL_CHECK(projectionBoundsVisible(sideOnly,distant,{}));
+    CULL_CHECK(!projectionBoundsWithinDistance(distant,{},128.0f));
+    auto const visibleFar=classifyProjectionSection(sideOnly,distant,{},128.0f);
+    CULL_CHECK(visibleFar.renderVisible && visibleFar.buildVisible);
+    CULL_CHECK(visibleFar.prefetchVisible);
+    CULL_CHECK(visibleFar.withinBuildDistance && visibleFar.withinRetentionDistance);
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(
+        visibleFar.withinRetentionDistance,false,false,true,false));
+    // Off-screen distant sections still benefit from frustum scheduling.
+    auto const offscreenFar=classifyProjectionSection(sideOnly,distant,{2000.0f,0.0f,0.0f},128.0f);
+    CULL_CHECK(!offscreenFar.renderVisible && !offscreenFar.buildVisible);
+    CULL_CHECK(!offscreenFar.prefetchVisible);
+    CULL_CHECK(!offscreenFar.withinBuildDistance && !offscreenFar.withinRetentionDistance);
+    CULL_CHECK(shouldRetireDistantTransparentMesh(false,false,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,true,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,true,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,false,true,true));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(true,false,false,true,false));
+    CULL_CHECK(!shouldRetireDistantTransparentMesh(false,false,false,false,false));
+    // Invalid camera clip must not stall the only mesher candidate.
+    for(auto bad: {0.0f,-1.0f,std::numeric_limits<float>::quiet_NaN(),
+                   std::numeric_limits<float>::infinity()}) {
+        auto unknown=classifyProjectionSection(open,bounds,{100000,0,100000},bad);
+        CULL_CHECK(unknown.withinBuildDistance && unknown.withinRetentionDistance);
+    }
+}
+void testLiquidProxyDrawSelection() {
+    // The fallback proxy is deliberately different from its cached GPU
+    // ownership: hidden sections must not submit draws or lose their meshes.
+    std::array<bool, 6> visible{true, false, true, true, true, true};
+    std::array<bool, 6> valid{true, true, false, true, true, true};
+    std::size_t validChecks{};
+    auto const select = [&](std::size_t sections, std::size_t meshes, std::size_t cells) {
+        return collectVisibleLiquidProxySections(
+            sections, meshes, cells,
+            [&](std::size_t i) { return visible.at(i); },
+            [&](std::size_t i) { ++validChecks; return valid.at(i); }
+        );
+    };
+    auto const shown = select(6, 5, 4);
+    CULL_CHECK(shown.size() == 2);
+    CULL_CHECK(shown[0] == 0 && shown[1] == 3);
+    CULL_CHECK(validChecks == 3); // hidden section never checks its GPU mesh
+    CULL_CHECK(select(0, 5, 4).empty());
+    CULL_CHECK(select(6, 0, 4).empty());
+    CULL_CHECK(select(6, 5, 0).empty());
+
+    // An invalid/missing camera must fail open through the existing frustum
+    // classifier; no proxy can disappear solely because matrices are absent.
+    ProjectionBounds region;
+    region.include({20, 1, 1});
+    region.include({24, 5, 5});
+    auto const invalid = ProjectionFrustum{};
+    auto const identity = ProjectionFrustum::fromViewProjection(glm::mat4{1});
+    CULL_CHECK(projectionBoundsVisible(invalid, region, {}));
+    CULL_CHECK(!projectionBoundsVisible(identity, region, {}));
+    auto const failOpen = collectVisibleLiquidProxySections(
+        2, 2, 2,
+        [&](std::size_t) { return projectionBoundsVisible(invalid, region, {}); },
+        [&](std::size_t) { return true; }
+    );
+    CULL_CHECK(failOpen.size() == 2);
+}
+
 void testTransformedBounds() {
     lholo::structure::LoadedStructure loaded;
     loaded.sizeX = 37;
@@ -99,8 +198,33 @@ void testTransformedBounds() {
     CULL_CHECK(projectionBuildRank(true, true, true) < projectionBuildRank(true, true, false));
 }
 
-void testBuildSelection() {
-    std::array<ProjectionBuildCandidate, 4> candidates{{{true, false, false, false, true, 1},
+void testResidencyScan() {
+    ProjectionResidencyScan scan;
+    CULL_CHECK(!scan.pending());
+    scan.request(5);
+    CULL_CHECK(scan.next() == 0 && scan.next() == 1);
+    scan.request(5);
+    for (auto expected : {2u, 3u, 4u, 0u, 1u}) CULL_CHECK(scan.next() == expected);
+    CULL_CHECK(!scan.pending());
+    scan.request(1);
+    CULL_CHECK(scan.next() == 0 && !scan.pending());
+    scan.request(0);
+    CULL_CHECK(!scan.pending());
+
+    // Renewing a large scan every frame must still visit every section.
+    constexpr std::size_t count = 1025;
+    std::array<bool, count> visited{};
+    for (std::size_t frame = 0; frame < 9; ++frame) {
+        scan.request(count);
+        for (std::size_t work = 0; work < ProjectionResidencyProbesPerFrame; ++work) visited[scan.next()] = true;
+    }
+    CULL_CHECK(std::all_of(visited.begin(), visited.end(), [](bool v) { return v; }));
+    std::size_t drained{};
+    while (scan.pending()) { scan.next(); ++drained; }
+    CULL_CHECK(drained == count - ProjectionResidencyProbesPerFrame);
+}
+
+void testBuildSelection() {    std::array<ProjectionBuildCandidate, 4> candidates{{{true, false, false, false, true, 1},
                                                         {true, false, true, true, false, 100},
                                                         {true, false, true, true, false, 50},
                                                         {true, false, false, true, false, 1}}};
@@ -185,7 +309,10 @@ void testShell() {
 
 int runProjectionCullingTests() {
     testFrustum();
+    testNativeFarClipStreaming();
+    testLiquidProxyDrawSelection();
     testTransformedBounds();
+    testResidencyScan();
     testBuildSelection();
     testShell();
     std::printf("ProjectionCullingTests: %d checks, %d failures\n", checks, failures);

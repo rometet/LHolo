@@ -31,7 +31,11 @@ public:
     void drawText(::Font&,::RectangleArea const&,::std::string&&,
         ::mce::Color const&,float,::ui::TextAlignment,
         ::TextMeasureData const&,::CaretMeasureData const&) override {}
-    void flushText(float,::std::optional<float>) override {}
+    // RenderDragon 26.60 adds a string_view drawText overload.
+    // Suppress it too; the native controller still receives its normal tick.
+    void drawText(::Font&,::RectangleArea const&,::std::string_view,
+        ::mce::Color const&,float,::ui::TextAlignment,
+        ::TextMeasureData const&,::CaretMeasureData const&) override {}    void flushText(float,::std::optional<float>) override {}
     void drawImage(::mce::ClientTexture const&,
         ::glm::vec2 const&,::glm::vec2 const&,::glm::vec2 const&,
         ::glm::vec2 const&,bool) override {}

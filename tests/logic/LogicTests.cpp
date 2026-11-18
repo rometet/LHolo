@@ -31,11 +31,15 @@
 #include "ComparisonStyleChecks.h"
 #include "VerifierHighlightChecks.h"
 #include "ProjectedPistonChecks.h"
+#include "ProjectedMeshSortChecks.h"
+#include "ProjectionCorrectionBatchPolicyChecks.h"
 #include "i18n/Message.h"
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
+#include "projection/core/ProjectionLiquidAppearance.h"
+#include "projection/core/ProjectionTransparentOrder.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionLiquidUv.h"
 #include "projection/core/LiquidReplayRules.h"
@@ -47,7 +51,17 @@
 #include "projection/mesh/WorkerTaskBoundary.h"
 #include "projection/mesh/SingleTaskWorker.h"
 #include "projection/mesh/SectionBlockSnapshot.h"
+#include "projection/mesh/SectionBlockTransformCache.h"
+#include "projection/mesh/RedstoneNativeRenderPass.h"
+#include "projection/mesh/RedstoneCurrentShapeIsolation.h"
+#include "projection/world/ProjectionVirtualAirPolicy.h"
 #include "SectionSnapshotChecks.h"
+#include "SectionBlockTransformCacheChecks.h"
+#include "LocalCorrectionPriorityGridChecks.h"
+#include "OpaqueOutlineEdgeGridChecks.h"
+#include "CorrectionFaceMaskChecks.h"
+#include "CorrectionFillRunChecks.h"
+#include "PresentFrameStatsChecks.h"
 #include "projection/mesh/TransparentQuadSort.h"
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
@@ -115,6 +129,15 @@ void testTransparentQuadSort() {
     LHOLO_CHECK(order && order->size() == 3);
     LHOLO_CHECK(order && (*order)[0] == 1 && (*order)[1] == 2 && (*order)[2] == 0);
     LHOLO_CHECK(order && transparentQuadOrderChanged(*order));
+    // GPU-sort reuse: identity starts with no retained order, exact equality
+    // keeps the uploaded buffer, and even one changed primitive requires it.
+    std::vector<std::size_t> identity{0, 1, 2};
+    LHOLO_CHECK(transparentSortOrderMatchesGpu(std::span<std::size_t const>{}, identity));
+    LHOLO_CHECK(order && !transparentSortOrderMatchesGpu(std::span<std::size_t const>{}, *order));
+    LHOLO_CHECK(order && transparentSortOrderMatchesGpu(*order, *order));
+    LHOLO_CHECK(order && !transparentSortOrderMatchesGpu(identity, *order));
+    LHOLO_CHECK(!transparentSortOrderMatchesGpu(
+        std::vector<std::size_t>{1, 2}, std::vector<std::size_t>{1, 2, 0}));
 
     std::vector<int> values{0,1,2,3, 10,11,12,13, 20,21,22,23};
     LHOLO_CHECK(order && reorderQuadVertexField(values, *order));
@@ -280,35 +303,18 @@ void testStructureTransformConcurrency() {
 }
 
 void testRenderCameraRead() {
-    using lholo::render::readRenderCameraPosition;
-    LHOLO_CHECK(!readRenderCameraPosition(nullptr));
-    SYSTEM_INFO system{};
-    GetSystemInfo(&system);
-    auto* allocation = static_cast<unsigned char*>(VirtualAlloc(nullptr, system.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-    LHOLO_CHECK(allocation != nullptr);
-    if (!allocation) return;
-    struct ReleasePage {
-        void* page;
-        ~ReleasePage() { VirtualFree(page, 0, MEM_RELEASE); }
-    } release{allocation};
-    std::array<float, 3> expected{-1.5f, 20.25f, 1000.5f};
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    auto const camera = readRenderCameraPosition(allocation);
-    LHOLO_CHECK(camera && camera->x == expected[0] && camera->y == expected[1] && camera->z == expected[2]);
-    LHOLO_CHECK(!readRenderCameraPosition(allocation + system.dwPageSize - 12));
-    DWORD previous{};
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READONLY, &previous));
-    LHOLO_CHECK(readRenderCameraPosition(allocation).has_value());
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_EXECUTE, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_NOACCESS, &previous));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
-    LHOLO_CHECK(VirtualProtect(allocation, system.dwPageSize, PAGE_READWRITE, &previous));
-    expected[1] = std::numeric_limits<float>::quiet_NaN();
-    std::memcpy(allocation + 40, expected.data(), sizeof(expected));
-    LHOLO_CHECK(!readRenderCameraPosition(allocation));
+    // 26.60 uses the typed SDK camera target, not an ABI offset.
+    using lholo::render::validateCameraTarget;
+    auto target=validateCameraTarget(Vec3{-1.5f,20.25f,1000.5f});
+    LHOLO_CHECK(target && target->x==-1.5f
+        && target->y==20.25f && target->z==1000.5f);
+    LHOLO_CHECK(validateCameraTarget(Vec3{0.0f,0.0f,0.0f}).has_value());
+    auto const nan=std::numeric_limits<float>::quiet_NaN();
+    auto const inf=std::numeric_limits<float>::infinity();
+    LHOLO_CHECK(!validateCameraTarget(Vec3{nan,0.0f,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,inf,0.0f}));
+    LHOLO_CHECK(!validateCameraTarget(Vec3{0.0f,0.0f,-inf}));
 }
-
 void testProjectionActivationRequests() {
     ProjectionActivationRequests requests;
     LHOLO_CHECK(!requests.consumeAnchor());
@@ -815,6 +821,28 @@ void testNativeLiquidUvRemap() {
     LHOLO_CHECK(!remapNativeLiquidUvToAtlas(std::span{incompleteQuad}, atlas));
 }
 
+void testGlassLiquidFaceOrder() {
+    using namespace lholo::projection::detail;
+    // This is the original upstream ed9944f failure: the back glass, water
+    // and front glass must interleave, not submit as two material families.
+    std::vector<ProjectionTransparentFaceKey> faces{
+        {{0,0,-1},0},{{0,0,-3},1},{{0,0,-2},2}
+    };
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,2,0}));
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,1})
+        == (std::vector<std::uint32_t>{0,2,1}));
+    faces={{{0,0,-1},2},{{0,0,-1},1}};
+    LHOLO_CHECK(projectionTransparentOrder(faces,{0,0,-1})
+        == (std::vector<std::uint32_t>{1,0}));
+    std::array<std::array<float,3>,4> fullFace{{
+        {1,0,0},{1,1,0},{1,1,1},{1,0,1}
+    }};
+    LHOLO_CHECK(projectionUnitFaceNeighbor(fullFace,{0,0,0})
+        == (std::array<int,3>{1,0,0}));
+    fullFace[2][2]=0.5f;
+    LHOLO_CHECK(!projectionUnitFaceNeighbor(fullFace,{0,0,0}));
+}
 void testPraxisCompatLiquidColor() {
     auto const expect = [](std::uint32_t source, PraxisCompatRgba8 expected) {
         auto const derived = applyPraxisCompatMissingAbgr(source);
@@ -865,7 +893,20 @@ void testPraxisCompatLiquidColor() {
     LHOLO_CHECK(!lavaResult.waterSeedApplied);
     LHOLO_CHECK(lavaResult.packed == nativeWhite);
     auto const lavaDerived = applyPraxisCompatMissingAbgr(lavaResult.packed);
-    LHOLO_CHECK(applyPraxisCompatLiquidAlpha(lavaDerived, false) == lavaDerived);
+    auto const lavaFinal = applyPraxisCompatLiquidAlpha(lavaDerived, false);
+    LHOLO_CHECK(PraxisLavaDerivedAlpha == 176);
+    LHOLO_CHECK(unpackAbgr(lavaFinal).alpha == PraxisLavaDerivedAlpha);
+    LHOLO_CHECK((lavaFinal & 0x00FFFFFFU) == (lavaDerived & 0x00FFFFFFU));
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.5F)).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 0.F)).alpha == 0);
+    LHOLO_CHECK(unpackAbgr(applyLiquidProjectionOpacity(lavaFinal, 1.F)).alpha == 176);
+    // Proxy and native replay share the same fluid-specific alpha contract.
+    auto const fallbackLava = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFF1080FFU, false), 0.5F);
+    auto const fallbackWater = applyLiquidProjectionOpacity(
+        applyPraxisCompatLiquidAlpha(0xFFE6B333U, true), 0.5F);
+    LHOLO_CHECK(unpackAbgr(fallbackLava).alpha == 88);
+    LHOLO_CHECK(unpackAbgr(fallbackWater).alpha == 80);
 }
 
 void testNativeLiquidInternalFaceCull() {
@@ -1317,6 +1358,7 @@ void testSettingsStore() {
     settings.materialHudPosition = 3;
     settings.altWheelOffsetEnabled = false;
     settings.clientOnlyGrabEnabled = true;
+    settings.clientOnlyGrabModifiers = 5;
     settings.moveHotkeys[4] = 0x57; // W
     settings.hasSavedProjection = true;
     settings.savedAnchorX = 12;
@@ -1361,6 +1403,7 @@ void testSettingsStore() {
     LHOLO_CHECK(loaded.materialHudPosition == 3);
     LHOLO_CHECK(!loaded.altWheelOffsetEnabled);
     LHOLO_CHECK(loaded.clientOnlyGrabEnabled && loaded.clientOnlyGrabConfigured);
+    LHOLO_CHECK(loaded.clientOnlyGrabModifiers == 5);
     LHOLO_CHECK(loaded.moveHotkeys[4] == 0x57);
     LHOLO_CHECK(loaded.hasSavedProjection);
     LHOLO_CHECK(loaded.savedAnchorX == 12);
@@ -2450,8 +2493,82 @@ int runProjectionCullingTests();
 int runProjectionDrawCacheTests();
 int runOverlayRenderingTests();
 
+void testDiodeVirtualAirNeighborhood() {
+    using lholo::projection::detail::inVirtualAirNeighborhood;
+    // Three equal west-facing repeater states in rocketcrafter.mcstructure
+    // at [2,1,10], [2,1,12], [2,1,14]. All must sample empty cells as
+    // projected air, not the actual world behind the hologram.
+    for (int z : {10, 12, 14}) {
+        LHOLO_CHECK(inVirtualAirNeighborhood(2, 1, z, 2, 1, z));
+        LHOLO_CHECK(inVirtualAirNeighborhood(4, 3, z + 2, 2, 1, z));
+        LHOLO_CHECK(inVirtualAirNeighborhood(0, -1, z - 2, 2, 1, z));
+        LHOLO_CHECK(!inVirtualAirNeighborhood(5, 1, z, 2, 1, z));
+        LHOLO_CHECK(!inVirtualAirNeighborhood(2, 1, z + 3, 2, 1, z));
+    }
+    LHOLO_CHECK(inVirtualAirNeighborhood(-1000000, 3, -1000000,
+                                         -1000000, 3, -1000000));
+    LHOLO_CHECK(!inVirtualAirNeighborhood(-999997, 3, -1000000,
+                                          -1000000, 3, -1000000));
+    LHOLO_CHECK(!inVirtualAirNeighborhood(0, 0, 0, 0, 0, 0, -1));
+}
+
+void testDiodeCurrentShapeIsolation() {
+    struct FakeNativeTessellator {
+        bool mCurrentShapeSet{true};
+        void const* mCurrentShapeBlock{reinterpret_cast<void const*>(0x1)};
+    } renderer;
+    using lholo::projection::detail::ScopedDiodeCurrentShape;
+    {
+        ScopedDiodeCurrentShape noChange{renderer, false};
+        LHOLO_CHECK(renderer.mCurrentShapeSet);
+        LHOLO_CHECK(renderer.mCurrentShapeBlock != nullptr);
+    }
+    LHOLO_CHECK(renderer.mCurrentShapeSet);
+    {
+        ScopedDiodeCurrentShape reset{renderer, true};
+        LHOLO_CHECK(!renderer.mCurrentShapeSet);
+        LHOLO_CHECK(renderer.mCurrentShapeBlock == nullptr);
+        // Simulate native shape calculation retaining a different full
+        // block on exit. Next diode must not inherit these values.
+        renderer.mCurrentShapeSet = true;
+        renderer.mCurrentShapeBlock = reinterpret_cast<void const*>(0x1);
+    }
+    LHOLO_CHECK(!renderer.mCurrentShapeSet);
+    LHOLO_CHECK(renderer.mCurrentShapeBlock == nullptr);
+}
+
+void testRedstoneNativeRenderPass() {
+    using lholo::projection::detail::isRedstoneDiodeNativeModel;
+    using lholo::projection::detail::diodeNeedsNativeExtraFlag;
+    using lholo::projection::detail::diodeNeedsDoubleSidedGhostMaterial;
+    using lholo::projection::detail::useNativeBlockCalculationCache;
+    for (auto name : {"minecraft:powered_repeater", "minecraft:unpowered_repeater",
+                      "minecraft:powered_comparator", "minecraft:unpowered_comparator"}) {
+        LHOLO_CHECK(isRedstoneDiodeNativeModel(name));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, false));
+        LHOLO_CHECK(diodeNeedsNativeExtraFlag(name, true));
+        LHOLO_CHECK(!useNativeBlockCalculationCache(name));
+        LHOLO_CHECK(diodeNeedsDoubleSidedGhostMaterial(name, true));
+        LHOLO_CHECK(!diodeNeedsDoubleSidedGhostMaterial(name, false));
+    }
+    for (auto name : {"minecraft:observer", "minecraft:piston",
+                      "minecraft:redstone_wire", "minecraft:stone", "custom:repeater"}) {
+        LHOLO_CHECK(!isRedstoneDiodeNativeModel(name));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, false));
+        LHOLO_CHECK(!diodeNeedsNativeExtraFlag(name, true));
+        LHOLO_CHECK(useNativeBlockCalculationCache(name));
+        LHOLO_CHECK(!diodeNeedsDoubleSidedGhostMaterial(name, true));
+    }
+}
+
+int runMcstructureInputTests();
+int runStructureBlocksCompactTests();
+int runCorrectionBulkEventTests();
 int main() {
     try {
+    testRedstoneNativeRenderPass();
+    testDiodeCurrentShapeIsolation();
+    testDiodeVirtualAirNeighborhood();
     testLoadOriginSnapshot();
     LHOLO_CHECK(runProjectionCullingTests()==0);
     LHOLO_CHECK(runProjectionDrawCacheTests()==0);
@@ -2459,6 +2576,8 @@ int main() {
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
     testTransparentQuadSort();
+    lholo::tests::runProjectedMeshSortChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionBatchPolicyChecks([](bool ok) { LHOLO_CHECK(ok); });
     testLiquidReplayRules();
     testProjectionCoordinateBounds();
     testLoadIntent();
@@ -2480,6 +2599,12 @@ int main() {
     testSingleTaskWorker();
     testSectionBlockSnapshot();
     lholo::tests::runSectionSnapshotChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runSectionBlockTransformCacheChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runLocalCorrectionPriorityGridChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runOpaqueOutlineEdgeGridChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionFaceMaskChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runCorrectionFillRunChecks([](bool ok) { LHOLO_CHECK(ok); });
+    lholo::tests::runPresentFrameStatsChecks([](bool ok) { LHOLO_CHECK(ok); });
     testMeshDiagnosticGate();
     lholo::tests::runCompanionCallbackChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runComparisonStyleChecks([](bool ok) { LHOLO_CHECK(ok); });
@@ -2490,6 +2615,7 @@ int main() {
     lholo::tests::runDirectMenuChecks([](bool ok) { LHOLO_CHECK(ok); });
     testNativeLiquidUvRemap();
     testPraxisCompatLiquidColor();
+    testGlassLiquidFaceOrder();
     testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();
@@ -2506,6 +2632,9 @@ int main() {
     testBlockPlacementRules();
     testJavaTextComponents();
     testI18n();
+    LHOLO_CHECK(runMcstructureInputTests() == 0);
+    LHOLO_CHECK(runStructureBlocksCompactTests() == 0);
+    LHOLO_CHECK(runCorrectionBulkEventTests() == 0);
     lholo::tests::runHudControlChecks([](bool ok) { LHOLO_CHECK(ok); });
     std::printf("LHoloLogicTests: %d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;

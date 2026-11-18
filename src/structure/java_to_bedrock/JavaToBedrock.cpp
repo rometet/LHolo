@@ -237,7 +237,7 @@ ResolvedJavaBlock resolveJavaBlockState(
         if (resolved->getTypeName() == "minecraft:bubble_column") {
             result.block = resolved;
             result.liquid = waterSource();
-        } else if (resolved->getBlockType().mMaterial.mLiquid) {
+        } else if (resolved->getBlockType().mMaterial.get().mLiquid) {
             result.liquid = resolved;
         } else {
             result.block = resolved;
@@ -260,7 +260,7 @@ ResolvedJavaBlock resolveJavaBlockState(
     if (resolved->getTypeName() == "minecraft:bubble_column") {
         result.block = resolved;
         if (mapping->waterlogged) result.liquid = waterSource();
-    } else if (resolved->getBlockType().mMaterial.mLiquid) {
+    } else if (resolved->getBlockType().mMaterial.get().mLiquid) {
         result.liquid = resolved;
     } else {
         result.block = resolved;

@@ -2,6 +2,7 @@
 // Copyright (C) 2026  MarmieQi
 
 #pragma once
+#include <cstdint>
 
 namespace lholo::input {
 
@@ -21,6 +22,7 @@ public:
     MenuInputHandoffScope& operator=(MenuInputHandoffScope const&) = delete;
 };
 
+void observeNativeWindowMessage(unsigned int message, std::uintptr_t wParam) noexcept;
 MenuInputGuardStatus installMenuInputGuard();
 bool uninstallMenuInputGuard();
 

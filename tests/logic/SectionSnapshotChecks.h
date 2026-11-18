@@ -66,5 +66,22 @@ void runSectionSnapshotChecks(Check check) {
     check(rejected);
     snapshot.capture({}, corrections, actors);
     check(snapshot.size() == 0 && snapshot.bytes() == 0 && !snapshot.find(0));
+
+    // Mimics a million-block schematic: the worker only needs three disjoint
+    // 16^3 sections. Check sparse ownership and its bounded memory footprint.
+    constexpr std::size_t largeCount = 1'200'000;
+    std::vector<std::uint8_t> largeCorrection(largeCount, 3);
+    std::vector<std::uint8_t> largeActors(largeCount, 1);
+    std::vector<std::size_t> local;
+    for (std::size_t start : {std::size_t{0}, std::size_t{100'000}, std::size_t{1'000'000}}) {
+        for (std::size_t i = 0; i < 4096; ++i) local.push_back(start + i);
+    }
+    snapshot.capture(local, largeCorrection, largeActors);
+    check(snapshot.size() == 3 * 4096);
+    check(snapshot.bytes() < 200 * 1024);
+    check(snapshot.find(100'100) && snapshot.find(100'100)->correction == 3);
+    check(!snapshot.find(500'000));
+    largeCorrection[100'100] = 1;
+    check(snapshot.find(100'100) && snapshot.find(100'100)->correction == 3);
 }
 } // namespace lholo::tests

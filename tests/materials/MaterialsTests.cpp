@@ -35,9 +35,58 @@ void testMaterialGrabRules() {
     check(grabAmountForSlot(budget,"item_b",64)==0,"already met never extracted");
     check(grabAmountForSlot(budget,"minecraft:stone",1)==1,"single item count cap");
     check(grabAmountForSlot(budget,"minecraft:stone",0)==0,"empty source skipped");
+    // The same missing material can be collected from multiple distinct
+    // server-acknowledged stacks. Recalculate from the confirmed inventory
+    // after each receipt; never exceed the schematic requirement.
+    auto afterFirst=computeGrabBudget(req,{{"minecraft:stone",124}},true);
+    check(afterFirst.at("minecraft:stone")==36,"remaining after first 24-item stack");
+    check(grabAmountForSlot(afterFirst,"minecraft:stone",64)==36,"second stack limited to remainder");
+    auto afterSecond=computeGrabBudget(req,{{"minecraft:stone",160}},true);
+    check(!afterSecond.contains("minecraft:stone"),"budget closes after fulfilled across stacks");
     check(computeGrabBudget(req,{},false).empty(),"malformed carried NBT fails closed");
     req.push_back({"unknown",{},"no-item","",999,64,"unknown"});
     check(!computeGrabBudget(req,{},true).contains(""),"unknown item never collected");
+    // A single request contains multiple independent source -> empty slot
+    // actions. The remaining schematic budget is shared across all actions.
+    auto batched=planGrabBatch(
+        {{"minecraft:stone",130},{"item_a",15}},
+        {
+            {0,"minecraft:stone",64},
+            {1,"minecraft:stone",64},
+            {2,"minecraft:stone",64},
+            {3,"item_a",32},
+            {4,"minecraft:stone",64}
+        },
+        {0,1,2,3,4}
+    );
+    check(batched.size()==4,"four material moves planned in one request");
+    check(batched[0].amount==64 && batched[1].amount==64
+        && batched[2].amount==2 && batched[3].amount==15,
+        "bulk plan respects remaining materials across source stacks");
+    check(batched[0].sourceSlot==0 && batched[1].sourceSlot==1
+        && batched[2].sourceSlot==2 && batched[3].sourceSlot==3,
+        "one action per authenticated source slot");
+    check(batched[0].destinationSlot==0 && batched[1].destinationSlot==1
+        && batched[2].destinationSlot==2 && batched[3].destinationSlot==3,
+        "each transfer gets a unique empty destination");
+    check(planGrabBatch({{"a",300}},
+        {{2,"a",64},{2,"a",64},{3,"a",64}},
+        {4,4,5}).size()==2,
+        "duplicate source and destination slots are not double-used");
+    check(planGrabBatch({{"a",128}},
+        {{2,"a",64},{3,"a",64}}, {1,2},1).size()==1,
+        "server action cap limits each packet");
+    check(planGrabBatch({{"a",128}},{{2,"a",64}}, {},36).empty(),
+        "full player inventory sends no transfer");
+    check(planGrabBatch({{"a",128}},
+        {{-1,"a",64},{108,"a",64}}, {0,1}).empty(),
+        "invalid source slots are rejected");
+    check(planGrabBatch({{"a",128}},{{2,"a",64}},
+        {-1,36}).empty(),"invalid destination slots are rejected");
+    check(planGrabBatch({{"a",1}},
+        {{2,"a",64}}, {0})[0].amount==1,
+        "never exceed one missing item");
+
 }
 void testState() {
     auto& state=StructureUiState::getInstance();state.clearMaterials();auto const token=state.materialListToken();

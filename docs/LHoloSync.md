@@ -1,17 +1,17 @@
-# LHolo Integrated Sync — 導入・使い方（Minecraft Bedrock 1.26.51）
+# LHolo Integrated Sync — 導入・使い方（Minecraft Bedrock 1.26.60）
 
 LHolo Integrated Sync は、同じ **Bedrock Dedicated Server (BDS)** にいるプレイヤー同士で、LHolo の設計図とその**配置座標・回転・反転**を共有する機能です。Minecraft Java版の Syncmatica と目的は近いですが、**通信プロトコルの互換性はありません**。Java版 Syncmatica のサーバーへ接続する機能ではありません。
 
 この機能は任意です。共有を使わないなら、今までどおりクライアント版 LHolo だけで動きます。
 
-> **開発版 / 実機検証中**: 26.51向けの V1 です。Minecraft 26.60 では利用できません。重要なワールドと設定はバックアップしてください。このページは開発ブランチ上の機能を説明しています。従来の [Releases](https://github.com/rometet/LHolo/releases) にある安定版に Sync 機能が含まれるとは限りません。
+> **26.60移植中・実機未検証（Draft）**: Client / BDS とも LeviLamina 26.60.0 SDK 向けに移植しています。ビルドが成功しても、26.60での2クライアント・サーバー間同期は別途実機確認が必要です。重要なワールド・設定をバックアップしてください。通常リリースにSync機能が含まれる保証はありません。
 
 ## 1. 対応環境・必要なもの
 
 | 利用者 | 必要なもの |
 | --- | --- |
-| プレイヤー | Windows x64 / **Minecraft Bedrock 1.26.51.01** / LeviLamina Client **26.51.5** / Sync対応版 LHolo |
-| サーバー管理者 | **BDS 1.26.51.1** / LeviLamina Server **26.51.5** / **LHoloSyncServer** |
+| プレイヤー | Windows x64 / **Minecraft Bedrock 1.26.60.01** / LeviLamina Client **26.60.0** / Sync対応版 LHolo |
+| サーバー管理者 | **BDS 1.26.60.06** / LeviLamina Server **26.60.0** / **LHoloSyncServer** |
 | 同じサーバーの非Sync利用者 | LHolo を入れなくても通常プレイ可（完全な無改造バニラクライアントとの共存は未検証） |
 
 プレイヤー側に Sync 用の追加Mod、追加リソースパック、別アプリは不要です。**LHoloクライアントは通常の設計図表示にサーバープラグインを必要としません**。Sync共有を使うときだけサーバー管理者がプラグインを導入します。
@@ -32,10 +32,10 @@ ZIPが公開されていない場合は、このブランチのソースから�
 1. Minecraftを終了する。
 2. 既存の `mods/LHolo/` と必要な設定をバックアップする。
 3. クライアントZIPに含まれる **`LHolo/` フォルダーごと** LeviLauncher の対象バージョンの `mods/` に入れる（古い `LHolo.dll` を混在させない）。
-4. Minecraft **1.26.51.01** を起動し、BDSへ参加する。ワールド内で **`Insert`** を押してLHoloを開く。
+4. Minecraft **1.26.60.05** を起動し、BDSへ参加する。ワールド内で **`Insert`** を押してLHoloを開く。
 
 ```text
-Minecraft 1.26.51.01/
+Minecraft 1.26.60.05/
 └─ mods/
    └─ LHolo/
       ├─ LHolo.dll
@@ -155,7 +155,7 @@ BDS/
 - 通信応答の意図的な欠落・遅延時の編集確定通知（ソース修正・自動テスト済みだが、障害注入の実機検証は未実施）
 - サーバー停止や切断が編集ロック中に発生した場合の復旧
 - **サブリージョンごとの独立した移動・回転・反転**（V1の対象外）
-- **Minecraft 26.60への対応**（このビルドでは非対応）
+- **Minecraft 26.60の実機同期検証**（Client / BDS の両ビルド後に実施）
 
 ## 7. よくあるトラブル
 

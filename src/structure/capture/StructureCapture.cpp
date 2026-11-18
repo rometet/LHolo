@@ -1,4 +1,6 @@
 #include "structure/capture/StructureCapture.h"
+#include "plugin/LHolo.h"
+#include "ll/api/mod/NativeMod.h"
 #include "resourcepacks/WorldPackReloadState.h"
 
 #include "i18n/Message.h"
@@ -256,6 +258,12 @@ void tick(LocalPlayer& player) {
     BlockPos const min{bounds.min.x, bounds.min.y, bounds.min.z};
     BlockPos const max{bounds.max.x, bounds.max.y, bounds.max.z};
     auto& region = player.getDimensionBlockSource();
+    // BlockSource read queries mutate the owner-thread chunk cache.
+    if(region.mOwnerThreadID.get() != std::this_thread::get_id()) {
+        LHolo::getInstance().getSelf().getLogger().error("Capture outside BlockSource owner thread");
+        status(i18n::TextKey::CaptureStatusTemplateFailed);
+        return;
+    }
     if (!region.areChunksFullyLoaded(min, max)) {
         status(i18n::TextKey::CaptureStatusRegionNotLoaded);
         return;

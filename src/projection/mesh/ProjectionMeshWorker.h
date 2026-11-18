@@ -7,6 +7,7 @@
 #pragma once
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/mesh/ResourceReloadCancellation.h"
 
 #include <array>
@@ -29,7 +30,25 @@ struct AsyncSectionBuildResult {
     std::uint64_t snapshotDataMicros{};
     std::uint64_t chunkViewMicros{};
     std::uint64_t workerBuildMicros{};
+    std::size_t   correctionSnapshotBytes{};
+    bool          correctionOnly{};
+    std::uint64_t bodyClassifyMicros{};
+    std::uint64_t bodyTessellateMicros{};
+    std::uint64_t liquidMicros{};
+    std::uint64_t auxMicros{};
+    std::uint64_t placeholderMicros{};
+    std::uint64_t correctionSetupMicros{};
+    std::uint64_t correctionOutlineMicros{};
+    std::uint64_t correctionFillMicros{};
+    std::uint64_t outlineAttemptedEdges{};
+    std::uint64_t outlineEmittedEdges{};
+    std::uint64_t outlineGridBytes{};
+    std::uint64_t fillCandidateFaces{};
+    std::uint64_t fillEmittedFaces{};
+    std::uint64_t fillRunOriginalFaces{};
+    std::uint64_t fillRunQuads{};
     std::size_t   section{};
+    ProjectionBounds           meshBounds;
     bool          success{};
     std::string   failureReason;
     std::uint64_t expectedVertexCount{};

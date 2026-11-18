@@ -28,6 +28,13 @@ struct ProjectionPlacementSettings {
     bool identityTransform{};
 };
 
+// Layer-only fast path: retain the resolved palette, actors, and world pose;
+// publish a new immutable view without replaying every schematic block.
+bool refreshProjectionLayerView(
+    ProjectionState& state, BlockSource& region,
+    structure::LayerAxis axis, structure::LayerDisplayMode mode, int layer
+);
+
 bool rebuildProjectionPlacement(
     ProjectionState&                   state,
     BlockSource&                       region,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "projection/core/ProjectedPistonAppearance.h"
+#include "projection/core/ProjectedPistonPrefetchCulling.h"
 #include "projection/mesh/ProjectedPistonRenderScope.h"
 
 #include <array>
@@ -14,6 +15,45 @@ namespace lholo::tests {
 template <class Check>
 void runProjectedPistonChecks(Check check) {
     using namespace projection::detail;
+    // Only mapped piston actors in sections beyond the expanded prefetch
+    // frustum are culled. All unknown or non-piston actors fail open.
+    std::array<std::size_t, 4> const sectionOf{0, 1, 2, 99};
+    std::array<bool, 3> const prefetch{true, false, true};
+    std::size_t visibilityChecks{};
+    auto mayRender = [&](bool piston, std::size_t block) {
+        return projectedPistonMayRender(piston, block, sectionOf, prefetch.size(),
+            [&](std::size_t section) { ++visibilityChecks; return prefetch[section]; });
+    };
+    check(mayRender(true, 0));
+    check(!mayRender(true, 1));
+    check(mayRender(true, 2));
+    check(mayRender(true, 3)); // invalid section index: fail open
+    check(mayRender(true, 4)); // missing mapping: fail open
+    check(mayRender(false, 1)); // other block-entity types unchanged
+    check(visibilityChecks == 3);
+    auto const invalidFrustum = ProjectionFrustum{};
+    auto const identityFrustum = ProjectionFrustum::fromViewProjection(glm::mat4{1});
+    check(projectedPistonCellVisible(invalidFrustum, {}, {100000, 70, -200000}));
+    check(projectedPistonCellVisible(identityFrustum, {}, {0, 0, 0}));
+    check(projectedPistonCellVisible(identityFrustum, {}, {3, 0, 0}));
+    check(!projectedPistonCellVisible(identityFrustum, {}, {10, 0, 0}));
+    check(projectedPistonCellVisible(identityFrustum, {1000, 70, -2000}, {1000, 70, -2000}));
+    check(!projectedPistonCellVisible(identityFrustum, {1000, 70, -2000}, {1010, 70, -2000}));
+    check(projectedPistonCellVisible(identityFrustum, {-100000, -30, 500000},
+                                    {-100000, -30, 500000}));
+    check(!projectedPistonCellVisible(identityFrustum, {-100000, -30, 500000},
+                                     {-99980, -30, 500000}));
+    // Perspective view: behind-camera pistons are rejected; a near-edge
+    // piston head remains in the padded box and must stay visible.
+    glm::mat4 perspective{0};
+    perspective[0][0] = perspective[1][1] = 1;
+    perspective[2][2] = -1.002f;
+    perspective[2][3] = -1;
+    perspective[3][2] = -.2f;
+    auto const viewFrustum = ProjectionFrustum::fromViewProjection(perspective);
+    check(projectedPistonCellVisible(viewFrustum, {}, {0, 0, -15}));
+    check(!projectedPistonCellVisible(viewFrustum, {}, {30, 0, -15}));
+    check(!projectedPistonCellVisible(viewFrustum, {}, {0, 0, 30}));
     for (auto const opacity : {0.0f, 0.15f, 0.5f, 1.0f}) {
         check(projectedPistonPass(opacity, false) == (opacity == 1.0f
             ? ProjectedPistonPass::Native : ProjectedPistonPass::Skip));

@@ -374,6 +374,19 @@ int chooseHotbarSwapTarget(Player& player) {
     return player.getSelectedItemSlot();
 }
 
+// As soon as a server-synchronized transfer is sent to a spare empty hotbar
+// slot, select that slot in parallel with the inventory swap. Waiting until
+// the server's inventory echo to select it incurs a second network hop for
+// the selected-slot update. Never place from the still-empty slot here:
+// the normal tick code waits for the actual inventory after-image first.
+// Full-hotbar swaps already target the selected slot; keep that untouched.
+void preselectPendingEmptyHotbarSlot(Player& player,int hotbarSlot) {
+    if(hotbarSlot<0 || hotbarSlot>=kHotbarSlots
+        || hotbarSlot==player.getSelectedItemSlot())return;
+    if(!player.getInventory().getItem(hotbarSlot).isNull())return;
+    player.setSelectedSlot(hotbarSlot);
+}
+
 // Inventory acknowledgements are observed through both local slot images. A
 // completed swap may unlock the next material immediately rather than waiting
 // out the former unconditional 200ms throttle. A missing/rejected response
@@ -768,7 +781,8 @@ bool wouldMergeClickedSlab(Block const& ghost, Block const& support) {
 
     ItemInstance const ghostItem = ghost.getBlockType().asItemInstance(ghost, nullptr);
     ItemInstance const supportItem = support.getBlockType().asItemInstance(support, nullptr);
-    return ghostItem.getIdAux() == supportItem.getIdAux();
+    return block::hasUsableItem(ghostItem) && block::hasUsableItem(supportItem)
+        && ghostItem.getIdAux() == supportItem.getIdAux();
 }
 
 // RuntimeId is intentionally retained for ordinary blocks. For the three
@@ -1259,6 +1273,7 @@ void tickRangePlaceImpl(LocalPlayer& player, PlacementContext const& placementCo
             }
             placementState().recordInventorySwap(receipt);
             placementState().setNextSwapAt(now + kSwapRetryMs);
+            preselectPendingEmptyHotbarSlot(player,hotbarSlot);
             telemetry::count(telemetry::Event::SwapRequested);
             return;
         }
@@ -1444,6 +1459,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         if (!sendInventorySwap(found.slot, hotbarSlot, *found.item, toItem)) return;
         placementState().recordInventorySwap(receipt);
         placementState().setNextSwapAt(now + kSwapRetryMs);
+        preselectPendingEmptyHotbarSlot(*player,hotbarSlot);
         telemetry::count(telemetry::Event::SwapRequested);
         return;
     }

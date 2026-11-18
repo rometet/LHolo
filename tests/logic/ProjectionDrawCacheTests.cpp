@@ -200,6 +200,92 @@ void testInvalidationAndLifetime() {
     DRAW_CHECK(cache.residentCount() == 0);
 }
 
+void testGhostTerrainOrder() {
+    constexpr std::size_t count = 393; // 25-region production fixture size
+    auto records = makeRecords(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        records[i].slots = (i % 11 == 0) ? 0
+            : static_cast<std::uint16_t>(i % 5 == 0 ? 0b0111 : 0b1111);
+    }
+    std::vector<unsigned char> visible(count, 1);
+    ProjectionDrawCache cache;
+    ProjectionDrawPosition eye{123, -30, 900};
+    std::uint64_t activation = 1, meshRevision = 1, visibilityRevision = 1;
+    auto distance = [&](std::size_t section) {
+        auto const& center = records[section].center;
+        auto const dx = center.x - eye.x;
+        auto const dy = center.y - eye.y;
+        auto const dz = center.z - eye.z;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    auto prepare = [&] {
+        cache.prepare(activation, meshRevision, visibilityRevision, count, eye,
+                      [&](std::size_t i) { return records[i]; },
+                      [&](std::size_t i) { return visible[i] != 0; });
+    };
+    auto check = [&] {
+        std::vector<ProjectionTerrainDraw> expected;
+        for (std::size_t section = 0; section < count; ++section) {
+            if (!visible[section]) continue;
+            for (std::size_t bucket = 0; bucket < 4; ++bucket) {
+                if (records[section].slots & (1u << bucket))
+                    expected.push_back({section, bucket});
+            }
+        }
+        std::sort(expected.begin(), expected.end(), [&](auto const& a, auto const& b) {
+            auto const da = distance(a.section), db = distance(b.section);
+            if (da != db) return da > db;
+            if (a.section != b.section) return a.section < b.section;
+            return a.bucket < b.bucket;
+        });
+        std::size_t reads{};
+        auto const& actual = cache.ghostTerrainOrder([&](std::size_t i) {
+            ++reads;
+            return distance(i);
+        });
+        DRAW_CHECK(actual == expected);
+        DRAW_CHECK(reads <= count);
+        auto const built = cache.ghostOrderBuilds;
+        reads = 0;
+        auto const& again = cache.ghostTerrainOrder([&](std::size_t i) {
+            ++reads;
+            return distance(i);
+        });
+        DRAW_CHECK(again == expected);
+        DRAW_CHECK(reads == 0);
+        DRAW_CHECK(cache.ghostOrderBuilds == built);
+    };
+    prepare();
+    check();
+    for (int frame = 0; frame < 12; ++frame) {
+        // Camera rotation changes frustum visibility without changing eye.
+        ++visibilityRevision;
+        for (std::size_t i = 0; i < count; ++i)
+            visible[i] = (i * 7 + frame * 11) % 19 < 9;
+        prepare();
+        check();
+    }
+    for (int frame = 0; frame < 12; ++frame) {
+        eye.x += .75f;
+        eye.z -= .5f;
+        prepare();
+        check();
+    }
+    // Mesh upload removing and adding terrain must invalidate reused order.
+    records[1].slots = 0;
+    records[11].slots = 0b1111;
+    cache.noteMeshUpload(1);
+    cache.noteMeshUpload(11);
+    ++meshRevision;
+    prepare();
+    check();
+    // Activation resets all source records even with identical IDs.
+    ++activation;
+    records[19].slots = 0b1111;
+    prepare();
+    check();
+}
+
 void testMaterialPassRouting() {
     std::vector<ProjectionDrawRecord> records{
         {0, {100, 0, 0}, projectionDrawBit(ProjectionDrawSlot::Opaque)},
@@ -256,6 +342,56 @@ void testBadDistancesAndViewKeys() {
     DRAW_CHECK(changed != key);
 }
 
+
+void testIncrementalGpuUploadCache() {
+    constexpr std::size_t count = 4096;
+    auto records = makeRecords(count);
+    for (auto& r : records) r.slots = 0;
+    std::vector<unsigned char> visible(count, 1);
+    ProjectionDrawCache cache;
+    std::size_t reads{};
+    auto prepare = [&](std::uint64_t revision, std::uint64_t activation = 1) {
+        cache.prepare(activation, revision, revision, records.size(), {},
+            [&](std::size_t i) { ++reads; return records[i]; },
+            [&](std::size_t i) { return visible[i]; });
+    };
+    prepare(1);
+    DRAW_CHECK(reads == count);
+    for (std::size_t i = 0; i < 512; ++i) {
+        auto const section = (i * 37) % count;
+        records[section].slots = 1u << (i % 4);
+        cache.noteMeshUpload(section);
+        auto const before = reads;
+        prepare(2 + i);
+        DRAW_CHECK(reads == before + 1);
+        DRAW_CHECK(cache.deltaRecordUpdates == i + 1);
+        if (i % 71 == 0) compare(cache, reference(records, visible, {}));
+    }
+    compare(cache, reference(records, visible, {}));
+    // Reupload that removes a previously resident section and one that
+    // adds a blend section in the same renderer frame.
+    records[0].slots = 0;
+    records[1].slots = projectionDrawBit(ProjectionDrawSlot::Blend);
+    cache.noteMeshUpload(0);
+    cache.noteMeshUpload(1);
+    auto const before = reads;
+    prepare(514);
+    DRAW_CHECK(reads == before + 2);
+    compare(cache, reference(records, visible, {}));
+    // A new activation invalidates the entire GPU/draw-list lifetime.
+    records[2].slots = projectionDrawBit(ProjectionDrawSlot::Liquid);
+    cache.noteMeshUpload(2);
+    prepare(514, 2);
+    DRAW_CHECK(reads == before + 2 + count);
+    compare(cache, reference(records, visible, {}));
+    // An upload revision without a notification must fail closed to a scan.
+    records[3].slots = projectionDrawBit(ProjectionDrawSlot::WrongFill);
+    auto const prior = reads;
+    prepare(515, 2);
+    DRAW_CHECK(reads == prior + count);
+    compare(cache, reference(records, visible, {}));
+}
+
 void testProgressivePublishing() {
     auto records = makeRecords(128);
     for (auto& record : records)
@@ -288,9 +424,11 @@ void testProgressivePublishing() {
 
 int runProjectionDrawCacheTests() {
     testInvalidationAndLifetime();
+    testGhostTerrainOrder();
     testMaterialPassRouting();
     testBadDistancesAndViewKeys();
     testProgressivePublishing();
+    testIncrementalGpuUploadCache();
     std::printf("ProjectionDrawCacheTests: %d checks, %d failures\n", checks, failures);
     return failures;
 }

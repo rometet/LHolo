@@ -1,8 +1,10 @@
 // LHolo - Client-side projection renderer for Minecraft Bedrock Windows
 // Copyright (C) 2026  MarmieQi
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionRenderer.h"
 #include "resourcepacks/WorldPackReloadState.h"
+#include "render/OverlayMaterials.h"
 #include "app/NativeCallbackBoundary.h"
 #include "app/ScopeExit.h"
 
@@ -10,9 +12,17 @@
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidFaceCull.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/core/ProjectionRegionBoundsPolicy.h"
+#include "projection/runtime/ProjectionSession.h"
+#include "projection/runtime/ProjectionFrameTiming.h"
+#include "structure/StructureLoader.h"
+#include "projection/core/ProjectionVisibilityRules.h"
 #include "projection/mesh/TransparentQuadSort.h"
+#include "projection/mesh/ProjectionGlassLiquidMerge.h"
+#include "projection/core/ProjectionCachedDistanceSort.h"
 #include "projection/mesh/ProjectionAnimatedBubblePass.h"
 #include "projection/core/ProjectedPistonAppearance.h"
+#include "projection/core/ProjectedPistonPrefetchCulling.h"
 #include "projection/mesh/ProjectedPistonRenderScope.h"
 #include "projection/world/ProjectionVirtualWorld.h"
 #include "plugin/LHolo.h"
@@ -44,6 +54,7 @@
 #include "mc/client/renderer/Tessellator.h"
 #include "mc/client/renderer/blockactor/BlockActorRenderDispatcher.h"
 #include "mc/client/renderer/blockactor/PistonBlockActorRenderer.h"
+#include "mc/client/model/models/PistonArmModel.h"
 #include "mc/client/renderer/game/ItemInHandRenderer.h"
 #include "mc/common/client/renderer/helpers/MeshHelpers.h"
 #include "mc/common/Brightness.h"
@@ -51,6 +62,7 @@
 #include "mc/client/renderer/game/LevelRendererPlayer.h"
 #include "mc/deps/core/renderer/RenderMaterialInfo.h"
 #include "mc/deps/renderer/ShaderColor.h"
+#include "mc/deps/renderer/Camera.h"
 #include "mc/deps/minecraft_renderer/framebuilder/dragon/RenderMetadata.h"
 #include "mc/deps/minecraft_renderer/renderer/RenderMaterial.h"
 #include "mc/deps/minecraft_renderer/renderer/TexturePtr.h"
@@ -100,9 +112,25 @@ bool materialExists(mce::MaterialPtr const& material) {
 
 enum class TransparentMeshSortResult : std::uint8_t { Invalid, Unchanged, Changed };
 
+std::optional<std::vector<std::size_t>> transparentMeshPrimitiveOrder(
+    mce::MeshData const& data, glm::vec3 camera
+) {
+    auto const& positions = data.mPositions.get();
+    std::size_t const corners = data.mMode == mce::PrimitiveMode::QuadList ? 4U
+        : (data.mMode == mce::PrimitiveMode::TriangleList ? 3U : 0U);
+    if (!corners) return std::nullopt;
+    auto const& indices = data.mIndices.get();
+    if (!indices.empty()) {
+        return transparentIndexedPrimitiveOrder(
+            std::span<glm::vec3 const>{positions.data(), positions.size()},
+            std::span<unsigned int const>{indices.data(), indices.size()}, corners, camera);
+    }
+    return transparentPrimitiveOrder(
+        std::span<glm::vec3 const>{positions.data(), positions.size()}, corners, camera);
+}
+
 TransparentMeshSortResult sortTransparentMeshDataBackToFront(
-    mce::MeshData& data,
-    glm::vec3      camera
+    mce::MeshData& data, std::span<std::size_t const> order
 ) {
     auto& positions = data.mPositions.get();
     std::size_t const corners = data.mMode == mce::PrimitiveMode::QuadList ? 4U
@@ -116,18 +144,12 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
         if (!transparentIndexedStreamsCompatible(data, positions.size())) {
             return TransparentMeshSortResult::Invalid;
         }
-        auto const order = transparentIndexedPrimitiveOrder(
-            std::span<glm::vec3 const>{positions.data(), positions.size()},
-            std::span<unsigned int const>{indices.data(), indices.size()}, corners, camera);
-        if (!order) return TransparentMeshSortResult::Invalid;
-        if (!transparentQuadOrderChanged(*order)) return TransparentMeshSortResult::Unchanged;
-        if (!reorderPrimitiveField(indices, *order, corners)) return TransparentMeshSortResult::Invalid;
+        if (order.size() != indices.size() / corners) return TransparentMeshSortResult::Invalid;
+        if (!transparentQuadOrderChanged(order)) return TransparentMeshSortResult::Unchanged;
+        if (!reorderPrimitiveField(indices, order, corners)) return TransparentMeshSortResult::Invalid;
         return TransparentMeshSortResult::Changed;
     }
-    auto order = transparentPrimitiveOrder(
-        std::span<glm::vec3 const>{positions.data(), positions.size()}, corners, camera
-    );
-    if (!order) return TransparentMeshSortResult::Invalid;
+    if (order.size() != positions.size() / corners) return TransparentMeshSortResult::Invalid;
 
     auto const vertexCount = positions.size();
     auto compatible = [vertexCount](auto const& field) {
@@ -140,11 +162,11 @@ TransparentMeshSortResult sortTransparentMeshDataBackToFront(
         || !compatible(data.mMERS.get()) || !compatible(data.mGeoType.get())) {
         return TransparentMeshSortResult::Invalid;
     }
-    if (!transparentQuadOrderChanged(*order)) {
+    if (!transparentQuadOrderChanged(order)) {
         return TransparentMeshSortResult::Unchanged;
     }
 
-    auto const ordering = std::span<std::size_t const>{order->data(), order->size()};
+    auto const ordering = order;
     if (!reorderPrimitiveField(positions, ordering, corners)
         || !reorderPrimitiveField(data.mNormals.get(), ordering, corners)
         || !reorderPrimitiveField(data.mTangents.get(), ordering, corners)
@@ -193,6 +215,87 @@ std::string_view transparentMeshLayoutIssue(mce::MeshData const& data) {
     return "sort_contract_rejected";
 }
 
+template<class T>
+bool appendTransparentBatchField(
+    std::vector<T>& target,std::vector<T> const& source,
+    std::size_t before,std::size_t incoming) {
+    if(target.empty() && source.empty())return true;
+    if(target.size()!=before || source.size()!=incoming)return false;
+    target.insert(target.end(),source.begin(),source.end());
+    return true;
+}
+
+// Preserve existing section/primitive ordering; only coalesce compatible
+// *already uploaded* native blend sources. The original GPU meshes remain the
+// fallback, and no engine-owned material, texture or buffer is modified.
+std::unique_ptr<mce::Mesh> buildTransparentDrawBatch(
+    ProjectionState const& state,
+    std::span<std::size_t const> orderedSections,
+    std::shared_ptr<mce::BufferResourceService> service,
+    std::size_t& vertexCount) {
+    vertexCount=0;
+    if(!service || orderedSections.size()<2 || orderedSections.size()>kTransparentBatchGroupSize)
+        return nullptr;
+    std::unique_ptr<mce::MeshData> combined;
+    for(auto const sectionIndex:orderedSections) {
+        if(sectionIndex>=state.sections.size())return nullptr;
+        auto const& section=state.sections[sectionIndex];
+        auto const blendIndex=static_cast<std::size_t>(RenderBucket::Blend);
+        auto const& gpu=section.meshes[blendIndex];
+        auto const* source=section.blendSource.get();
+        if(section.blendSortUnsupported || !gpu || !gpu->isValid() || !source
+            || source->mMode!=mce::PrimitiveMode::QuadList
+            || !source->mIndices.get().empty())return nullptr;
+        auto const count=source->mPositions.get().size();
+        if(count==0 || count%4 || count>kTransparentBatchMaxVertices-vertexCount
+            || gpu->mVertexCount.get().value_or(static_cast<unsigned>(count))!=count)
+            return nullptr;
+        auto part=cloneNativeMeshData(*source);
+        if(!section.blendSortOrder.empty()
+            && sortTransparentMeshDataBackToFront(*part,section.blendSortOrder)
+                != TransparentMeshSortResult::Changed)return nullptr;
+        if(!combined) {
+            combined=std::move(part);
+        } else {
+            auto& target=*combined;
+            auto const before=target.mPositions.get().size();
+            if(target.mMode!=part->mMode
+                || target.mFieldEnabled.get()!=part->mFieldEnabled.get()
+                || !part->mIndices.get().empty()
+                || !appendTransparentBatchField(target.mNormals.get(),part->mNormals.get(),before,count)
+                || !appendTransparentBatchField(target.mTangents.get(),part->mTangents.get(),before,count)
+                || !appendTransparentBatchField(target.mColors.get(),part->mColors.get(),before,count)
+                || !appendTransparentBatchField(target.mBoneId0s.get(),part->mBoneId0s.get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[0].get(),part->mTextureUVs[0].get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[1].get(),part->mTextureUVs[1].get(),before,count)
+                || !appendTransparentBatchField(target.mTextureUVs[2].get(),part->mTextureUVs[2].get(),before,count)
+                || !appendTransparentBatchField(target.mPBRTextureIndices.get(),part->mPBRTextureIndices.get(),before,count)
+                || !appendTransparentBatchField(target.mMERS.get(),part->mMERS.get(),before,count)
+                || !appendTransparentBatchField(target.mGeoType.get(),part->mGeoType.get(),before,count))
+                return nullptr;
+            target.mPositions.get().insert(target.mPositions.get().end(),
+                part->mPositions.get().begin(),part->mPositions.get().end());
+            auto& bounds=target.mAABB.get();
+            auto const& next=part->mAABB.get();
+            for(int axis=0;axis<3;++axis) {
+                bounds.first[axis]=std::min(bounds.first[axis],next.first[axis]);
+                bounds.second[axis]=std::max(bounds.second[axis],next.second[axis]);
+            }
+            auto& uvBounds=target.mUVAABB.get();
+            auto const& nextUV=part->mUVAABB.get();
+            for(int axis=0;axis<2;++axis) {
+                uvBounds.first[axis]=std::min(uvBounds.first[axis],nextUV.first[axis]);
+                uvBounds.second[axis]=std::max(uvBounds.second[axis],nextUV.second[axis]);
+            }
+        }
+        vertexCount+=count;
+    }
+    if(!combined || combined->mPositions.get().size()!=vertexCount)return nullptr;
+    auto mesh=std::make_unique<mce::Mesh>(
+        service,std::move(*combined),false,"LHoloTransparentSectionBatch");
+    return mesh->isValid() && mesh->mVertexCount.get().value_or(0u)>0
+        ?std::move(mesh):nullptr;
+}
 mce::RenderMaterial* tryRenderMaterial(mce::MaterialPtr const& material) {
     auto* info = material.mRenderMaterialInfoPtr.get();
     return info ? info->mPtr.get() : nullptr;
@@ -217,26 +320,29 @@ mce::MaterialPtr const& projectionPrivateBlendMaterial(
     // Do not change the already-live material if a new resource pack makes
     // source creation fail. The original vanilla render material remains safe.
     try {
-        auto privateInfo = std::make_shared<mce::RenderMaterialInfo>();
-        privateInfo->mHashedName.get() = current->mHashedName.get();
-        privateInfo->mPtr = std::make_unique<mce::RenderMaterial>(*current->mPtr.get());
-        // Native DepthWriteMask is a binary HAL flag on 26.51: 0=none, 1=all.
-        // Keep depth testing; projected alpha must be occluded by opaque world.
-        auto& depth = privateInfo->mPtr->depthStencilStateDescription.get();
-        depth.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
-        mce::MaterialPtr privatePtr{vanillaBlend};
-        privatePtr.mRenderMaterialInfoPtr = privateInfo;
-        auto privateOwner = std::make_unique<mce::MaterialPtr>(privatePtr);
-        state.glassPrivateBlendMaterial = std::move(privateOwner);
+        // 26.60 does not export RenderMaterial's copy constructor. Select
+        // the engine-owned, depth-write-free transparent shader instead of
+        // constructing a fake native material or mutating a shared one.
+        auto existing = render::resolveNamedMaterial("beacon_beam_transparent", vanillaBlend);
+        if (!existing) {
+            logger().warn("LHoloGlassR5 missing native beacon_beam_transparent; using vanilla fallback");
+            return vanillaBlend;
+        }
+        auto* resolved = tryRenderMaterial(*existing);
+        if (!resolved || !resolved->blendStateDescription->enableBlend
+            || !resolved->depthStencilStateDescription->depthTestEnabled
+            || static_cast<unsigned>(resolved->depthStencilStateDescription->depthWriteMask) != 0U) {
+            logger().warn("LHoloGlassR5 native material lacks transparent depth contract");
+            return vanillaBlend;
+        }
+        state.glassPrivateBlendMaterial = std::make_unique<mce::MaterialPtr>(*existing);
         state.glassPrivateBlendBase = current->weak_from_this();
         logger().info(
-            "LHoloGlassR5 privateMaterial=1 material={} baseDepthWrite={} "
-            "privateDepthWrite={} depthTest={} blend={}",
-            current->mHashedName->getString(),
-            static_cast<unsigned int>(current->mPtr->depthStencilStateDescription->depthWriteMask),
-            static_cast<unsigned int>(depth.depthWriteMask),
-            depth.depthTestEnabled ? 1 : 0,
-            privateInfo->mPtr->blendStateDescription->enableBlend ? 1 : 0
+            "LHoloGlassR5 nativeMaterial={} depthWrite={} depthTest={} blend={}",
+            state.glassPrivateBlendMaterial->mRenderMaterialInfoPtr->mHashedName->getString(),
+            static_cast<unsigned>(resolved->depthStencilStateDescription->depthWriteMask),
+            resolved->depthStencilStateDescription->depthTestEnabled,
+            resolved->blendStateDescription->enableBlend
         );
         return *state.glassPrivateBlendMaterial;
     } catch (std::exception const& exception) {
@@ -429,7 +535,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> clonePraxisExactReplayData(
 ) {
     if (!source.nativeStream) return {};
     auto clone = std::make_unique<PraxisCompatLiquidSectionData>();
-    clone->nativeStream = std::make_unique<mce::MeshData>(*source.nativeStream);
+    clone->nativeStream = cloneNativeMeshData(*source.nativeStream);
     clone->derivedColors = source.derivedColors;
     clone->liquidKinds = source.liquidKinds;
     clone->tessellatorState = source.tessellatorState;
@@ -578,7 +684,7 @@ std::unique_ptr<PraxisCompatLiquidSectionData> buildPraxisExactReplayAggregate(
         if (!source || !source->ready()) return {};
         if (!result) {
             result = std::make_unique<PraxisCompatLiquidSectionData>();
-            result->nativeStream = std::make_unique<mce::MeshData>(
+            result->nativeStream = cloneNativeMeshData(
                 *source->nativeStream
             );
             result->derivedColors = source->derivedColors;
@@ -648,33 +754,33 @@ bool applyNativeReplayQuadOrder(
     // Transactional staging: a failed layout/allocation keeps both original
     // replay streams and face metadata. Canonical data and cull caches never
     // observe this permutation.
-    mce::MeshData candidate{replayData};
+    auto candidate = cloneNativeMeshData(replayData);
     auto metadata = quadInfo;
-    if (!reorderQuadVertexField(candidate.mPositions.get(), order)
-        || !reorderQuadVertexField(candidate.mNormals.get(), order)
-        || !reorderQuadVertexField(candidate.mTangents.get(), order)
-        || !reorderQuadVertexField(candidate.mColors.get(), order)
-        || !reorderQuadVertexField(candidate.mBoneId0s.get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[0].get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[1].get(), order)
-        || !reorderQuadVertexField(candidate.mTextureUVs[2].get(), order)
-        || !reorderQuadVertexField(candidate.mPBRTextureIndices.get(), order)
-        || !reorderQuadVertexField(candidate.mMERS.get(), order)
-        || !reorderQuadVertexField(candidate.mGeoType.get(), order)
+    if (!reorderQuadVertexField(candidate->mPositions.get(), order)
+        || !reorderQuadVertexField(candidate->mNormals.get(), order)
+        || !reorderQuadVertexField(candidate->mTangents.get(), order)
+        || !reorderQuadVertexField(candidate->mColors.get(), order)
+        || !reorderQuadVertexField(candidate->mBoneId0s.get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[0].get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[1].get(), order)
+        || !reorderQuadVertexField(candidate->mTextureUVs[2].get(), order)
+        || !reorderQuadVertexField(candidate->mPBRTextureIndices.get(), order)
+        || !reorderQuadVertexField(candidate->mMERS.get(), order)
+        || !reorderQuadVertexField(candidate->mGeoType.get(), order)
         || !reorderReplayQuadMetadata(metadata, order)) return false;
     // Standard-vector swaps commit without calling an engine MeshData move
     // assignment. No allocation or native submission occurs during commit.
-    replayData.mPositions.get().swap(candidate.mPositions.get());
-    replayData.mNormals.get().swap(candidate.mNormals.get());
-    replayData.mTangents.get().swap(candidate.mTangents.get());
-    replayData.mColors.get().swap(candidate.mColors.get());
-    replayData.mBoneId0s.get().swap(candidate.mBoneId0s.get());
-    replayData.mTextureUVs[0].get().swap(candidate.mTextureUVs[0].get());
-    replayData.mTextureUVs[1].get().swap(candidate.mTextureUVs[1].get());
-    replayData.mTextureUVs[2].get().swap(candidate.mTextureUVs[2].get());
-    replayData.mPBRTextureIndices.get().swap(candidate.mPBRTextureIndices.get());
-    replayData.mMERS.get().swap(candidate.mMERS.get());
-    replayData.mGeoType.get().swap(candidate.mGeoType.get());
+    replayData.mPositions.get().swap(candidate->mPositions.get());
+    replayData.mNormals.get().swap(candidate->mNormals.get());
+    replayData.mTangents.get().swap(candidate->mTangents.get());
+    replayData.mColors.get().swap(candidate->mColors.get());
+    replayData.mBoneId0s.get().swap(candidate->mBoneId0s.get());
+    replayData.mTextureUVs[0].get().swap(candidate->mTextureUVs[0].get());
+    replayData.mTextureUVs[1].get().swap(candidate->mTextureUVs[1].get());
+    replayData.mTextureUVs[2].get().swap(candidate->mTextureUVs[2].get());
+    replayData.mPBRTextureIndices.get().swap(candidate->mPBRTextureIndices.get());
+    replayData.mMERS.get().swap(candidate->mMERS.get());
+    replayData.mGeoType.get().swap(candidate->mGeoType.get());
     quadInfo.swap(metadata);
     return true;
 }
@@ -707,13 +813,13 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
         static_cast<int>(vertexCount),
         true
     );
-    mce::MeshData replayData{*data.nativeStream};
-    replayData.mColors.get() = data.derivedColors;
+    auto replayData = cloneNativeMeshData(*data.nativeStream);
+    replayData->mColors.get() = data.derivedColors;
     auto replayQuadInfo = data.tessellatorState.quadInfo;
     try {
         auto const order = nativeReplayQuadOrder(data.cameraSort,
             std::span<glm::vec3 const>{data.nativeStream->mPositions.get()}, localCamera, sortBudget);
-        if (!applyNativeReplayQuadOrder(replayData, replayQuadInfo, order)) {
+        if (!applyNativeReplayQuadOrder(*replayData, replayQuadInfo, order)) {
             data.cameraSort.unsupported = true;
             logger().warn("NATIVE_REPLAY_PRIMITIVE_SORT incompatible metadata; native order retained");
         }
@@ -722,7 +828,7 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
         data.cameraSort.keyValid = false;
         data.cameraSort.order.clear();
     }
-    tessellator.mMeshData.get() = std::move(replayData);
+    swapNativeMeshDataFields(tessellator.mMeshData.get(), *replayData);
     tessellator.mIsFormatFixed = data.tessellatorState.isFormatFixed;
     tessellator.mHasNormals = data.tessellatorState.hasNormals;
     tessellator.mIndexPhase = data.tessellatorState.indexPhase;
@@ -751,11 +857,14 @@ PraxisExactReplaySubmitResult submitPraxisExactReplayImmediately(
     // is a different exported overload from TextureVariant + generation mode.
     auto const submitStarted = std::chrono::steady_clock::now();
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
+    // 26.60 exports the TextureVariant overload, not the legacy texture-ref list.
+    // Own a copy of the active atlas handle for this submission only.
+    render::TextureVariant const texture{terrainTexture};
     MeshHelpers::renderMeshImmediately(
         screenContext,
         tessellator,
         material,
-        {std::cref(terrainTexture)},
+        texture,
         emptyOffscreenCaptureDescription()
     );
     result.submitMicros = static_cast<std::uint64_t>(
@@ -778,19 +887,28 @@ void submitProjectedBlockActorPass(
 ) {
     resourcepacks::state().submitted(resourcepacks::Domain::Projection);
     if (state.projectedBlockActors.empty()
-        || !state.expectedWorldBlocks
-        || !state.expectedWorldLiquids
+        || !state.worldLookup
         || !state.expectedWorldBlockActors) {
         return;
     }
 
+    auto const actorPassStarted = std::chrono::steady_clock::now();
+    std::uint64_t pistonDispatches{}, otherDispatches{};
+    // Use the same current camera-relative VP convention as section culling.
+    // Missing matrices leave the frustum invalid and keep all pistons visible.
+    ProjectionFrustum pistonFrustum;
+    auto const& actorCamera = renderContext.mScreenContext.camera;
+    if (!actorCamera.viewMatrixStack->stack->empty()
+        && !actorCamera.projectionMatrixStack->stack->empty()) {
+        pistonFrustum = ProjectionFrustum::fromViewProjection(
+            actorCamera.getProjectionMatrix() * (*actorCamera.viewMatrixStack->top()._m));
+    }
     mce::MaterialPtr noForcedMaterial{renderContext.mItemInHandRenderer.mMatBlendBlock.get()};
     noForcedMaterial.mRenderMaterialInfoPtr.reset();
     auto& dispatcher = renderContext.mBlockEntityRenderDispatcher;
     ScopedRegionWriteSuppression projectedWrites;
     ScopedTessellationBlocks blockActorWorldScope(
-        *state.expectedWorldBlocks,
-        *state.expectedWorldLiquids,
+        *state.worldLookup,
         *state.expectedWorldBlockActors
     );
     for (auto const& projected : state.projectedBlockActors) {
@@ -798,6 +916,37 @@ void submitProjectedBlockActorPass(
             || projected.structureIndex >= state.correctionStates.size()
             || projected.structureIndex >= state.missingLayers.size()) {
             continue;
+        }
+        // Old projected actors obey the same layer upload barrier as meshes.
+        // Retaining actors across layer changes must never show a hidden one
+        // before its section's matching GPU revision is ready.
+        if (projected.structureIndex < state.blockToSection.size()) {
+            auto const section = state.blockToSection[projected.structureIndex];
+            if (section < state.sections.size() && state.sections[section].layerStale)
+                continue;
+        }
+        // Phase 16: only piston models receive conservative 16-block-expanded
+        // frustum culling. Unlike the reverted Phase 13 optimization, this
+        // never changes regular meshes, comparison colors or other actors.
+        // Unknown source-to-section mappings must remain visible.
+        if (!projectedPistonMayRender(
+                projected.pistonCandidate, projected.structureIndex,
+                state.blockToSection, state.sections.size(),
+                [&](std::size_t section) { return state.sections[section].prefetchVisible; })) {
+            continue;
+        }
+        if (projected.pistonCandidate) {
+            // Piston ghost models have no opaque pass when opacity < 1.
+            // Avoid touching 10k native render components in that pass.
+            if (projectedPistonPass(structureOpacity, renderAlphaLayer)
+                == ProjectedPistonPass::Skip) continue;
+            // A section can straddle the view and contain many out-of-view
+            // pistons. The actual piston head cannot extend beyond the
+            // 3-block-expanded world cell tested here.
+            if (!projectedPistonCellVisible(pistonFrustum, camera,
+                    {static_cast<float>(projected.position.x),
+                     static_cast<float>(projected.position.y),
+                     static_cast<float>(projected.position.z)})) continue;
         }
         try {
             auto* renderComponent = projected.actor->_getRenderComponent();
@@ -825,15 +974,9 @@ void submitProjectedBlockActorPass(
             auto* pistonRenderer = isPiston
                 ? static_cast<PistonBlockActorRenderer*>(dispatcher.mRenderers.get()[rendererId].get())
                 : nullptr;
-            ProjectedPistonRender const pistonRender{
-                pistonRenderer ? &pistonRenderer->mPistonArm.get() : nullptr,
-                &pistonBlend,
-                structureOpacity
-            };
-            ScopedProjectedPistonRender pistonScope{
-                pistonPass == ProjectedPistonPass::Ghost ? &pistonRender : nullptr
-            };
-            dispatcher.render(
+            if (isPiston) ++pistonDispatches;
+            else ++otherDispatches;
+            auto const dispatchNative = [&]() {            dispatcher.render(
                 renderContext,
                 region,
                 *renderComponent,
@@ -845,13 +988,45 @@ void submitProjectedBlockActorPass(
                 nullptr,
                 -1,
                 std::nullopt
-            );
+            );            };
+            if (pistonPass == ProjectedPistonPass::Ghost && pistonRenderer
+                && render::materialExists(pistonBlend)) {
+                // renderArm is not exported on 26.60. We already own the
+                // projected dispatcher call, so scope the native model's
+                // render materials here rather than hooking a missing symbol.
+                auto& model = pistonRenderer->mPistonArm.get();
+                auto& variants = model.mMaterialVariants.get();
+                auto& skinning = variants.mSkinningMaterialPtr->mRenderMaterialInfoPtr;
+                auto& skinningColor = variants.mSkinningColorMaterialPtr->mRenderMaterialInfoPtr;
+                auto const savedSkinning = skinning;
+                auto const savedColor = skinningColor;
+                app::ScopeExit restoreVariants{[&]() noexcept {
+                    skinning = savedSkinning;
+                    skinningColor = savedColor;
+                }};
+                skinning = pistonBlend.mRenderMaterialInfoPtr;
+                skinningColor = pistonBlend.mRenderMaterialInfoPtr;
+                auto& shader = renderContext.mScreenContext.currentShaderColor;
+                ScopedPistonAppearance appearance{
+                    model.mDefaultMaterial->mRenderMaterialInfoPtr,
+                    pistonBlend.mRenderMaterialInfoPtr,
+                    shader.color.get(),shader.dirty,structureOpacity
+                };
+                dispatchNative();
+            } else {
+                dispatchNative();
+            }
         } catch (std::exception const& exception) {
             app::reportNativeCallbackFailure("projected block actor render", exception.what());
         } catch (...) {
             app::reportNativeCallbackFailure("projected block actor render", "unknown C++ exception");
         }
     }
+    auto const actorPassUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - actorPassStarted).count();
+    projectedActorPassTiming().record(
+        static_cast<std::uint64_t>(actorPassUs),
+        state.projectedBlockActors.size(), pistonDispatches, otherDispatches);
 }
 
 void submitProjectionMeshPass(
@@ -879,6 +1054,8 @@ void submitProjectionMeshPass(
         ? projectionPrivateBlendMaterial(state, blendMaterial)
         : blendMaterial;
 
+    // Interleave native glass and Exact Replay liquid faces in mixed sections.
+    prepareMixedGlassLiquidMeshes(state, renderContext);
     auto worldCenter = [&](std::size_t section) {
         return Vec3{
             static_cast<float>(renderOrigin.x) + state.sections[section].center.x,
@@ -910,21 +1087,31 @@ void submitProjectionMeshPass(
         telemetry.praxisCompatVerticesReplayedPerFrame = 0;
         telemetry.praxisCompatReplayMicros = 0;
         telemetry.praxisCompatSubmitMicros = 0;
-        auto const nativeLiquidSectionCount = std::min({
-            state.sections.size(),
-            state.nativeLiquidSectionMeshes.size(),
-            state.praxisCompatLiquidSections.size()
-        });
-        for (std::size_t section = 0;
-             section < nativeLiquidSectionCount;
-             ++section) {
-            auto const& mesh = state.nativeLiquidSectionMeshes[section];
-            auto const* compat = state.praxisCompatLiquidSections[section].get();
-            if ((mesh && mesh->isValid()) || (compat && compat->ready())) {
-                if(section>=state.sections.size() ||
-                   state.sections[section].renderVisible)
-                    nativeLiquidSections.push_back(section);
+        if (!state.nativeLiquidCandidateCacheValid
+            || state.nativeLiquidCandidateActivation != state.activationGeneration
+            || state.nativeLiquidCandidateMeshRevision != state.meshUploadRevision
+            || state.nativeLiquidCandidateSectionCount != state.sections.size()) {
+            state.nativeLiquidCandidateSections.clear();
+            auto const nativeLiquidSectionCount = std::min({
+                state.sections.size(),
+                state.nativeLiquidSectionMeshes.size(),
+                state.praxisCompatLiquidSections.size()
+            });
+            for (std::size_t section = 0; section < nativeLiquidSectionCount; ++section) {
+                auto const& mesh = state.nativeLiquidSectionMeshes[section];
+                auto const* compat = state.praxisCompatLiquidSections[section].get();
+                if ((mesh && mesh->isValid()) || (compat && compat->ready()))
+                    state.nativeLiquidCandidateSections.push_back(section);
             }
+            state.nativeLiquidCandidateActivation = state.activationGeneration;
+            state.nativeLiquidCandidateMeshRevision = state.meshUploadRevision;
+            state.nativeLiquidCandidateSectionCount = state.sections.size();
+            state.nativeLiquidCandidateCacheValid = true;
+        }
+        for (auto const section : state.nativeLiquidCandidateSections) {
+            if (state.sections[section].renderVisible
+                && !glassLiquidMergedReady(state, section))
+                nativeLiquidSections.push_back(section);
         }
         std::sort(
             nativeLiquidSections.begin(),
@@ -1058,7 +1245,7 @@ void submitProjectionMeshPass(
                                 std::memory_order_acq_rel
                             )) {
                             logger().info(
-                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha=255 projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
+                                "PRAXIS_LIQUID_MATERIAL_PARITY candidate={} signTextReady={} blendMaterialReady={} textureRefSubmit=1 waterBaseVertexAlpha={} lavaBaseVertexAlpha={} projectionOpacityAppliedToDerivedColors=1 firstDerivedVertexAlpha={} depthStateChanged=0 submitPerFrame={}",
                                 ActivePraxisLiquidMaterial
                                         == PraxisLiquidMaterialCandidate::BlendBlock
                                     ? "mMatBlendBlock"
@@ -1066,6 +1253,7 @@ void submitProjectionMeshPass(
                                 signTextReady ? 1 : 0,
                                 blendMaterialReady ? 1 : 0,
                                 PraxisWaterDerivedAlpha,
+                                PraxisLavaDerivedAlpha,
                                 unpackAbgr(data.derivedColors.front()).alpha,
                                 telemetry.praxisCompatImmediateSubmitsPerFrame
                             );
@@ -1142,6 +1330,34 @@ void submitProjectionMeshPass(
         }
     }
 
+    if (renderAlphaLayer) {
+        // Mixed sections are submitted once with all visible glass/liquid
+        // faces in stable back-to-front order. The other sections retain
+        // the native Exact Replay and transparent GPU batching paths.
+        std::vector<std::size_t> merged;
+        for (std::size_t i=0; i<state.sections.size(); ++i)
+            if (state.sections[i].renderVisible && glassLiquidMergedReady(state,i))
+                merged.push_back(i);
+        std::sort(merged.begin(),merged.end(),[&](std::size_t a,std::size_t b) {
+            return distanceSquared(worldCenter(a)) > distanceSquared(worldCenter(b));
+        });
+        if (!merged.empty()) {
+            if (auto* player=client.getLocalPlayer()) {
+                ActorShaderManager::setupShaderParameters(
+                    renderContext.mScreenContext,renderContext,*player,
+                    mce::Color{1.0f,1.0f,1.0f,0.0f},1.0f,Brightness::MAX(),std::nullopt);
+            }
+            render::ScopedShaderColor shaderWhite{
+                renderContext.mScreenContext.currentShaderColor};
+            for (auto const i:merged) {
+                auto& mesh=*state.sections[i].mixedGlassLiquid->mesh;
+                mesh.renderMesh(renderContext.mScreenContext,projectedBlendMaterial,
+                    *state.terrainTextureVariant,0,
+                    mesh.mVertexCount.get().value_or(0u),
+                    emptyOffscreenCaptureDescription(),nullptr);
+            }
+        }
+    }
     // The ItemInHand/Entity materials used for ghost blocks drive their
     // diffuse lighting from TileLightColor in constant buffer CB0. When
     // looking down at the ground with no block entities in the view frustum
@@ -1166,35 +1382,47 @@ void submitProjectionMeshPass(
         std::size_t section;
     };
     auto sortBackToFront = [&](std::vector<VisibleMesh>& meshes) {
-        std::sort(meshes.begin(), meshes.end(), [&](VisibleMesh const& lhs, VisibleMesh const& rhs) {
-            auto const leftDistance = distanceSquared(worldCenter(lhs.section));
-            auto const rightDistance = distanceSquared(worldCenter(rhs.section));
-            if (leftDistance != rightDistance) return leftDistance > rightDistance;
-            if (lhs.section != rhs.section) return lhs.section < rhs.section;
-            return lhs.bucket < rhs.bucket;
-        });
+        // The old comparator recomputed section-to-camera distance for every
+        // comparison, multiplied by four material buckets in ghost mode.
+        // Keep exact draw ordering but reuse one distance per source section.
+        sortProjectionDrawsByCachedDistance(
+            meshes, state.sections.size(),
+            [&](std::size_t section) { return distanceSquared(worldCenter(section)); }
+        );
     };
-    auto renderMeshes = [&](std::vector<VisibleMesh> const& meshes, mce::MaterialPtr const& material) {
-        if (!materialExists(material)) return;
-        auto const usingBlendMaterial = material.mRenderMaterialInfoPtr.get()
+    auto const isBlendRenderMaterial = [&](mce::MaterialPtr const& material) {
+        return material.mRenderMaterialInfoPtr.get()
             == blendMaterial.mRenderMaterialInfoPtr.get()
             || (state.glassPrivateBlendMaterial
                 && material.mRenderMaterialInfoPtr.get()
                     == state.glassPrivateBlendMaterial->mRenderMaterialInfoPtr.get());
-        for (auto const& visible : meshes) {
-            auto& mesh = *state.sections[visible.section].meshes[visible.bucket];
-            mesh.renderMesh(
-                renderContext.mScreenContext,
-                material,
-                *state.terrainTextureVariant,
-                0,
-                mesh.mVertexCount.get().value_or(0u),
-                emptyOffscreenCaptureDescription(),
-                nullptr
-            );
-            ++state.glassR3RetainedDrawCalls;
-            if (usingBlendMaterial) ++state.glassR3BlendDrawCalls;
-        }
+    };
+    auto submitRetainedMesh = [&](std::size_t section, std::size_t bucket,
+                                  mce::MaterialPtr const& material, bool isBlend) {
+        if (bucket == static_cast<std::size_t>(RenderBucket::Blend)
+            && glassLiquidMergedReady(state,section)) return;
+        auto& mesh = *state.sections[section].meshes[bucket];
+        mesh.renderMesh(
+            renderContext.mScreenContext, material, *state.terrainTextureVariant,
+            0, mesh.mVertexCount.get().value_or(0u),
+            emptyOffscreenCaptureDescription(), nullptr
+        );
+        ++state.glassR3RetainedDrawCalls;
+        if (isBlend) ++state.glassR3BlendDrawCalls;
+    };
+    auto renderMeshes = [&](auto const& meshes, mce::MaterialPtr const& material) {
+        if (!materialExists(material)) return;
+        auto const blend = isBlendRenderMaterial(material);
+        for (auto const& visible : meshes)
+            submitRetainedMesh(visible.section, visible.bucket, material, blend);
+    };
+    // Opaque, alpha-test and one-sided buckets are already cached as section
+    // IDs; avoid allocating three temporary vectors on every opaque callback.
+    auto renderBucket = [&](std::size_t bucket, mce::MaterialPtr const& material) {
+        if (!materialExists(material)) return;
+        auto const blend = isBlendRenderMaterial(material);
+        for (auto const section : state.drawCache.lists[bucket])
+            submitRetainedMesh(section, bucket, material, blend);
     };
     // MarmieQi 26.51.4/26.51.5 CPU draw-record cache, integrated with the
     // Praxis glass path. Do not cache or touch GPU resource ownership.
@@ -1215,6 +1443,24 @@ void submitProjectionMeshPass(
                 if(mesh && mesh->isValid())
                     record.slots|=static_cast<std::uint16_t>(1u<<bucket);
             }
+            // The correction/placeholder slots already exist in the draw
+            // cache, but were not populated. Reuse their visibility-aware
+            // section lists instead of scanning four entire mesh arrays
+            // on every translucent render callback.
+            auto markOverlay = [&](auto const& meshes, ProjectionDrawSlot slot) {
+                if(i<meshes.size() && meshes[i] && meshes[i]->isValid())
+                    record.slots |= projectionDrawBit(slot);
+            };
+            // The Liquid draw slot is already distance-sorted by the draw
+            // cache. Retain the same per-section cell-count guard as the
+            // previous uncached proxy collector.
+            if (i < state.liquidProxySectionCellCounts.size())
+                markOverlay(state.liquidProxySectionMeshes,ProjectionDrawSlot::Liquid);
+            markOverlay(state.blockEntityPlaceholderSectionMeshes,ProjectionDrawSlot::Placeholder);
+            markOverlay(state.warningFillSectionMeshes,ProjectionDrawSlot::MissingFill);
+            markOverlay(state.correctionOutlineSectionMeshes,ProjectionDrawSlot::MissingOutline);
+            markOverlay(state.wrongFillSectionMeshes,ProjectionDrawSlot::WrongFill);
+            markOverlay(state.wrongOutlineSectionMeshes,ProjectionDrawSlot::WrongOutline);
             return record;
         },[&](std::size_t i) {
             return i<state.sections.size() && state.sections[i].renderVisible;
@@ -1246,7 +1492,10 @@ void submitProjectionMeshPass(
         };
         auto const cameraSortKey = transparentSortKey(localCamera);
         auto bufferService = renderContext.mScreenContext.tessellator.mBufferResourceService.lock();
-        if (!cameraSortKey || !bufferService || state.sections.empty()) return;
+        // No visible blend terrain: avoid scanning every section on every
+        // alpha render pass (the common case for large opaque schematics).
+        auto const& visibleBlend = state.drawCache.transparentTerrain;
+        if (!cameraSortKey || !bufferService || visibleBlend.empty()) return;
         constexpr std::size_t kMaxResortsPerFrame = 4;
         auto const started = std::chrono::steady_clock::now();
         std::size_t resorts{};
@@ -1256,17 +1505,29 @@ void submitProjectionMeshPass(
         std::size_t changedBlendMeshes{};
         std::size_t unchangedBlendMeshes{};
         std::size_t revisionChurn{};
-        std::size_t originalCacheOccupancy{};
-        std::size_t originalCacheVertices{};
-        for (auto const& sectionState : state.sections) {
-            if (!sectionState.blendSource) continue;
-            ++originalCacheOccupancy;
-            originalCacheVertices += sectionState.blendSource->mPositions.get().size();
+        if (!state.blendSourceScanValid
+            || state.blendSourceScanActivation != state.activationGeneration
+            || state.blendSourceScanMeshRevision != state.meshUploadRevision
+            || state.blendSourceScanSectionCount != state.sections.size()) {
+            state.blendSourceCount = 0;
+            state.blendSourceVertices = 0;
+            for (auto const& sectionState : state.sections) {
+                if (!sectionState.blendSource) continue;
+                ++state.blendSourceCount;
+                state.blendSourceVertices += sectionState.blendSource->mPositions.get().size();
+            }
+            state.blendSourceScanActivation = state.activationGeneration;
+            state.blendSourceScanMeshRevision = state.meshUploadRevision;
+            state.blendSourceScanSectionCount = state.sections.size();
+            state.blendSourceScanValid = true;
         }
-        for (std::size_t checked = 0; checked < state.sections.size(); ++checked) {
+        auto const originalCacheOccupancy = state.blendSourceCount;
+        auto const originalCacheVertices = state.blendSourceVertices;
+        for (std::size_t checked = 0; checked < visibleBlend.size(); ++checked) {
             if (resorts >= kMaxResortsPerFrame
                 || std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1)) break;
-            auto const section = state.blendSortCursor++ % state.sections.size();
+            auto const section = visibleBlend[
+                state.blendSortCursor++ % visibleBlend.size()].section;
             auto& sectionState = state.sections[section];
             if(!sectionState.renderVisible) continue;
             if (sectionState.requestedRevision != sectionState.uploadedRevision) {
@@ -1306,9 +1567,25 @@ void submitProjectionMeshPass(
                 // Always start from the immutable original. Sorting the
                 // current GPU mesh would make camera reversal non-reversible,
                 // and its mMeshData may already have been consumed by upload.
-                auto sortedData = *originalSource;
-                auto const vertexCount = sortedData.mPositions.get().size();
-                auto const result = sortTransparentMeshDataBackToFront(sortedData, localCamera);
+                // Compute order from immutable source before cloning any
+                // vertex streams. A new camera quantization cell often has
+                // the *same* quad order: keep the current GPU buffer.
+                auto order = transparentMeshPrimitiveOrder(*originalSource, localCamera);
+                if (!order) {
+                    sectionState.blendSortUnsupported = true;
+                    ++state.glassR4SortInvalid;
+                    continue;
+                }
+                auto const sameOrder = transparentSortOrderMatchesGpu(
+                    sectionState.blendSortOrder, *order);
+                if (sameOrder) {
+                    sectionState.blendSortKey = *cameraSortKey;
+                    sectionState.blendSortKeyValid = true;
+                    continue;
+                }
+                auto sortedData = cloneNativeMeshData(*originalSource);
+                auto const vertexCount = sortedData->mPositions.get().size();
+                auto const result = sortTransparentMeshDataBackToFront(*sortedData, *order);
                 if (result == TransparentMeshSortResult::Invalid) {
                     // A new upload clears this flag. Do not destroy/rebuild an
                     // unknown engine layout and do not retry it every frame.
@@ -1322,20 +1599,20 @@ void submitProjectionMeshPass(
                             "TRANSPARENT_PRIMITIVE_SORT skipped incompatible blend mesh layout "
                             "reason={} section={} positions={} indices={} normals={} tangents={} colors={} boneIds={} "
                             "uv0={} uv1={} uv2={} pbr={} mers={} geoType={}",
-                            transparentMeshLayoutIssue(sortedData),
+                            transparentMeshLayoutIssue(*sortedData),
                             section,
-                            sortedData.mPositions.get().size(),
-                            sortedData.mIndices.get().size(),
-                            sortedData.mNormals.get().size(),
-                            sortedData.mTangents.get().size(),
-                            sortedData.mColors.get().size(),
-                            sortedData.mBoneId0s.get().size(),
-                            sortedData.mTextureUVs[0].get().size(),
-                            sortedData.mTextureUVs[1].get().size(),
-                            sortedData.mTextureUVs[2].get().size(),
-                            sortedData.mPBRTextureIndices.get().size(),
-                            sortedData.mMERS.get().size(),
-                            sortedData.mGeoType.get().size()
+                            sortedData->mPositions.get().size(),
+                            sortedData->mIndices.get().size(),
+                            sortedData->mNormals.get().size(),
+                            sortedData->mTangents.get().size(),
+                            sortedData->mColors.get().size(),
+                            sortedData->mBoneId0s.get().size(),
+                            sortedData->mTextureUVs[0].get().size(),
+                            sortedData->mTextureUVs[1].get().size(),
+                            sortedData->mTextureUVs[2].get().size(),
+                            sortedData->mPBRTextureIndices.get().size(),
+                            sortedData->mMERS.get().size(),
+                            sortedData->mGeoType.get().size()
                         );
                     }
                     continue;
@@ -1344,7 +1621,7 @@ void submitProjectionMeshPass(
                 // published GPU mesh may still carry a previous camera's
                 // order. Rebuilding from originalSource restores identity.
                 auto replacement = std::make_unique<mce::Mesh>(
-                    bufferService, std::move(sortedData), false, "LHoloBlendCameraSorted");
+                    bufferService, std::move(*sortedData), false, "LHoloBlendCameraSorted");
                 if (!replacement->isValid()) {
                     ++state.glassR4SortUploadFailures;
                     if (!gTransparentQuadSortFailureLogged.exchange(true, std::memory_order_acq_rel)) {
@@ -1353,6 +1630,7 @@ void submitProjectionMeshPass(
                     continue;
                 }
                 mesh = std::move(replacement);
+                ++sectionState.blendSortUploadGeneration;
                 ++state.glassR4SortReplacements;
                 if (result == TransparentMeshSortResult::Changed) {
                     ++changedBlendMeshes;
@@ -1365,6 +1643,12 @@ void submitProjectionMeshPass(
                     ++unchangedBlendMeshes;
                     ++state.glassR4SortIdentityRestores;
                 }
+                // Commit the ordering only after GPU upload succeeds.
+                // Identity order needs no extra stored vector.
+                if (result == TransparentMeshSortResult::Unchanged)
+                    sectionState.blendSortOrder.clear();
+                else
+                    sectionState.blendSortOrder = std::move(*order);
                 sectionState.blendSortKey = *cameraSortKey;
                 sectionState.blendSortKeyValid = true;
             } catch (std::exception const& exception) {
@@ -1437,13 +1721,99 @@ void submitProjectionMeshPass(
         }
     };
 
+    auto renderBatchedBlend = [&](std::vector<VisibleMesh> const& visible,
+                                  mce::MaterialPtr const& material) {
+        if(!materialExists(material))return;
+        auto& cache=state.transparentDrawBatches;
+        if(visible.size()<2 || visible.size()>4096) {
+            cache.clear();
+            renderMeshes(visible,material);
+            return;
+        }
+        cache.observe(visible,state.activationGeneration,
+            state.meshUploadRevision,state.visibilityRevision);
+        // A newly uploaded camera-sort buffer changes only its own group.
+        // Compare monotonic GPU upload generations, not sampled camera hashes.
+        for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+            auto& group=cache.groups[groupIndex];
+            if(!group.mesh)continue;
+            auto const first=cache.groupStart(groupIndex);
+            auto const last=cache.groupEnd(groupIndex);
+            bool current=group.sortGenerations.size()==last-first;
+            for(auto i=first;i<last && current;++i)
+                current=cache.visible[i]<state.sections.size()
+                    && state.sections[cache.visible[i]].blendSortUploadGeneration
+                        ==group.sortGenerations[i-first];
+            if(!current) {
+                cache.retire(groupIndex);
+                group.unsupported=false;
+                cache.lastChange=std::chrono::steady_clock::now();
+            }
+        }
+        // Build at most one bounded GPU group per stationary frame; incomplete
+        // groups keep drawing their original section meshes without flicker.
+        if(cache.readyToBuild()
+            && cache.storedVertices<kTransparentBatchMaxResidentVertices) {
+            auto service=renderContext.mScreenContext.tessellator.mBufferResourceService.lock();
+            if(service) {
+                for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+                    auto& group=cache.groups[groupIndex];
+                    if(group.mesh || group.unsupported)continue;
+                    auto const first=cache.groupStart(groupIndex);
+                    auto const last=cache.groupEnd(groupIndex);
+                    if(last-first<2){group.unsupported=true;continue;}
+                    try {
+                        std::size_t vertices{};
+                        auto mesh=buildTransparentDrawBatch(state,
+                            std::span<std::size_t const>{cache.visible.data()+first,last-first},
+                            service,vertices);
+                        if(!mesh || vertices>kTransparentBatchMaxResidentVertices-cache.storedVertices) {
+                            group.unsupported=true;
+                            continue;
+                        }
+                        group.sortGenerations.reserve(last-first);
+                        for(auto i=first;i<last;++i)
+                            group.sortGenerations.push_back(
+                                state.sections[cache.visible[i]].blendSortUploadGeneration);
+                        group.vertexCount=vertices;
+                        group.mesh=std::move(mesh);
+                        cache.storedVertices+=vertices;
+                        break;
+                    } catch(std::exception const& e) {
+                        group.unsupported=true;
+                        app::reportNativeCallbackFailure("transparent GPU draw batching",e.what());
+                    } catch(...) {
+                        group.unsupported=true;
+                        app::reportNativeCallbackFailure("transparent GPU draw batching",
+                            "unknown native exception");
+                    }
+                }
+            }
+        }
+        auto const blend=isBlendRenderMaterial(material);
+        for(std::size_t groupIndex=0;groupIndex<cache.groups.size();++groupIndex) {
+            auto const& group=cache.groups[groupIndex];
+            if(group.mesh && group.mesh->isValid()
+                && group.mesh->mVertexCount.get().value_or(0u)>0) {
+                group.mesh->renderMesh(
+                    renderContext.mScreenContext,material,*state.terrainTextureVariant,
+                    0,group.mesh->mVertexCount.get().value_or(0u),
+                    emptyOffscreenCaptureDescription(),nullptr);
+                ++state.glassR3RetainedDrawCalls;
+                if(blend)++state.glassR3BlendDrawCalls;
+            } else {
+                for(auto i=cache.groupStart(groupIndex);i<cache.groupEnd(groupIndex);++i)
+                    submitRetainedMesh(cache.visible[i],blendBucket,material,blend);
+            }
+        }
+    };
     // R6 fallback hulls and R7 Exact Replay use the same R5 material owner.
     if (structureOpacity >= 0.999f) {
-        auto opaqueMeshes = collectBucket(opaqueBucket);
-        auto alphaMeshes = collectBucket(alphaBucket);
-        auto alphaOneSidedMeshes = collectBucket(alphaOneSidedBucket);
-        auto transparentMeshes = collectBucket(blendBucket);
-        sortBackToFront(transparentMeshes);
+        if (!renderAlphaLayer) {
+        // The opaque callback never submits transparent meshes. Delaying
+        // blend list allocation and sorting until the alpha callback also
+        // avoids needless work for models with no Blend bucket at all.
+        // Render cached section IDs directly with no per-frame vector copies.
 
         // Biome-tinted blocks (leaves, grass tops) carry their color in vertex
         // data, but the plain block materials' shaders have no COLOR input on
@@ -1459,38 +1829,29 @@ void submitProjectionMeshPass(
         auto const& alphaOneSidedMaterial = materialExists(itemRenderer.mMatAlphaOneSidedColoredBlock.get())
             ? itemRenderer.mMatAlphaOneSidedColoredBlock.get()
             : itemRenderer.mMatAlphaOneSidedBlock.get();
-        if (!renderAlphaLayer) {
-            renderMeshes(
-                opaqueMeshes,
-                materialExists(opaqueMaterial) ? opaqueMaterial : blendMaterial
-            );
-            renderMeshes(
-                alphaMeshes,
-                materialExists(alphaMaterial) ? alphaMaterial : blendMaterial
-            );
-            renderMeshes(
-                alphaOneSidedMeshes,
+            renderBucket(opaqueBucket,
+                materialExists(opaqueMaterial) ? opaqueMaterial : blendMaterial);
+            renderBucket(alphaBucket,
+                materialExists(alphaMaterial) ? alphaMaterial : blendMaterial);
+            renderBucket(alphaOneSidedBucket,
                 materialExists(alphaOneSidedMaterial)
                     ? alphaOneSidedMaterial
-                    : (materialExists(alphaMaterial) ? alphaMaterial : blendMaterial)
-            );
+                    : (materialExists(alphaMaterial) ? alphaMaterial : blendMaterial));
         } else {
+            auto transparentMeshes = collectBucket(blendBucket);
+            std::erase_if(transparentMeshes,[&](VisibleMesh const& mesh) {
+                return glassLiquidMergedReady(state,mesh.section);
+            });
+            sortBackToFront(transparentMeshes);
             prepareSortedBlendMeshes();
-            renderMeshes(transparentMeshes, projectedBlendMaterial);
+            renderBatchedBlend(transparentMeshes, projectedBlendMaterial);
         }
     } else if (renderAlphaLayer) {
-        // True projection transparency needs a blending material even for
-        // normally opaque/cutout blocks. Sort every bucket together.
-        std::vector<VisibleMesh> transparentMeshes;
-        for (std::size_t bucket = 0;
-             bucket < static_cast<std::size_t>(RenderBucket::Count);
-             ++bucket) {
-            auto bucketMeshes = collectBucket(bucket);
-            transparentMeshes.insert(
-                transparentMeshes.end(), bucketMeshes.begin(), bucketMeshes.end()
-            );
-        }
-        sortBackToFront(transparentMeshes);
+        // In ghost-opacity mode all terrain buckets are blended. The exact
+        // back-to-front section/bucket order is unchanged until mesh,
+        // visibility or camera position changes. Cache it across frames.
+        auto const& transparentMeshes = state.drawCache.ghostTerrainOrder(
+            [&](std::size_t section) { return distanceSquared(worldCenter(section)); });
         prepareSortedBlendMeshes();
         renderMeshes(transparentMeshes, projectedBlendMaterial);
     }
@@ -1498,25 +1859,13 @@ void submitProjectionMeshPass(
     // Textured liquid hulls travel the proven glass path: blend-block material
     // plus the terrain atlas, sorted back to front by section.
     if (renderAlphaLayer) {
-        std::vector<std::size_t> liquidSections;
-        auto const liquidProxySectionCount = std::min({
-            state.sections.size(),
-            state.liquidProxySectionMeshes.size(),
-            state.liquidProxySectionCellCounts.size()
-        });
-        for (std::size_t liquidSection = 0;
-             liquidSection < liquidProxySectionCount;
-             ++liquidSection) {
-            auto const& mesh = state.liquidProxySectionMeshes[liquidSection];
-            if (mesh && mesh->isValid()) liquidSections.push_back(liquidSection);
-        }
-        std::sort(
-            liquidSections.begin(),
-            liquidSections.end(),
-            [&](std::size_t lhs, std::size_t rhs) {
-                return distanceSquared(worldCenter(lhs)) > distanceSquared(worldCenter(rhs));
-            }
-        );
+        // Keep fallback liquid proxies on the same conservative visibility
+        // path as native liquids and ordinary section meshes. Off-screen GPU
+        // meshes remain cached and are drawn again when the camera returns.
+        // Already visibility-filtered and back-to-front sorted in prepare().
+        // No per-frame full section scan, heap allocation, or redundant sort.
+        auto const& liquidSections = state.drawCache.lists[
+            static_cast<std::size_t>(ProjectionDrawSlot::Liquid)];
         if (!liquidSections.empty()
             && !gLiquidProxyR6Logged.exchange(true, std::memory_order_acq_rel)) {
             auto const* source = tryRenderMaterial(blendMaterial);
@@ -1552,8 +1901,12 @@ void submitProjectionMeshPass(
         }
 
         // Textured placeholder hulls for block-entity blocks.
-        for (std::size_t i=0; i<state.blockEntityPlaceholderSectionMeshes.size(); ++i) {
-            if(i<state.sections.size() && !state.sections[i].renderVisible)continue;
+        // Draw only the visible, valid placeholder section IDs populated by
+        // the same cache on mesh upload and visibility revision.
+        for (auto const i : state.drawCache.lists[
+                 static_cast<std::size_t>(ProjectionDrawSlot::Placeholder)]) {
+            if (i >= state.blockEntityPlaceholderSectionMeshes.size()
+                || i >= state.sections.size() || !state.sections[i].renderVisible) continue;
             auto const& placeholder=state.blockEntityPlaceholderSectionMeshes[i];
             if (!placeholder || !placeholder->isValid()) continue;
             placeholder->renderMesh(
@@ -1588,6 +1941,15 @@ void submitProjectionMeshPass(
         }
     }
     if (!renderAlphaLayer) return;
+    // Build at most one correction batch after uploads settle. Original
+    // individual GPU meshes remain the authoritative fallback at all times.
+    if (auto service = renderContext.mScreenContext.tessellator.mBufferResourceService.lock()) {
+        if (state.correctionDrawBatches.buildNext(service)
+            && state.correctionDrawBatches.builtGroups() % 4 == 0) {
+            logger().info("LHolo correction GPU batches built={} groupSize=32",
+                state.correctionDrawBatches.builtGroups());
+        }
+    }
 
     auto* levelRenderer = client.getLevelRenderer();
     auto* levelRendererPlayer = levelRenderer
@@ -1597,22 +1959,10 @@ void submitProjectionMeshPass(
     auto const& outlineMaterial=nativeOutline
         ? *nativeOutline : itemRenderer.mMatBlendBlock.get();
     auto const overlayTexture = render::resolveWhiteTextureVariant(levelRenderer);
-    // The project bounds are generated through the shared BoxWireframeMesh
-    // and colored through the native selection material only for this draw.
-    if (materialExists(outlineMaterial) && structureBoundsEnabled
-        && state.structureBoundsMesh && state.structureBoundsMesh->isValid()) {
-        render::ScopedShaderColor boundsColor{
-            renderContext.mScreenContext.currentShaderColor,0xFFFFD633U};
-        state.structureBoundsMesh->renderMesh(
-            renderContext.mScreenContext,
-            outlineMaterial,
-            overlayTexture,
-            0,
-            state.structureBoundsMesh->mVertexCount.get().value_or(0u),
-            emptyOffscreenCaptureDescription(),
-            nullptr
-        );
-    }
+    // The enclosing blue bounds are drawn once as a world-space
+    // BoundsWireframe by ProjectionRenderFrame. They also remain visible when
+    // every native region is OFF (there are no section meshes in that case).
+    (void)structureBoundsEnabled;
     auto const& warningMaterial = levelRendererPlayer
         ? levelRendererPlayer->selectionBlockEntityOverlayColorMaterial.get()
         : itemRenderer.mMatBlendBlockNoColor.get();
@@ -1626,39 +1976,97 @@ void submitProjectionMeshPass(
         std::vector<std::unique_ptr<mce::Mesh>> const& meshes,
         mce::MaterialPtr const& material,
         bool seeThroughMeshes,
+        ProjectionDrawSlot drawSlot,
         bool matchMeshPrimitive = false
     ) {
         if (!materialExists(material)) return;
+        auto const started = std::chrono::steady_clock::now();
         ScopedNoDepthTest seeThrough(material, seeThroughMeshes);
-        for (std::size_t i=0; i<meshes.size(); ++i) {
-            if(i<state.sections.size() && !state.sections[i].renderVisible)continue;
-            auto const& overlay=meshes[i];
-            if (!overlay || !overlay->isValid()) continue;
-            // The async upload may still contain the preceding width setting.
-            // Select topology from each uploaded mesh, never from live settings.
-            auto* renderMaterial = matchMeshPrimitive ? tryRenderMaterial(material) : nullptr;
-            if (matchMeshPrimitive && !renderMaterial
-                && overlay->mPrimitiveMode != mce::PrimitiveMode::LineList) continue;
-            auto const previousPrimitive = renderMaterial ? renderMaterial->mPrimitiveMode : mce::PrimitiveMode{};
-            app::ScopeExit restorePrimitive{[&]() noexcept {
-                if (renderMaterial) renderMaterial->mPrimitiveMode = previousPrimitive;
-            }};
-            if (renderMaterial) renderMaterial->mPrimitiveMode = overlay->mPrimitiveMode;
-            overlay->renderMesh(
-                renderContext.mScreenContext,
-                material,
-                overlayTexture,
-                0,
-                overlay->mVertexCount.get().value_or(0u),
-                emptyOffscreenCaptureDescription(),
-                nullptr
+        // A correction pass uses one material. Save its primitive mode once
+        // instead of constructing a restoration scope for each GPU mesh.
+        auto* renderMaterial = matchMeshPrimitive ? tryRenderMaterial(material) : nullptr;
+        auto const originalPrimitive = renderMaterial
+            ? renderMaterial->mPrimitiveMode : mce::PrimitiveMode{};
+        app::ScopeExit restorePrimitive{[&]() noexcept {
+            if (renderMaterial) renderMaterial->mPrimitiveMode = originalPrimitive;
+        }};
+        std::uint64_t drawCount{};
+        std::uint64_t batchedDraws{};
+        auto const& visibleSections = state.drawCache.lists[
+            static_cast<std::size_t>(drawSlot)];
+        auto const batchKind = drawSlot == ProjectionDrawSlot::MissingFill
+            ? ProjectionCorrectionBatchCache::MissingFill
+            : ProjectionCorrectionBatchCache::MissingOutline;
+        bool const supportsBatch = drawSlot == ProjectionDrawSlot::MissingFill
+            || drawSlot == ProjectionDrawSlot::MissingOutline;
+        std::size_t lastBatchedGroup = std::numeric_limits<std::size_t>::max();
+        for (auto const i : visibleSections) {
+            if (i >= meshes.size() || i >= state.sections.size()
+                || !state.sections[i].renderVisible) continue;
+            auto const group = i / kCorrectionBatchSize;
+            if (supportsBatch && group == lastBatchedGroup) continue;
+            mce::Mesh const* selected = nullptr;
+            // Every source section in a ready GPU batch has its original
+            // geometry. If even one of its sections is visible, submit the
+            // whole group once: the GPU clips off-frustum primitives. This
+            // avoids Phase20's all-visible condition that left most groups
+            // unbatched near frustum edges. This is safe because renderVisible
+            // comes solely from conservative view-frustum classification.
+            // The loop itself iterates only visible, valid draw-list members.
+            if (supportsBatch) {
+                // Avoid processing dozens of invisible source sections when
+                // only one or two member meshes intersect the frustum.
+                // Draw-list section IDs are sorted; a tiny binary search is
+                // cheaper than speculative GPU vertex work at view edges.
+                auto const first = group * kCorrectionBatchSize;
+                auto const start = std::lower_bound(
+                    visibleSections.begin(), visibleSections.end(), first);
+                auto const stop = std::lower_bound(
+                    start, visibleSections.end(), first + kCorrectionBatchSize);
+                auto const visibleCount = static_cast<std::size_t>(stop - start);
+                if (visibleCount >= kCorrectionBatchMinVisibleMeshes) {
+                    auto const* batch = state.correctionDrawBatches.readyMesh(
+                    i, batchKind, state.sections.size());
+                    if (batch && batch->isValid()
+                    && (!matchMeshPrimitive || renderMaterial
+                        || batch->mPrimitiveMode == mce::PrimitiveMode::LineList)) {
+                        selected = batch;
+                        ++batchedDraws;
+                        lastBatchedGroup = group;
+                    }
+                }
+            }
+            if (!selected) {
+                // A group with missing CPU source, invalidated
+                // upload or unsupported topology uses its ORIGINAL GPU mesh.
+                auto const& overlay = meshes[i];
+                if (!overlay || !overlay->isValid()) continue;
+                selected = overlay.get();
+                if (matchMeshPrimitive && !renderMaterial
+                    && selected->mPrimitiveMode != mce::PrimitiveMode::LineList) continue;
+            }
+            if (renderMaterial) renderMaterial->mPrimitiveMode = selected->mPrimitiveMode;
+            selected->renderMesh(
+                renderContext.mScreenContext, material, overlayTexture, 0,
+                selected->mVertexCount.get().value_or(0u),
+                emptyOffscreenCaptureDescription(), nullptr
             );
+            ++drawCount;
+        }
+        if (drawCount) {
+            auto const elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            correctionSubmitTiming().record(
+                drawSlot == ProjectionDrawSlot::MissingOutline
+                    || drawSlot == ProjectionDrawSlot::WrongOutline,
+                static_cast<std::uint64_t>(elapsed), drawCount, batchedDraws);
         }
     };
 
     struct MaterialStateRestore {
         mce::RenderMaterial* material{};
         std::optional<mce::BlendStateDescription> blend;
+        std::optional<mce::DepthWriteMask> depthWriteMask;
         mce::PrimitiveMode primitive{};
         float depthBias{};
         float slopeBias{};
@@ -1666,6 +2074,7 @@ void submitProjectionMeshPass(
         ~MaterialStateRestore() {
             if (!material || !blend) return;
             material->blendStateDescription.get() = *blend;
+            if (depthWriteMask) material->depthStencilStateDescription.get().depthWriteMask = *depthWriteMask;
             material->mDepthBias = depthBias;
             material->mSlopeScaledDepthBias = slopeBias;
             if (restorePrimitive) material->mPrimitiveMode = primitive;
@@ -1685,13 +2094,18 @@ void submitProjectionMeshPass(
             restore.depthBias = renderMaterial->mDepthBias;
             restore.slopeBias = renderMaterial->mSlopeScaledDepthBias;
             restore.restorePrimitive = true;
+            auto& depthState = renderMaterial->depthStencilStateDescription.get();
+            restore.depthWriteMask = depthState.depthWriteMask;
+            depthState.depthWriteMask = static_cast<mce::DepthWriteMask>(0);
             renderMaterial->mPrimitiveMode = mce::PrimitiveMode::QuadList;
             renderMaterial->blendStateDescription.get()
                 = blendRenderMaterial->blendStateDescription.get();
             renderMaterial->mDepthBias = 100.0f;
             renderMaterial->mSlopeScaledDepthBias = 15.0f;
-            renderOverlayMeshes(state.warningFillSectionMeshes, outlineMaterial, missingSeeThrough);
-            renderOverlayMeshes(state.wrongFillSectionMeshes, outlineMaterial, correctionSeeThrough);
+            render::ScopedShaderColor fillColor{renderContext.mScreenContext.currentShaderColor,
+                mce::Color{1.f, 1.f, 1.f, std::clamp(state.cachedCorrectionFillOpacity, 0.f, 1.f)}};
+            renderOverlayMeshes(state.warningFillSectionMeshes, outlineMaterial, missingSeeThrough, ProjectionDrawSlot::MissingFill);
+            renderOverlayMeshes(state.wrongFillSectionMeshes, outlineMaterial, correctionSeeThrough, ProjectionDrawSlot::WrongFill);
         }
     } else if (materialExists(warningMaterial)) {
         // Vanilla selection overlay has the required depth bias. Temporarily
@@ -1709,12 +2123,12 @@ void submitProjectionMeshPass(
             renderMaterial->mDepthBias = 100.0f;
             renderMaterial->mSlopeScaledDepthBias = 15.0f;
         }
-        renderOverlayMeshes(state.warningFillSectionMeshes, warningMaterial, missingSeeThrough);
-        renderOverlayMeshes(state.wrongFillSectionMeshes, warningMaterial, correctionSeeThrough);
+        renderOverlayMeshes(state.warningFillSectionMeshes, warningMaterial, missingSeeThrough, ProjectionDrawSlot::MissingFill);
+        renderOverlayMeshes(state.wrongFillSectionMeshes, warningMaterial, correctionSeeThrough, ProjectionDrawSlot::WrongFill);
     }
     if (materialExists(outlineMaterial)) {
-        renderOverlayMeshes(state.correctionOutlineSectionMeshes, outlineMaterial, missingSeeThrough, true);
-        renderOverlayMeshes(state.wrongOutlineSectionMeshes, outlineMaterial, correctionSeeThrough, true);
+        renderOverlayMeshes(state.correctionOutlineSectionMeshes, outlineMaterial, missingSeeThrough, ProjectionDrawSlot::MissingOutline, true);
+        renderOverlayMeshes(state.wrongOutlineSectionMeshes, outlineMaterial, correctionSeeThrough, ProjectionDrawSlot::WrongOutline, true);
     }
 }
 

@@ -22,7 +22,7 @@ namespace {
 class ClientSyncFrameHandler final
 : public ll::network::PacketHandlerBase<ClientSyncFrameHandler, SyncFramePacket> {
 public:
-    void handlePacket(NetworkIdentifier const&, NetEventCallback&, SyncFramePacket const& packet) const {
+    void handlePacket(NetworkIdentifier const&, NetEventCallback&, ll::network::PacketSide, SyncFramePacket const& packet) const {
         SyncClient::instance().onFrame(packet.frame);
     }
 };

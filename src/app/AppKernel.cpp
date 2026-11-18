@@ -180,8 +180,8 @@ bool AppKernel::disable() {
     structure::shutdownPendingStructureLoad();
 
     // Detach sync listeners and mark the session disabled before any state is
-    // released. The statically registered packet handler of LL cannot be
-    // unregistered on 26.51.x; it becomes inert once the session is disabled.
+    // released. The statically registered packet handler may not be
+    // unregistered during unload; it becomes inert once the session is disabled.
     sync::SyncClient::instance().uninstall();
 
     structure::saveSettings();

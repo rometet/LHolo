@@ -14,6 +14,7 @@
 namespace lholo::structure {
 
 struct LoadedStructure;
+struct RegionSetting;
 
 namespace detail {
 
@@ -33,6 +34,13 @@ std::shared_ptr<LoadedStructure> finalizePreparedStructureFile(
 );
 
 std::shared_ptr<LoadedStructure> loadStructureFile(std::filesystem::path const& path, std::string& error);
+// Call on a fully finalized, unpublished structure on the main thread, before
+// session.replaceLoaded(). The same effective cells are used by all systems.
+void filterLoadedRegions(LoadedStructure& loaded,std::vector<RegionSetting> const& settings);
+// Cheap world-independent metadata view. Only effective cells are copied by
+// filterLoadedRegions; unfiltered native region arrays stay shared/immutable.
+std::shared_ptr<LoadedStructure> makeCachedRegionView(
+    std::shared_ptr<LoadedStructure const> source);
 
 } // namespace lholo::structure::detail
 

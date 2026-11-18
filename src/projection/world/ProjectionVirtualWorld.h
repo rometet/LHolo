@@ -7,6 +7,7 @@
 #pragma once
 
 #include "projection/core/ProjectionInternalTypes.h"
+#include "projection/world/ProjectionWorldLookup.h"
 
 class Block;
 class BlockActor;
@@ -17,9 +18,8 @@ namespace lholo::projection::detail {
 class ScopedTessellationBlocks {
 public:
     explicit ScopedTessellationBlocks(
-        ExpectedBlockMap const&      blocks,
-        ExpectedLiquidMap const&     liquids,
-        ExpectedBlockActorMap const& blockActors,
+        ProjectionWorldLookup const& worldLookup,
+        ExpectedBlockActorMap const&  blockActors,
         NativeLiquidTelemetry*       telemetry = nullptr
     );
     ~ScopedTessellationBlocks();
@@ -28,11 +28,26 @@ public:
     ScopedTessellationBlocks& operator=(ScopedTessellationBlocks const&) = delete;
 
 private:
-    ExpectedBlockMap const*      mPreviousBlocks{};
-    ExpectedLiquidMap const*     mPreviousLiquids{};
+    ProjectionWorldLookup const* mPreviousLookup{};
     ExpectedBlockActorMap const* mPreviousBlockActors{};
     NativeLiquidTelemetry*       mPreviousTelemetry{};
 };
+
+// During a diode's native tessellation, unoccupied schematic neighbors are
+// air, not whatever blocks happen to be in the player's real world.
+// Scope is thread-local and restricted to a five-block neighborhood.
+class ScopedDiodeAirNeighborhood {
+public:
+    ScopedDiodeAirNeighborhood(BlockPos const& center, Block const* air) noexcept;
+    ~ScopedDiodeAirNeighborhood() noexcept;
+    ScopedDiodeAirNeighborhood(ScopedDiodeAirNeighborhood const&) = delete;
+    ScopedDiodeAirNeighborhood& operator=(ScopedDiodeAirNeighborhood const&) = delete;
+private:
+    Block const* mPreviousAir{};
+    int mPreviousX{}, mPreviousY{}, mPreviousZ{};
+};
+
+[[nodiscard]] bool isDiodeVirtualAirPosition(BlockPos const& position) noexcept;
 
 // Vanilla BlockType::connectionUpdate recomputes a block's flattened
 // connection states correctly for every family (fences, glass panes, iron

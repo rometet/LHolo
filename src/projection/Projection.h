@@ -43,6 +43,8 @@ float getCorrectionOutlineWidth();
 void setCorrectionOutlineWidth(float width);
 bool getStructureBoundsEnabled();
 void setStructureBoundsEnabled(bool enabled);
+bool getRegionBoundsEnabled();
+void setRegionBoundsEnabled(bool enabled);
 bool getCorrectionSeeThrough();
 void setCorrectionSeeThrough(bool enabled);
 bool getMissingSeeThrough();

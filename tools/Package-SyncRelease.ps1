@@ -6,7 +6,7 @@
 #
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools\Package-SyncRelease.ps1
 param(
-    [string]$Version = '26.51.5-sync-v1-rc.1',
+    [string]$Version = '26.60.0-sync-v1-rc.1',
     [switch]$PackageOnly
 )
 $ErrorActionPreference = 'Stop'

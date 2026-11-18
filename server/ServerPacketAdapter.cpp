@@ -16,7 +16,7 @@ namespace {
 class ServerSyncFrameHandler final
 : public ll::network::PacketHandlerBase<ServerSyncFrameHandler, SyncFramePacket> {
 public:
-    void handlePacket(NetworkIdentifier const& source, NetEventCallback&, SyncFramePacket const& packet) const {
+    void handlePacket(NetworkIdentifier const& source, NetEventCallback&, ll::network::PacketSide, SyncFramePacket const& packet) const {
         // Receive-thread: validate (already bounded by the packet read) and copy.
         SyncService::instance().enqueueInbound(source, packet.frame);
     }

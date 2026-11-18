@@ -1,6 +1,7 @@
 // LHolo - CPU draw-list cache. Values and section IDs only; no game resources.
 #pragma once
 
+#include "projection/core/ProjectionCachedDistanceSort.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -52,8 +53,40 @@ class ProjectionDrawCache {
     std::uint64_t recordBuilds{};
     std::uint64_t orderBuilds{};
     std::uint64_t listBuilds{};
+    std::uint64_t deltaRecordUpdates{};
+    std::uint64_t ghostOrderBuilds{};
 
-    [[nodiscard]] std::size_t residentCount() const { return mResidents.size(); }
+    // In ghost-opacity mode all terrain buckets share one stable distance
+    // order. Build it once per camera/mesh/visibility revision instead of
+    // allocating and sorting four buckets on every alpha callback.
+    template <class ReadDistance>
+    std::vector<ProjectionTerrainDraw> const& ghostTerrainOrder(ReadDistance&& readDistance) {
+        if (mGhostOrderValid) return mGhostOrder;
+        std::size_t count = transparentTerrain.size();
+        for (std::size_t bucket = 0; bucket < 3; ++bucket) count += lists[bucket].size();
+        reserveGrowing(mGhostOrder, count);
+        mGhostOrder.clear();
+        for (std::size_t bucket = 0; bucket < 4; ++bucket) {
+            if (bucket == static_cast<std::size_t>(ProjectionDrawSlot::Blend)) {
+                for (auto const& draw : transparentTerrain)
+                    mGhostOrder.push_back({draw.section, bucket});
+            } else {
+                for (auto const section : lists[bucket])
+                    mGhostOrder.push_back({section, bucket});
+            }
+        }
+        sortProjectionDrawsByCachedDistance(mGhostOrder, mResidents.size(), readDistance);
+        mGhostOrderValid = true;
+        ++ghostOrderBuilds;
+        return mGhostOrder;
+    }
+
+    [[nodiscard]] std::size_t residentCount() const { return mActiveSections.size(); }
+
+    // Mesh uploads happen on the render thread. Record exactly which section
+    // changed so progressive builds update one draw record rather than reading
+    // every section and recreating all CPU draw lists at each upload.
+    void noteMeshUpload(std::size_t section) { mChangedSections.push_back(section); }
 
     // ReadRecord inspects active storage only during resource/layout changes.
     // IsVisible reads this frame's classification. Neither callback is retained.
@@ -61,18 +94,26 @@ class ProjectionDrawCache {
     void prepare(std::uint64_t activation, std::uint64_t meshRevision, std::uint64_t visibilityRevision,
                  std::size_t sectionCount, ProjectionDrawPosition eyeLocal,
                  ReadRecord&& read, IsVisible&& visible) {
-        bool const resourcesChanged = !mResourcesValid || mActivation != activation ||
-                                      mMeshRevision != meshRevision || mSectionCount != sectionCount;
-        if (resourcesChanged) {
+        bool const activationChanged = !mResourcesValid || mActivation != activation ||
+            mSectionCount != sectionCount;
+        // If a revision changed without an explicit section notification,
+        // prefer correctness over the incremental fast path.
+        bool const fullScan = activationChanged ||
+            (mMeshRevision != meshRevision && mChangedSections.empty());
+        if (fullScan) {
             mResidents.clear();
+            mResidents.reserve(sectionCount);
+            mActiveSections.clear();
+            mSortedCandidates.clear();
             std::array<std::size_t, kProjectionDrawSlotCount> counts{};
             std::size_t terrainCount{};
             for (std::size_t section = 0; section < sectionCount; ++section) {
                 auto record = read(section);
                 record.section = section;
-                if (!record.slots)
-                    continue;
                 mResidents.push_back(record);
+                if (!record.slots) continue;
+                mActiveSections.push_back(section);
+                if (record.slots & kSortedMask) mSortedCandidates.push_back(section);
                 for (std::size_t slot = 0; slot < counts.size(); ++slot) {
                     if (record.slots & (1u << slot)) {
                         ++counts[slot];
@@ -97,16 +138,43 @@ class ProjectionDrawCache {
             mSectionCount = sectionCount;
             mResourcesValid = true;
             mOrderValid = mListsValid = false;
+            mChangedSections.clear();
             ++recordBuilds;
+        } else if (mMeshRevision != meshRevision) {
+            // All records have stable section indices, including initially
+            // empty sections. This makes a newly uploaded GPU mesh an O(1)
+            // update and preserves deterministic source-section draw order.
+            for (auto const section : mChangedSections) {
+                if (section >= mResidents.size()) continue;
+                auto updated = read(section);
+                updated.section = section;
+                auto const previous = mResidents[section].slots;
+                auto adjust = [section](std::vector<std::size_t>& sorted, bool was, bool now) {
+                    if (was == now) return;
+                    auto const where = std::lower_bound(sorted.begin(), sorted.end(), section);
+                    if (now) sorted.insert(where, section);
+                    else if (where != sorted.end() && *where == section) sorted.erase(where);
+                };
+                adjust(mActiveSections, previous != 0, updated.slots != 0);
+                adjust(mSortedCandidates, (previous & kSortedMask) != 0,
+                    (updated.slots & kSortedMask) != 0);
+                mResidents[section] = updated;
+            }
+            mChangedSections.clear();
+            mMeshRevision = meshRevision;
+            mOrderValid = mListsValid = false;
+            ++deltaRecordUpdates;
         }
 
         bool const visibilityChanged = !mListsValid || mVisibilityRevision != visibilityRevision;
         if (visibilityChanged) {
-            for (std::size_t index = 0; index < mResidents.size(); ++index) {
-                mVisible[index] = visible(mResidents[index].section) ? 1 : 0;
-            }
+            for (auto const section : mActiveSections)
+                mVisible[section] = visible(section) ? 1 : 0;
         }
         bool const eyeChanged = mHaveEye && mEye != eyeLocal;
+        // The translucent all-bucket ordering depends on exactly these three
+        // inputs; a fixed view with an unchanged projection reuses it verbatim.
+        if (visibilityChanged || eyeChanged) mGhostOrderValid = false;
         // Standing turns amortize one resident ordering across all directions.
         // While walking, sort only visible candidates, so a narrow view does
         // not pay O(all resident sections log all resident sections) each frame.
@@ -116,12 +184,8 @@ class ProjectionDrawCache {
             !mOrderValid || eyeChanged || mGlobalOrder != globalOrder;
         if (orderChanged) {
             mDistanceOrder.clear();
-            auto const sortedMask = projectionDrawBit(ProjectionDrawSlot::Blend)
-                | projectionDrawBit(ProjectionDrawSlot::Liquid);
-            for (std::size_t index = 0; index < mResidents.size(); ++index) {
+            for (auto const index : mSortedCandidates) {
                 auto const& record = mResidents[index];
-                if (!(record.slots & sortedMask))
-                    continue;
                 if (!globalOrder && !mVisible[index])
                     continue;
                 auto const dx = record.center.x - eyeLocal.x;
@@ -150,7 +214,7 @@ class ProjectionDrawCache {
         for (auto& list : lists)
             list.clear();
         transparentTerrain.clear();
-        for (std::size_t index = 0; index < mResidents.size(); ++index) {
+        for (auto const index : mActiveSections) {
             auto const& record = mResidents[index];
             if (!mVisible[index])
                 continue;
@@ -196,7 +260,17 @@ class ProjectionDrawCache {
         float distanceSquared;
     };
     std::vector<ProjectionDrawRecord> mResidents;
+    std::vector<std::size_t> mChangedSections;
+    // Stable ascending section IDs make opaque draws deterministic; only the
+    // translucent candidates participate in per-camera distance sorting.
+    std::vector<std::size_t> mActiveSections;
+    std::vector<std::size_t> mSortedCandidates;
+    static constexpr std::uint16_t kSortedMask =
+        projectionDrawBit(ProjectionDrawSlot::Blend)
+        | projectionDrawBit(ProjectionDrawSlot::Liquid);
     std::vector<DistanceEntry> mDistanceOrder;
+    std::vector<ProjectionTerrainDraw> mGhostOrder;
+    bool mGhostOrderValid{};
     std::vector<unsigned char> mVisible;
     ProjectionDrawPosition mEye;
     std::uint64_t mActivation{}, mMeshRevision{}, mVisibilityRevision{};

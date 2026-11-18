@@ -59,18 +59,21 @@ std::optional<std::filesystem::path> openStructureFile(std::filesystem::path con
         std::copy_n(value.data(), std::min(value.size(), buffer.size() - 1), buffer.data());
     }
 
+    // Keep an unfiltered first view. Some Windows shell dialogs retain an
+    // older multi-extension filter even when the current DLL includes .lholo.
+    // The second entry still provides the supported-structures-only view.
     auto const filter = buildFilter({
-        {i18n::TextKey::DialogFilterProjection, "*.mcstructure;*.litematic"},
+        {i18n::TextKey::DialogFilterAll, StructureOpenDefaultPatterns},
+        {i18n::TextKey::DialogFilterProjection, StructureOpenFilePatterns},
         {i18n::TextKey::DialogFilterBedrock, "*.mcstructure"},
-        {i18n::TextKey::DialogFilterLitematica, "*.litematic"},
-        {i18n::TextKey::DialogFilterAll, "*.*"}
+        {i18n::TextKey::DialogFilterLitematica, "*.litematic"}
     });
     OPENFILENAMEW dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFile = buffer.data();
     dialog.nMaxFile = static_cast<DWORD>(buffer.size());
     dialog.lpstrFilter = filter.c_str();
-    dialog.nFilterIndex = 1;
+    dialog.nFilterIndex = 1; // guaranteed-all-files default, includes .lholo
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
     dialog.lpstrDefExt = L"mcstructure";
     if (!GetOpenFileNameW(&dialog)) {

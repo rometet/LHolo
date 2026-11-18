@@ -72,7 +72,10 @@ bool prepareProjectionState(
 ) {
     auto& client = renderContext.mClientInstance;
     auto* player = client.getLocalPlayer();
-    if (!player || !loaded || loaded->renderBlocks.empty()) return false;
+    // An all-OFF region selection is an intentional empty effective view. Keep
+    // the placement active for region outlines, verifier and later re-enabling.
+    // Empty section collections are valid and have no mesh tasks to schedule.
+    if (!player || !loaded) return false;
 
     state.client = &client;
     state.level = &player->getLevel();
@@ -87,9 +90,7 @@ bool prepareProjectionState(
     state.blockTessellator = std::make_unique<BlockTessellator>(
         &player->getDimensionBlockSource()
     );
-    state.correctionStates.resize(
-        state.structure->renderBlocks.size(), CorrectionState::Unknown
-    );
+    state.initialCorrectionScan.reset(state.structure->renderBlocks.size());
     state.missingLayers.resize(state.structure->renderBlocks.size(), MissingLayerBoth);
     state.progressCorrect.resize(state.structure->renderBlocks.size(), 0);
     state.progressMaterialTypePresent.resize(state.structure->renderBlocks.size(), 0);
@@ -190,6 +191,18 @@ bool prepareProjectionState(
             state.sectionBlockIndices[found->second].push_back(index);
         }
     }
+    state.correctionStates.initialize(state.sectionBlockIndices, state.structure->renderBlocks.size());
+    state.correctionIndex.resize(state.sectionBlockIndices.size());
+    for (std::size_t section = 0; section < state.sectionBlockIndices.size(); ++section) {
+        std::vector<std::uint16_t> slots;
+        slots.reserve(state.sectionBlockIndices[section].size());
+        for (auto index : state.sectionBlockIndices[section]) {
+            auto const& cell = state.structure->renderBlocks[index];
+            slots.push_back(correctionCellSlot(cell.x, cell.y, cell.z));
+        }
+        state.correctionIndex[section].initialize(std::move(slots));
+    }
+    state.correctionScan.reset(state.sectionBlockIndices);
     initializeSectionStates(state.sections, centers);
     state.warningFillSectionMeshes.resize(state.sectionBlockIndices.size());
     state.correctionOutlineSectionMeshes.resize(state.sectionBlockIndices.size());

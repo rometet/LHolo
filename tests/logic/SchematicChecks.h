@@ -4,14 +4,20 @@
 #endif
 #include <Windows.h>
 #include "structure/PlacementSession.h"
+#include "structure/formats/RegionMergePlan.h"
 #include "structure/Verification.h"
 #include "structure/VerificationSelection.h"
 #include "structure/NativeBlockTransform.h"
 #include "structure/PlacementMigration.h"
 #include "structure/InventoryCountRules.h"
+#include "structure/SourceOriginLoadAnchor.h"
 #include "structure/TransientPlacementCache.h"
 #include "settings/SettingsStore.h"
 #include "projection/core/ProjectionRules.h"
+#include "projection/core/ProjectionRegionBoundsPolicy.h"
+#include "render/BoxWireframeMask.h"
+#include "render/OverlayColorEncoding.h"
+#include "projection/runtime/ProjectionRegionReusePolicy.h"
 #include "projection/runtime/ChunkAvailabilityQueue.h"
 #include <algorithm>
 #include <fstream>
@@ -23,6 +29,107 @@ template<class Check> void runSchematicChecks(Check check) {
     using namespace structure;
     using namespace projection::detail;
     auto throws=[&](auto&& operation){try{operation();return false;}catch(...){return true;}};
+    // ScopedShaderColor reads bytes as ABGR, low byte is RED.
+    // Regression: packed blue/yellow must not be interpreted as ARGB.
+    check(render::kPlacementOuterBlue == 0xFFFFD633u);
+    check(render::kPlacementRegionYellow == 0xFF4FD5FFu);
+    check((render::kPlacementOuterBlue & 0xFFu) == 0x33u);
+    check(((render::kPlacementOuterBlue >> 16) & 0xFFu) == 0xFFu);
+    check((render::kPlacementRegionYellow & 0xFFu) == 0xFFu);
+    check(((render::kPlacementRegionYellow >> 16) & 0xFFu) == 0x4Fu);
+    // Blue outer placement frame must remain, including with yellow native
+    // region outlines and when every subregion is disabled.
+    for(bool overall:{false,true})for(bool region:{false,true})
+        for(std::size_t count:{0u,1u,2u,25u,128u,129u}){
+            auto const native=shouldDrawNativeRegionBounds(overall,region,count);
+            auto const outer=shouldDrawOverallPlacementBounds(overall,region,count);
+            auto const selected=shouldDrawSelectedRegionHighlight(overall,region,count);
+            check(native==(overall && region && count>=2 && count<=128));
+            check(outer==overall);
+            check(selected==(overall && !native));
+            check(!native || outer);
+            check(!(native && selected));
+        }
+    // The outer 12 edges always win. Yellow edges inside the volume stay.
+    using render::BoxBoundary;
+    BoxBoundary const fullMin{0,0,0},fullMax{144,118,144};
+    check(render::boxEdgesExcludingOuter(fullMin,fullMax,fullMin,fullMax)==0);
+    check(render::boxEdgesExcludingOuter(
+        BoxBoundary{16,16,16},BoxBoundary{48,48,48},fullMin,fullMax)==
+        render::kAllBoxWireframeEdges);
+    // Corner source tile: yellow X/Y/Z edges coinciding with the blue
+    // corner edge must all disappear, without removing inner edges.
+    auto const cornerMask=render::boxEdgesExcludingOuter(
+        BoxBoundary{0,0,0},BoxBoundary{48,48,48},fullMin,fullMax);
+    check(cornerMask==(render::kAllBoxWireframeEdges &
+        ~static_cast<std::uint16_t>((1u<<0)|(1u<<3)|(1u<<8))));
+    // A partially overlapping outside X edge must be suppressed too.
+    auto const partialMask=render::boxEdgesExcludingOuter(
+        BoxBoundary{48,0,0},BoxBoundary{96,48,48},fullMin,fullMax);
+    check((partialMask&(1u<<0))==0);
+    check((partialMask&(1u<<2))!=0);
+    // World-space translations and rotations only change the computed AABB;
+    // the exact-integer edge policy must remain valid at large coordinates.
+    check(render::boxEdgesExcludingOuter(
+        BoxBoundary{1000,5,-192},BoxBoundary{1144,123,-48},
+        BoxBoundary{1000,5,-192},BoxBoundary{1144,123,-48})==0);
+    // A1 and A2 must survive an A3 addition, while sections touching
+    // changed geometry must be invalidated for neighboring face visibility.
+    struct DeltaCell{int x{},y{},z{},value{};};
+    auto const sameDeltaCell=[](DeltaCell const& a,DeltaCell const& b){
+        return a.value==b.value;
+    };
+    std::vector<DeltaCell> const original{{0,0,0,1},{64,0,0,2}};
+    std::vector<DeltaCell> const added{{0,0,0,1},{64,0,0,2},{128,0,0,3}};
+    auto const dirty=changedRegionSectionHalo(original,added,sameDeltaCell);
+    check(dirty.contains(std::tuple{8,0,0}));
+    check(dirty.contains(std::tuple{7,0,0}));
+    check(dirty.contains(std::tuple{9,0,0}));
+    check(!dirty.contains(std::tuple{0,0,0}));
+    check(!dirty.contains(std::tuple{4,0,0}));
+    check(changedRegionSectionHalo(original,original,sameDeltaCell).empty());
+    auto modified=added; modified[1].value=44;
+    auto const modifiedDirty=changedRegionSectionHalo(original,modified,sameDeltaCell);
+    check(modifiedDirty.contains(std::tuple{4,0,0}));
+    check(modifiedDirty.contains(std::tuple{8,0,0}));
+    check(!modifiedDirty.contains(std::tuple{0,0,0}));
+    // Source-tile adjacency is safe for the no-hash merge, actual overlap is
+    // not. Regress the 25-region composite fast path and ownership fallback.
+    using RegionBox=LoadedStructure::RegionBox;
+    std::vector<RegionBox> regionTiles;
+    for(int y=0;y<5;++y)for(int x=0;x<5;++x)
+        regionTiles.push_back({x*48,y*40,-192,48,40,48,"tile"});
+    check(detail::disjointRegionBounds(regionTiles));
+    regionTiles[12].x-=1;
+    check(!detail::disjointRegionBounds(regionTiles));
+    regionTiles[12].x+=1;
+    regionTiles[12].sizeX=0;
+    check(!detail::disjointRegionBounds(regionTiles));
+    check(detail::disjointRegionBounds(std::vector<RegionBox>{}));
+    regionTiles[12].sizeX=48;
+    struct RegionCell{int x{},y{},z{};};
+    std::vector<RegionCell> ownedCells{
+        {0,0,-192},{48,0,-192},{239,0,-192},{96,40,-192},{0,160,-192}};
+    auto const owners=detail::makeDisjointRegionOwners(regionTiles,ownedCells);
+    check((owners==std::vector<std::uint8_t>{0,1,4,7,20}));
+    ownedCells.push_back({240,0,-192});
+    check(detail::makeDisjointRegionOwners(regionTiles,ownedCells).empty());
+    ownedCells.pop_back();
+    regionTiles[12].x-=1;
+    check(detail::makeDisjointRegionOwners(regionTiles,ownedCells).empty());
+    regionTiles[12].x+=1;
+    // Direct-source-origin must never fall back to foot placement.
+    std::optional<std::array<int,3>> const clicked=std::array{120,70,-340};
+    std::optional<std::array<int,3>> const source=std::array{1024,5,-192};
+    check(detail::selectInitialLoadAnchor(false,clicked,source)==clicked);
+    check(detail::selectInitialLoadAnchor(true,clicked,source)==source);
+    check(!detail::selectInitialLoadAnchor(true,clicked,std::nullopt));
+    check(!detail::selectInitialLoadAnchor(true,std::nullopt,std::nullopt));
+    check(detail::selectInitialLoadAnchor(false,clicked,std::nullopt)==clicked);
+    check(!detail::selectInitialLoadAnchor(true,clicked,std::array{30000001,5,1}));
+    check(!detail::selectInitialLoadAnchor(true,clicked,std::array{1,1000001,1}));
+    check(detail::selectInitialLoadAnchor(true,clicked,std::array{0,0,0})==
+        std::optional<std::array<int,3>>{std::array{0,0,0}});
     check(inventoryCountAfterStack(32,64)==96);
     check(inventoryCountAfterStack(32,0)==32);
     check(inventoryCountAfterStack(32,-1)==32);
@@ -286,13 +393,14 @@ template<class Check> void runSchematicChecks(Check check) {
     RegionScanCursor cursor;std::size_t turns{};
     while(cursor.region<boxes.size() && turns++<1000){std::size_t budget=1;auto p=cursor.next(boxes,budget);check(budget==0);if(p)check(unionCells.emplace(p->x,p->y,p->z).second);}
     check(turns<1000 && unionCells.size()==16);check(!unionCells.contains({4,0,0}));
-    check(safeSchematicPath("folder/test.mcstructure"));check(safeSchematicPath("日本語/家.litematic"));check(safeSchematicPath("HOUSE.MCSTRUCTURE"));
+    check(safeSchematicPath("folder/test.mcstructure"));check(safeSchematicPath("BarteringDeco_25regions.lholo"));check(safeSchematicPath("BarteringDeco_Parts/region-1.mcstructure"));check(safeSchematicPath("日本語/家.litematic"));check(safeSchematicPath("HOUSE.MCSTRUCTURE"));
     for(auto bad:{"","../x.mcstructure","a/../b.litematic","/x.mcstructure","C:/x.mcstructure","C:x.mcstructure","\\\\server/x.mcstructure","a\\x.litematic","a//b.litematic","a/./b.litematic","CON.mcstructure","com1.mcstructure","a./x.litematic","x.litematic/","x.json","x.mcstructure:stream"})check(!safeSchematicPath(bad));
     check(placementWorldKey("a")!=placementWorldKey("A"));
     check(placementServerKey("EXAMPLE.COM",19132)==placementServerKey("example.com",19132));
     check(placementServerKey("example.com",19132)!=placementServerKey("example.com",19133));
     check(throws([&]{placementWorldKey("");}));check(throws([&]{placementServerKey("host",0);}));
     PlacementDocument d;SavedPlacement p;p.id=1;p.name="家";p.file="home.litematic";p.origin={-25,65,81};p.dimension=2;p.rotation=3;p.mirror=2;p.layerAxis=LayerAxis::SouthToNorth;p.layerMode=LayerDisplayMode::UpToCurrent;p.layer=3;p.visible=false;p.countExtras=false;
+    p.regions={{"exterior",false},{"wiring",false},{"region-1",true,RegionArea{4,5,6,8,9,10}}};
     d.placements.push_back(p);d.selected=1;check(decodePlacements(encodePlacements(d))==d);
     TransientPlacementCache dimensions;dimensions.remember(0,d);
     auto nether=d;nether.placements[0].dimension=1;nether.selected=0;dimensions.remember(1,nether);
@@ -313,8 +421,8 @@ template<class Check> void runSchematicChecks(Check check) {
     check(!migrated.visible && !migrated.countExtras && migrated.dimension==2);
 
     auto decoded=decodePlacements(R"({"version":1,"placements":[{"file":"a.litematic"}],"selected":99,"future":true})");
-    check(decoded.selected==0 && decoded.placements[0].layerAxis==LayerAxis::BottomToTop && decoded.placements[0].visible);
-    for(auto bad:{"{}","[]","{",R"({"version":2,"placements":[]})",R"({"version":1,"placements":[{"file":"../a.litematic"}]})",R"({"version":1,"placements":[{"id":1,"file":"a.litematic"},{"id":1,"file":"b.litematic"}]})",R"({"version":1,"placements":[{"file":"a.litematic","origin":[18446744073709551615,0,0]}]})"})check(throws([&]{decodePlacements(bad);}));
+    check(decoded.selected==0 && decoded.placements[0].layerAxis==LayerAxis::BottomToTop && decoded.placements[0].visible && decoded.placements[0].regions.empty());
+    for(auto bad:{"{}","[]","{",R"({"version":99,"placements":[]})",R"({"version":1,"placements":[{"file":"../a.litematic"}]})",R"({"version":1,"placements":[{"id":1,"file":"a.litematic"},{"id":1,"file":"b.litematic"}]})",R"({"version":1,"placements":[{"file":"a.litematic","origin":[18446744073709551615,0,0]}]})"})check(throws([&]{decodePlacements(bad);}));
     check(throws([&]{decodePlacements(std::string(kMaxPlacementDocument+1,' '));}));
     check(throws([&]{decodePlacements(std::string(100,'[')+std::string(100,']'));}));
     auto excessive=d;excessive.placements.resize(kMaxPlacements+1);check(throws([&]{encodePlacements(excessive);}));

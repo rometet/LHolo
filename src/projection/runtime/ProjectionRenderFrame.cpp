@@ -16,13 +16,18 @@
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
 #include "projection/core/ProjectionState.h"
+#include "projection/core/ProjectionRegionBoundsPolicy.h"
+#include "render/BoxWireframeMask.h"
+#include "render/OverlayColorEncoding.h"
 #include "projection/mesh/ProjectionMeshWorker.h"
 #include "projection/mesh/ProjectionRenderer.h"
 #include "projection/mesh/ProjectionSectionBuilder.h"
 #include "projection/runtime/ProjectionFramePipeline.h"
+#include "projection/runtime/ProjectionFrameTiming.h"
 #include "projection/runtime/ProjectionVisibility.h"
 #include "projection/runtime/ProjectionInvalidation.h"
 #include "projection/runtime/ProjectionLifecycle.h"
+#include "projection/runtime/ProjectionRegionMeshReuse.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/runtime/ProjectionWorldEvents.h"
 #include "projection/runtime/VerifierHighlightRules.h"
@@ -39,6 +44,7 @@
 #include "structure/SchematicRuntime.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -68,7 +74,7 @@ namespace lholo::projection::detail {
 namespace {
 
 std::optional<Vec3> renderCameraPosition(BaseActorRenderContext const& renderContext) {
-    auto const camera = render::readRenderCameraPosition(renderContext.mImpl.get());
+    auto const camera = render::readRenderCameraPosition(renderContext);
     if (!camera) return std::nullopt;
     return Vec3{camera->x, camera->y, camera->z};
 }
@@ -245,8 +251,7 @@ void renderProjection(
     // The render callback can race a world/dimension transition. Never
     // dereference a player or immutable projection maps after they disappear.
     if (!player || !state.structure || !state.blockTessellator
-        || !state.expectedWorldBlocks || !state.expectedWorldLiquids
-        || !state.expectedWorldBlockIndices || !state.expectedWorldBlockActors) {
+        || !state.worldLookup || !state.expectedWorldBlockActors) {
         return;
     }
 
@@ -312,6 +317,7 @@ void renderProjection(
         auto const correctionOutlineOpacity = session.correctionOutlineOpacity();
         auto const comparisonStrength = session.comparisonStrength();
         auto const correctionOutlineWidth = session.correctionOutlineWidth();
+        auto const layerUpdateStarted = std::chrono::steady_clock::now();
         auto const invalidation = reconcileProjectionInvalidation(
             state,
             ProjectionInvalidationSettings{
@@ -330,7 +336,24 @@ void renderProjection(
                 .correctionOutlineWidth   = correctionOutlineWidth
             }
         );
-        if (invalidation.placementViewChanged() || state.placementBuildActive) {
+        // A layer-only change uses an immutable lightweight lookup view, not a
+        // new 1M-cell placement/actor/initial-correction rebuild. Full rebuilds
+        // remain mandatory for pose changes or incomplete placement.
+        if (invalidation.layerOnlyChanged() && !state.placementBuildActive) {
+            if (!refreshProjectionLayerView(
+                    state, player->getDimensionBlockSource(),
+                    layerAxis, layerDisplayMode, displayLayer)) {
+                state.cachedRotation = -1; // retry through full placement next frame
+                return;
+            }
+            auto const elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - layerUpdateStarted).count();
+            auto const staleSections = std::count_if(state.sections.begin(), state.sections.end(),
+                [](SectionState const& section) { return section.layerStale; });
+            logger().info("Projection layer fast switch: axis={} mode={} layer={} setupUs={} staleSections={}/{}",
+                static_cast<int>(layerAxis), static_cast<int>(layerDisplayMode), displayLayer,
+                elapsedUs, staleSections, state.sections.size());
+        } else if (invalidation.placementViewChanged() || state.placementBuildActive) {
             auto const placementReady = rebuildProjectionPlacement(
                 state,
                 player->getDimensionBlockSource(),
@@ -366,6 +389,14 @@ void renderProjection(
             .correctionOutlineWidth   = correctionOutlineWidth,
             .identityTransform        = identityTransform
         };
+        // A region-only activation can reuse uploaded meshes from unchanged
+        // source sections; do so after the virtual world is ready but before
+        // correction scanning and section scheduling.
+        if(state.pendingRegionReuse){
+            auto const reused=restoreUnchangedRegionMeshes(state);
+            logger().info("Region activation GPU mesh reuse: {} / {} sections",
+                reused,state.sections.size());
+        }
         // Recalculate view classification before choosing CPU mesh work.
         updateProjectionVisibility(state,renderContext,camera);
         processProjectionOpaqueFrame(
@@ -532,8 +563,9 @@ void renderProjection(
                 praxisCompatLiquidSections
             );
             logger().info(
-                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} waterSeedVertices={} lavaNativeVertices={}",
+                "PRAXIS_LIQUID_EFFECTIVE_ALPHA waterAlpha={} lavaAlpha={} waterSeedVertices={} lavaNativeVertices={}",
                 PraxisWaterDerivedAlpha,
+                PraxisLavaDerivedAlpha,
                 telemetry.praxisCompatWaterSeedVertices,
                 telemetry.praxisCompatLavaNativeVertices
             );
@@ -579,11 +611,11 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
     return ProjectionSession::getInstance().withLockedState(
         [&](ProjectionState& state, overlay::BoundsWireframe&) {
             if (state.enabled && state.structure && !state.placementCoordinatesInvalid && !state.placementBuildActive) {
-                auto const found = state.expectedWorldBlockIndices->find(
+                auto const found = state.worldLookup->indexAt(
                     std::tuple{pos.x, pos.y, pos.z}
                 );
-                if (found != state.expectedWorldBlockIndices->end() && found->second < state.correctionStates.size()) {
-                    auto const correctionState = state.correctionStates[found->second];
+                if (found && *found < state.correctionStates.size()) {
+                    auto const correctionState = state.correctionStates.get(*found);
                     if (correctionState == CorrectionState::WrongType
                         || correctionState == CorrectionState::WrongState) {
                         // LHolo already renders a complete red/yellow hull and
@@ -621,6 +653,15 @@ bool shouldSuppressProjectionHitSelect(BlockPos const& pos) {
 }
 
 void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlphaLayer) {
+    auto const beginFrame = std::chrono::steady_clock::now();
+    bool hadActiveProjection = false;
+    app::ScopeExit sampleHookCpu([&]() noexcept {
+        if (!hadActiveProjection) return;
+        auto const elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - beginFrame).count();
+        if (elapsed >= 0) projectionFrameTiming().record(renderAlphaLayer,
+            static_cast<std::uint64_t>(elapsed));
+    });
     auto& reload=resourcepacks::state();
     // Observe physical owner identities even when admission is closed. Query
     // itself never invokes these normal-engine-owner getters.
@@ -701,6 +742,7 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                 suspendProjectionDimension(state);
                 return;
             }
+            hadActiveProjection = state.enabled && static_cast<bool>(state.structure);
             if (auto const bounds = structure::capture::getBounds()) {
                 captureBounds.setBounds(
                     BlockPos{bounds->min.x, bounds->min.y, bounds->min.z},
@@ -729,6 +771,18 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                 if (activationStatus == DimensionActivationStatus::Deferred) {
                     return;
                 }
+                std::unique_ptr<RegionMeshRetention> retained;
+                // The old projection and new filtered view must belong to the
+                // same world, dimension and immutable source. Workers drain
+                // before moving GPU ownership; unrelated loads still reset.
+                if(state.enabled && state.structure &&
+                   state.level==&player->getLevel() &&
+                   state.dimension==&player->getDimension() &&
+                   state.structure->sourceBacking && loaded->sourceBacking &&
+                   state.structure->sourceBacking==loaded->sourceBacking) {
+                    stopMeshWorker();
+                    retained=captureRegionMeshReuse(state,loaded);
+                }
                 resetProjectionState(state);
                 bool activated = false;
                 {
@@ -751,6 +805,7 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
                     resetProjectionState(state);
                     logger().error("Could not enable loaded structure projection");
                 } else {
+                    state.pendingRegionReuse=std::move(retained);
                     session.cancelDimensionSuspension();
                     // Publish an owned identity only after native activation and
                     // anchor recording succeeded. Adoption/I/O happens in the
@@ -829,7 +884,130 @@ void renderProjectionFrame(BaseActorRenderContext& renderContext, bool renderAlp
             } else if(state.verifierTargetBounds) {
                 state.verifierTargetBounds->clear();
             }
+            // Submit schematic geometry first so the region outlines are
+            // visible over translucent ghost blocks in the alpha pass.
             renderProjection(state, renderContext, renderAlphaLayer);
+            // Draw the complete enclosing AABB in blue, independently of
+            // region visibility (including when every region is OFF).
+            // Clip only yellow edges that coincide with the outer 12 edges;
+            // keep all inner yellow subdivision edges.
+            std::optional<std::pair<render::BoxBoundary,render::BoxBoundary>> outer;
+            if(view && loaded && loaded==state.structure &&
+               loaded->generation==state.structureGeneration &&
+               loaded->sizeX>0 && loaded->sizeY>0 && loaded->sizeZ>0) {
+                auto const& boxes=loaded->sourceRegions.empty()
+                    ?loaded->regions:loaded->sourceRegions;
+                auto const transform=
+                    structure::detail::StructureSession::getInstance().transform();
+                structure::PlacementTransform placement{
+                    {loaded->sizeX,loaded->sizeY,loaded->sizeZ},
+                    {static_cast<std::int64_t>(state.anchor.x)+transform.offsetX,
+                     static_cast<std::int64_t>(state.anchor.y)+transform.offsetY,
+                     static_cast<std::int64_t>(state.anchor.z)+transform.offsetZ},
+                    transform.rotation,transform.mirror};
+                auto const worldA=placement.toWorld({0,0,0});
+                auto const worldB=placement.toWorld({
+                    loaded->sizeX-1,loaded->sizeY-1,loaded->sizeZ-1});
+                render::BoxBoundary const outerMin{
+                    std::min(worldA.x,worldB.x),
+                    std::min(worldA.y,worldB.y),
+                    std::min(worldA.z,worldB.z)};
+                render::BoxBoundary const outerMax{
+                    std::max(worldA.x,worldB.x)+1,
+                    std::max(worldA.y,worldB.y)+1,
+                    std::max(worldA.z,worldB.z)+1};
+                // Fail closed rather than narrowing invalid world positions.
+                bool const validOuter=outerMin[0]>=-30000000 &&
+                    outerMax[0]<=30000001 && outerMin[2]>=-30000000 &&
+                    outerMax[2]<=30000001 && outerMin[1]>=-1000000 &&
+                    outerMax[1]<=1000001;
+                if(validOuter)outer=std::make_pair(outerMin,outerMax);
+                if(outer && shouldDrawOverallPlacementBounds(
+                    ProjectionSession::getInstance().structureBoundsEnabled(),
+                    ProjectionSession::getInstance().regionBoundsEnabled(),
+                    boxes.size())) {
+                    if(!state.overallPlacementBounds)
+                        state.overallPlacementBounds=std::make_unique<overlay::BoundsWireframe>();
+                    state.overallPlacementBounds->setBounds(
+                        BlockPos{static_cast<int>(outerMin[0]),static_cast<int>(outerMin[1]),static_cast<int>(outerMin[2])},
+                        BlockPos{static_cast<int>(outerMax[0]-1),static_cast<int>(outerMax[1]-1),static_cast<int>(outerMax[2]-1)},
+                        render::kPlacementOuterBlue);
+                    state.overallPlacementBounds->render(renderContext,renderAlphaLayer);
+                }else if(state.overallPlacementBounds)state.overallPlacementBounds->clear();
+                if(outer && shouldDrawNativeRegionBounds(
+                    ProjectionSession::getInstance().structureBoundsEnabled(),
+                    ProjectionSession::getInstance().regionBoundsEnabled(),
+                    boxes.size())) {
+                    if(state.nativeRegionBounds.size()!=boxes.size())
+                        state.nativeRegionBounds.resize(boxes.size());
+                    for(std::size_t i=0;i<boxes.size();++i) {
+                        auto const& r=boxes[i];
+                        auto& wire=state.nativeRegionBounds[i];
+                        if(r.sizeX<=0 || r.sizeY<=0 || r.sizeZ<=0) {
+                            if(wire)wire->clear();
+                            continue;
+                        }
+                        auto const a=placement.toWorld({r.x,r.y,r.z});
+                        auto const b=placement.toWorld({
+                            static_cast<std::int64_t>(r.x)+r.sizeX-1,
+                            static_cast<std::int64_t>(r.y)+r.sizeY-1,
+                            static_cast<std::int64_t>(r.z)+r.sizeZ-1});
+                        auto const minX=std::min(a.x,b.x),maxX=std::max(a.x,b.x);
+                        auto const minY=std::min(a.y,b.y),maxY=std::max(a.y,b.y);
+                        auto const minZ=std::min(a.z,b.z),maxZ=std::max(a.z,b.z);
+                        if(minX< -30000000 || maxX>30000000 ||
+                           minZ< -30000000 || maxZ>30000000 ||
+                           minY< -1000000 || maxY>1000000){
+                            if(wire)wire->clear();
+                            continue;
+                        }
+                        if(!wire)
+                            wire=std::make_unique<overlay::BoundsWireframe>();
+                        // Remove ONLY the yellow segments that run along the
+                        // blue outer frame, including partial shared edges.
+                        auto const mask=render::boxEdgesExcludingOuter(
+                            {minX,minY,minZ},
+                            {maxX+1,maxY+1,maxZ+1},outerMin,outerMax);
+                        wire->setBounds(
+                            BlockPos{static_cast<int>(minX),static_cast<int>(minY),static_cast<int>(minZ)},
+                            BlockPos{static_cast<int>(maxX),static_cast<int>(maxY),static_cast<int>(maxZ)},
+                            render::kPlacementRegionYellow,mask);
+                        wire->render(renderContext,renderAlphaLayer);
+                    }
+                }else state.nativeRegionBounds.clear();
+            }else state.nativeRegionBounds.clear();
+            if(!outer && state.overallPlacementBounds)
+                state.overallPlacementBounds->clear();
+            // Selected region remains outlined even if that region is OFF;
+            // the bounds come from unfiltered source metadata, not tessellation.
+            std::optional<structure::schematic::RegionHighlight> regionBox;
+            if(view && loaded && loaded==state.structure &&
+               loaded->generation==state.structureGeneration &&
+               shouldDrawSelectedRegionHighlight(
+                   ProjectionSession::getInstance().structureBoundsEnabled(),
+                   ProjectionSession::getInstance().regionBoundsEnabled(),
+                   loaded->sourceRegions.empty()
+                     ? loaded->regions.size() : loaded->sourceRegions.size())) {
+                regionBox=structure::schematic::highlightRegion(
+                    view->worldEpoch,state.dimensionId,state.structureGeneration,*loaded);
+            }
+            if(regionBox){
+                if(!state.regionSelectionBounds)
+                    state.regionSelectionBounds=std::make_unique<overlay::BoundsWireframe>();
+                auto const& b=*regionBox;
+                auto const mask=outer
+                    ?render::boxEdgesExcludingOuter(
+                        {b.min.x,b.min.y,b.min.z},{b.max.x+1,b.max.y+1,b.max.z+1},
+                        outer->first,outer->second)
+                    :render::kAllBoxWireframeEdges;
+                state.regionSelectionBounds->setBounds(
+                    BlockPos{static_cast<int>(b.min.x),static_cast<int>(b.min.y),static_cast<int>(b.min.z)},
+                    BlockPos{static_cast<int>(b.max.x),static_cast<int>(b.max.y),static_cast<int>(b.max.z)},
+                    render::kPlacementRegionYellow,mask);
+                state.regionSelectionBounds->render(renderContext,renderAlphaLayer);
+            }else if(state.regionSelectionBounds){
+                state.regionSelectionBounds->clear();
+            }
         }
     );
     if (worldExitPending) {

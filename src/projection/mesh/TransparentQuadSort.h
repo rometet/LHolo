@@ -153,4 +153,16 @@ inline bool transparentQuadOrderChanged(std::span<std::size_t const> order) noex
     return false;
 }
 
+// If the last GPU mesh was the native identity order, no vector was retained.
+// Otherwise compare every primitive index: never skip a GPU upload on the
+// basis of a hash collision or camera-distance heuristic.
+inline bool transparentSortOrderMatchesGpu(
+    std::span<std::size_t const> uploadedOrder,
+    std::span<std::size_t const> desiredOrder
+) noexcept {
+    if (uploadedOrder.empty()) return !transparentQuadOrderChanged(desiredOrder);
+    return uploadedOrder.size() == desiredOrder.size()
+        && std::equal(uploadedOrder.begin(), uploadedOrder.end(), desiredOrder.begin());
+}
+
 } // namespace lholo::projection::detail

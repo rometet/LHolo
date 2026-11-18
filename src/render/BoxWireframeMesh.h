@@ -2,6 +2,8 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
+#include "render/BoxWireframeMask.h"
 #include <memory>
 #include <string_view>
 #include "mc/deps/core/math/Vec3.h"
@@ -29,7 +31,8 @@ inline std::array<Vec3, 24> boxWireframeVertices(Vec3 const& minimum, Vec3 const
 // Called only on the render thread; section workers never build/upload this mesh.
 std::unique_ptr<mce::Mesh> buildBoxWireframeMesh(
     Tessellator& tessellator, Vec3 const& minimum, Vec3 const& maximum,
-    std::string_view debugName
+    std::string_view debugName,
+    std::uint16_t edgeMask=kAllBoxWireframeEdges
 );
 
 } // namespace lholo::render

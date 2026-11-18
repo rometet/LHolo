@@ -14,7 +14,7 @@
 
 namespace lholo::sync {
 
-inline constexpr std::string_view kServerModVersion = "26.51.5-1.0.0";
+inline constexpr std::string_view kServerModVersion = "26.60.0-sync-v1-rc.1";
 
 class LHoloSyncServer {
 public:

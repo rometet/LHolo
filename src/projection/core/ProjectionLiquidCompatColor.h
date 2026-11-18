@@ -27,6 +27,7 @@ inline constexpr float PraxisMissingTintStrength = 0.52F;
 inline constexpr PraxisCompatRgba8 PraxisWaterColorSeed{63U, 118U, 228U, 255U};
 inline constexpr std::uint8_t PraxisNativeWhiteMinimum = 254U;
 inline constexpr std::uint8_t PraxisWaterDerivedAlpha = 160U;
+inline constexpr std::uint8_t PraxisLavaDerivedAlpha = 176U;
 
 struct PraxisCompatLiquidColorSeedResult {
     std::uint32_t packed{};
@@ -71,9 +72,11 @@ selectPraxisCompatLiquidColorSeed(
     std::uint32_t derivedPacked,
     bool          isWater
 ) noexcept {
-    if (!isWater) return derivedPacked;
+    // 26.60 native lava was fully opaque even in hologram mode.
+    // Keep water=160 and use a slightly stronger translucent lava=176.
+    auto const baseAlpha = isWater ? PraxisWaterDerivedAlpha : PraxisLavaDerivedAlpha;
     return (derivedPacked & 0x00FFFFFFU)
-        | (static_cast<std::uint32_t>(PraxisWaterDerivedAlpha) << 24U);
+        | (static_cast<std::uint32_t>(baseAlpha) << 24U);
 }
 
 [[nodiscard]] inline std::uint32_t applyPraxisCompatMissingAbgr(

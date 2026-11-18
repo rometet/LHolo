@@ -1,14 +1,20 @@
 # Changelog
 
-## Unreleased — LHolo Integrated Sync V1 (client + optional server plugin)
+## Unreleased - Integrated Sync V1 26.60 port (review only)
 
-- Adds optional server-shared schematics: players publish a local `.litematic`/`.mcstructure` placement to a compatible BDS and others load it at the same world position, rotation, mirror and dimension. LHolo stays a single client mod; only server administrators add `LHoloSyncServer`.
-- Protocol `LHolo Sync Protocol 1.0` over a single LeviLamina runtime packet: HELLO/HELLO_ACK, paged catalog + deltas, content-addressed SHA-256 file transfer (48 KiB chunks, windowed ACK, resume), placement create/update/delete with revisions, and lease-based edit locks.
-- Client: verified content cache with atomic publish and long-path support, shared catalog, project-on-select bridge to the existing single active projection, and a "共有 / Shared" tab in the Schematics page with localized strings (ja/en/zh_CN/zh_TW/ru).
-- Server: SQLite metadata (WAL) with tombstone deletes, content-addressed object store, quotas/limits, config/identity persistence, and `/lholosync status|role|delete|unlock|gc|reload` administrator commands.
-- Shared-tab editing: a placement edit takes a server lease (commit stays disabled until it is granted), auto-renews while held, and releases on cancel or failure. Commit sends `PLACEMENT_UPDATE` with the edited name/position/rotation/mirror and refreshes the catalog for every client; pending/locked/committing/failed/timeout states are shown in place.
-- Verified: real client (LeviLauncher 1.26.51.01 + LeviLamina 26.51.5 + LHolo) joined an isolated BDS with `LHoloSyncServer` and completed HELLO/HELLO_ACK; a LeviLamina-only client also joined. Unit suites: protocol 108, storage 90, client logic 53, existing logic 1,254,103, UI frames clean. File transfer, catalog UI, edit locks and vanilla-client coexistence still require end-to-end runtime verification.
-- See `docs/LHoloSync.md`.
+- Port optional LHolo client/server shared-schematic synchronization to the Bedrock 1.26.60.05 and LeviLamina 26.60.0 SDKs; keep the normal client-only mode available.
+- Preserve the 26.60 client render, multi-region, and Easy Place work from main. Runtime multiplayer verification on 26.60 is still required.
+
+
+## v26.60.0-port.6 - 2026-11-10
+
+- Port upstream correction state and bounded comparison work with bulk world events, stable progress counts and section-scoped snapshots.
+- Stream projection mesh residency and preserve large-schematic rendering when moving away and back.
+- Fix single-layer model, liquid and comparison face visibility, including face culling at section boundaries.
+- Fast layer switching: retain transformed palette and native block-actor ownership, rebuild changed/adjacent sections, refresh newly exposed correction sections, and hide stale meshes until upload.
+- Keep existing water, lava, glass transparency and Praxis integration behavior.
+- Target Minecraft Bedrock Windows 1.26.60.05 with LeviLamina Client 26.60.0. Release tests and user in-game coverage are specific to this environment.
+- Earlier stable release v26.60.0-port.5 remains available.
 
 ## Unreleased — upstream verifier state fixes (2026-11-02)
 
@@ -41,7 +47,7 @@
 - **Improved:** Easy Place orientation and latency, including stairs, trapdoors and connected blocks; material/verifier HUD consistency.
 - **Improved:** Waterlogged and animated bubble projection behavior. Glass R5 and native resource reload ABI v4 are retained.
 - **Limitations:** Prerelease; client-only material grab must be explicitly enabled; not every container or multiplayer configuration has been verified. Prior settings-save/hot-unload limitations are not claimed fixed.
-- See [release details](docs/RELEASE_JA10_CLIENT_ONLY_20261026.md).
+- See [release details](docs/dev/RELEASE_JA10_CLIENT_ONLY_20261026.md).
 
 ## v26.51.2-ja.9-rc.1 — 2026-10-21
 

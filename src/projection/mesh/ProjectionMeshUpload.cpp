@@ -6,6 +6,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
+#include "projection/mesh/NativeMeshDataClone.h"
 #include "projection/mesh/ProjectionMeshUpload.h"
 
 #include "plugin/LHolo.h"
@@ -39,6 +40,7 @@ void markSectionDirty(ProjectionState& state, std::size_t section, bool incremen
     if (section >= state.sections.size()) return;
     auto& sectionState = state.sections[section];
     sectionState.dirty = true;
+    sectionState.modelDirty = true;
     sectionState.incrementalDirty = sectionState.incrementalDirty || incremental;
     ++sectionState.requestedRevision;
 }
@@ -195,7 +197,10 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 }
                 continue;
             }
-            if (result.revision != state.sections[section].requestedRevision) {
+            // Obsolete or now-distant work must not allocate GPU resources,
+            // report a current failure or disable the asynchronous worker.
+            if (result.revision != state.sections[section].requestedRevision
+                || !state.sections[section].withinRetentionDistance) {
                 state.sections[section].dirty = true;
                 continue;
             }
@@ -210,7 +215,7 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 // Never let the engine's upload consume the only CPU source
                 // used by the later transparent sorter.
                 if (originalSource && !*originalSource) {
-                    *originalSource = std::make_unique<mce::MeshData>(
+                    *originalSource = cloneNativeMeshData(
                         cpuMesh->mMeshData.get()
                     );
                 }
@@ -222,13 +227,15 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     bucketNames{"LHoloOpaque", "LHoloAlphaTest", "LHoloBlend", "LHoloBlendToOpaque"};
                 std::array<std::unique_ptr<mce::Mesh>, static_cast<std::size_t>(RenderBucket::Count)>
                     uploadedMeshes;
-                for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
-                    uploadedMeshes[bucket] = uploadCpuMesh(
-                        std::move(result.sectionMeshes[bucket]),
-                        bucketNames[bucket],
-                        bucket == static_cast<std::size_t>(RenderBucket::Blend)
-                            ? &result.blendSource : nullptr
-                    );
+                if (!result.correctionOnly) {
+                    for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
+                        uploadedMeshes[bucket] = uploadCpuMesh(
+                            std::move(result.sectionMeshes[bucket]),
+                            bucketNames[bucket],
+                            bucket == static_cast<std::size_t>(RenderBucket::Blend)
+                                ? &result.blendSource : nullptr
+                        );
+                    }
                 }
                 auto const blendBucket = static_cast<std::size_t>(RenderBucket::Blend);
                 if (uploadedMeshes[blendBucket]) {
@@ -239,6 +246,15 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                         throw std::runtime_error("blend upload produced an invalid mesh");
                     }
                 }
+                // Snapshot CPU source before upload, publish it only after all
+                // section GPU meshes have been successfully installed.
+                auto captureCorrectionCpu = [](std::unique_ptr<mce::Mesh> const& mesh)
+                    -> std::unique_ptr<mce::MeshData> {
+                    if (!mesh || mesh->mMeshData.get().size() == 0) return nullptr;
+                    return cloneNativeMeshData(mesh->mMeshData.get());
+                };
+                auto missingFillSource = captureCorrectionCpu(result.warningFillMesh);
+                auto missingOutlineSource = captureCorrectionCpu(result.correctionOutlineMesh);
                 auto warningFill = uploadCpuMesh(std::move(result.warningFillMesh), "LHoloWarningFill");
                 auto correctionOutline = uploadCpuMesh(
                     std::move(result.correctionOutlineMesh), "LHoloCorrectionOutline"
@@ -255,35 +271,76 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     std::move(result.blockEntityPlaceholderMesh), "LHoloBlockEntityPlaceholder"
                 );
     
-                for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
-                    state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
+                if (!result.correctionOnly) {
+                    for (std::size_t bucket = 0; bucket < uploadedMeshes.size(); ++bucket) {
+                        state.sections[section].meshes[bucket] = std::move(uploadedMeshes[bucket]);
+                    }
+                    state.sections[section].blendSource = std::move(result.blendSource);
+                    state.sections[section].blendSortKeyValid = false;
+                    state.sections[section].blendSortUnsupported = false;
+                    state.sections[section].blendSortOrder.clear();
+                    ++state.sections[section].blendSortUploadGeneration;
+                    // Capture both old and new native-liquid ownership before moving.
+                    bool const liquidSourcesChanged =
+                        state.nativeLiquidSectionMeshes[section] != nullptr
+                        || state.praxisCompatLiquidSections[section] != nullptr
+                        || nativeLiquid != nullptr
+                        || result.praxisCompatLiquidData != nullptr;
+                    state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
+                    state.praxisCompatLiquidSections[section] = std::move(
+                        result.praxisCompatLiquidData
+                    );
+                    // Opaque-only section updates cannot affect the native liquid
+                    // aggregate. Retain it rather than copying all water/lava
+                    // streams again on every unrelated mesh upload.
+                    if (liquidSourcesChanged) {
+                        state.praxisCompatLiquidAggregate.reset();
+                        state.praxisCompatLiquidAggregateOrder.clear();
+                        state.praxisCompatLiquidBoundaryMaskCache.clear();
+                        state.praxisCompatLiquidAggregateDirty = true;
+                    }
+                    state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
+                    state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
+                    state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;
+                    mergeNativeLiquidTelemetry(
+                        state.nativeLiquidTelemetry,
+                        result.nativeLiquidTelemetry
+                    );
+                    state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
+                    state.sections[section].modelDirty = false;
                 }
-                state.sections[section].blendSource = std::move(result.blendSource);
-                state.sections[section].blendSortKeyValid = false;
-                state.sections[section].blendSortUnsupported = false;
                 state.warningFillSectionMeshes[section] = std::move(warningFill);
                 state.correctionOutlineSectionMeshes[section] = std::move(correctionOutline);
                 state.wrongFillSectionMeshes[section] = std::move(wrongFill);
                 state.wrongOutlineSectionMeshes[section] = std::move(wrongOutline);
-                state.nativeLiquidSectionMeshes[section] = std::move(nativeLiquid);
-                state.praxisCompatLiquidSections[section] = std::move(
-                    result.praxisCompatLiquidData
-                );
-                state.praxisCompatLiquidAggregate.reset();
-                state.praxisCompatLiquidAggregateOrder.clear();
-                state.praxisCompatLiquidBoundaryMaskCache.clear();
-                state.praxisCompatLiquidAggregateDirty = true;
-                state.liquidProxySectionMeshes[section] = std::move(liquidProxy);
-                state.nativeLiquidSectionCellCounts[section] = result.nativeLiquidCellCount;
-                state.liquidProxySectionCellCounts[section] = result.liquidProxyCellCount;
-                mergeNativeLiquidTelemetry(
-                    state.nativeLiquidTelemetry,
-                    result.nativeLiquidTelemetry
-                );
-                state.blockEntityPlaceholderSectionMeshes[section] = std::move(blockEntityPlaceholder);
                 state.sections[section].uploadedRevision = result.revision;
+                state.sections[section].layerStale = false;
+                state.sections[section].meshBounds = result.meshBounds;
+                // Only a successfully uploaded original can contribute to a
+                // batch. An invalid GPU mesh must never be resurrected by
+                // the retained CPU source in a future group upload.
+                if (!state.warningFillSectionMeshes[section]
+                    || !state.warningFillSectionMeshes[section]->isValid())
+                    missingFillSource.reset();
+                if (!state.correctionOutlineSectionMeshes[section]
+                    || !state.correctionOutlineSectionMeshes[section]->isValid())
+                    missingOutlineSource.reset();
+                // If cache bookkeeping fails, originals remain valid, and
+                // fail-closed batching is simply disabled for the session.
+                try {
+                    state.correctionDrawBatches.noteUploaded(
+                        section, state.sections.size(), ProjectionCorrectionBatchCache::MissingFill,
+                        std::move(missingFillSource));
+                    state.correctionDrawBatches.noteUploaded(
+                        section, state.sections.size(), ProjectionCorrectionBatchCache::MissingOutline,
+                        std::move(missingOutlineSource));
+                } catch (...) {
+                    state.correctionDrawBatches.clear();
+                }
                 ++state.meshUploadRevision;
+                state.drawCache.noteMeshUpload(section);
                 state.sections[section].incrementalDirty = false;
+                state.sections[section].interactiveDirty = false;
                 state.sections[section].dirty = false;
                 state.consecutiveMeshWorkerFailures = 0;
                 state.meshPreflightDone = false;
@@ -293,10 +350,27 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                     ).count()
                 );
                 ++state.meshWorkerUploadedSections;
+                if (result.correctionOnly)
+                    ++state.meshWorkerCorrectionOnlySections;
                 state.meshWorkerSnapshotMicros += result.snapshotPrepareMicros;
                 state.meshWorkerSnapshotDataMicros += result.snapshotDataMicros;
                 state.meshWorkerChunkViewMicros += result.chunkViewMicros;
                 state.meshWorkerBuildMicros += result.workerBuildMicros;
+                state.meshWorkerClassifyTotalMicros += result.bodyClassifyMicros;
+                state.meshWorkerTessellateTotalMicros += result.bodyTessellateMicros;
+                state.meshWorkerLiquidTotalMicros += result.liquidMicros;
+                state.meshWorkerAuxTotalMicros += result.auxMicros;
+                state.meshWorkerPlaceholderTotalMicros += result.placeholderMicros;
+                state.meshWorkerCorrectionSetupTotalMicros += result.correctionSetupMicros;
+                state.meshWorkerCorrectionOutlineTotalMicros += result.correctionOutlineMicros;
+                state.meshWorkerCorrectionFillTotalMicros += result.correctionFillMicros;
+                state.meshWorkerOutlineAttemptedEdges += result.outlineAttemptedEdges;
+                state.meshWorkerOutlineEmittedEdges += result.outlineEmittedEdges;
+                state.meshWorkerOutlineGridBytes += result.outlineGridBytes;
+                state.meshWorkerFillCandidateFaces += result.fillCandidateFaces;
+                state.meshWorkerFillEmittedFaces += result.fillEmittedFaces;
+                state.meshWorkerFillRunOriginalFaces += result.fillRunOriginalFaces;
+                state.meshWorkerFillRunQuads += result.fillRunQuads;
                 state.meshWorkerUploadMicros += uploadMicros;
                 state.meshWorkerPeakSnapshotMicros = std::max(
                     state.meshWorkerPeakSnapshotMicros, result.snapshotPrepareMicros
@@ -315,8 +389,10 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                 );
                 if (state.meshWorkerUploadedSections % 64 == 0) {
                     auto const count = state.meshWorkerUploadedSections;
-                    logger().debug(
-                        "Projection mesh worker: {} sections; snapshot {}/{} us (data {}/{}, chunkView {}/{}), build {}/{} us, upload {}/{} us",
+                    // Six INFO records for a 393-section projection; unlike
+                    // DEBUG this survives the default production log level.
+                    logger().info(
+                        "Projection mesh worker: {} sections; snapshot {}/{} us (data {}/{}, chunkView {}/{}), build {}/{} us, upload {}/{} us; correction snapshot {} B, COW total {} B, overlay-only {}",
                         count,
                         state.meshWorkerSnapshotMicros / count,
                         state.meshWorkerPeakSnapshotMicros,
@@ -327,7 +403,46 @@ void uploadCompletedProjectionMeshes(ProjectionState& state, Tessellator& tessel
                         state.meshWorkerBuildMicros / count,
                         state.meshWorkerPeakBuildMicros,
                         state.meshWorkerUploadMicros / count,
-                        state.meshWorkerPeakUploadMicros
+                        state.meshWorkerPeakUploadMicros,
+                        result.correctionSnapshotBytes,
+                        state.correctionStates.copiedBytes(),
+                        state.meshWorkerCorrectionOnlySections
+                    );
+                    logger().info(
+                        "LHolo mesh stages: {} sections avgUs classification={} nativeBody={} liquid={} auxiliary={}",
+                        count,
+                        state.meshWorkerClassifyTotalMicros / count,
+                        state.meshWorkerTessellateTotalMicros / count,
+                        state.meshWorkerLiquidTotalMicros / count,
+                        state.meshWorkerAuxTotalMicros / count
+                    );
+                    logger().info(
+                        "LHolo correction stages: {} sections avgUs placeholders={} setup={} outlines={} fills={}",
+                        count,
+                        state.meshWorkerPlaceholderTotalMicros / count,
+                        state.meshWorkerCorrectionSetupTotalMicros / count,
+                        state.meshWorkerCorrectionOutlineTotalMicros / count,
+                        state.meshWorkerCorrectionFillTotalMicros / count
+                    );
+                    logger().info(
+                        "LHolo opaque outline dedup: {} sections inputEdges={} emittedEdges={} gridAvgBytes={}",
+                        count,
+                        state.meshWorkerOutlineAttemptedEdges,
+                        state.meshWorkerOutlineEmittedEdges,
+                        state.meshWorkerOutlineGridBytes / count
+                    );
+                    logger().info(
+                        "LHolo fill faces: {} sections candidateFaces={} visibleFaces={}",
+                        count,
+                        state.meshWorkerFillCandidateFaces,
+                        state.meshWorkerFillEmittedFaces
+                    );
+                    logger().info(
+                        "LHolo fill run merges: {} sections originalFaces={} emittedQuads={} savedQuads={} mode=rectangle2D",
+                        count,
+                        state.meshWorkerFillRunOriginalFaces,
+                        state.meshWorkerFillRunQuads,
+                        state.meshWorkerFillRunOriginalFaces - state.meshWorkerFillRunQuads
                     );
                 }
             } catch (std::exception const& exception) {

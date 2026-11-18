@@ -25,9 +25,11 @@
 #include "structure/MaterialTracker.h"
 #include "structure/ClientOnlyGrab.h"
 #include "structure/formats/StructureFormatLoaders.h"
+#include "structure/formats/RegionMergePlan.h"
 #include "structure/StructureSession.h"
 #include "structure/SchematicRuntime.h"
 #include "structure/LoadIntent.h"
+#include "structure/SourceOriginLoadAnchor.h"
 #include "structure/StructurePaths.h"
 #include "structure/StructureUiState.h"
 #include "overlay/CompanionBridge.h"
@@ -63,6 +65,7 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include <Windows.h>
 
@@ -108,6 +111,7 @@ unsigned int currentHotkeyModifiers() {
 
 enum class PendingStructureLoadMode : std::uint8_t {
     Normal,
+    NormalAtSourceOrigin,
     Restore,
 };
 
@@ -136,28 +140,107 @@ std::optional<PendingStructureLoad> gPendingStructureLoad;
 std::optional<PendingStructureLoad> gQueuedStructureLoad;
 detail::LoadIntent gLoadIntent;
 
-void commitNormalStructureLoad(
+// One native source in one world/dimension. An .lholo manifest may change when
+// ANY child .mcstructure changes; validate all child stamps before a cache hit.
+struct SourceFileStamp {
+    std::filesystem::path path;
+    std::uintmax_t size{};
+    std::filesystem::file_time_type modified{};
+};
+std::optional<std::vector<SourceFileStamp>> sourceStamps(std::filesystem::path const& path) {
+    try {
+        std::vector<std::filesystem::path> paths{std::filesystem::weakly_canonical(path)};
+        if(path.extension()==L".lholo"){
+            if(std::filesystem::file_size(path)>4*1024*1024)return {};
+            std::ifstream in(path,std::ios::binary);
+            if(!in)return {};
+            auto const j=nlohmann::json::parse(in,nullptr,false);
+            if(j.is_discarded() || !j.is_object() || !j.contains("regions")
+               || !j["regions"].is_array() || j["regions"].size()>64)return {};
+            auto const base=std::filesystem::weakly_canonical(path.parent_path());
+            for(auto const& r:j["regions"]){
+                if(!r.is_object() || !r.contains("file") || !r["file"].is_string())return {};
+                auto const name=r["file"].get<std::string>();
+                if(name.empty() || name.size()>240)return {};
+                auto const child=std::filesystem::weakly_canonical(base/detail::pathFromUtf8(name));
+                auto const rel=child.lexically_relative(base);
+                if(rel.empty() || rel.is_absolute() || *rel.begin()==L"..")return {};
+                paths.push_back(child);
+            }
+        }
+        std::vector<SourceFileStamp> stamps;
+        stamps.reserve(paths.size());
+        for(auto const& file:paths){
+            if(!std::filesystem::is_regular_file(file))return {};
+            stamps.push_back({file,std::filesystem::file_size(file),std::filesystem::last_write_time(file)});
+        }
+        return stamps;
+    }catch(...){return {};}
+}
+bool sourceStampsCurrent(std::vector<SourceFileStamp> const& stamps) {
+    try{
+        for(auto const& f:stamps)
+            if(!std::filesystem::is_regular_file(f.path)
+               || std::filesystem::file_size(f.path)!=f.size
+               || std::filesystem::last_write_time(f.path)!=f.modified)return false;
+        return !stamps.empty();
+    }catch(...){return false;}
+}
+struct RegionSourceCache {
+    std::filesystem::path path;
+    std::uint64_t worldEpoch{};
+    int dimension{};
+    std::vector<SourceFileStamp> stamps;
+    std::shared_ptr<LoadedStructure const> source;
+};
+std::optional<RegionSourceCache> gRegionSourceCache;
+std::shared_ptr<LoadedStructure const> lookupCachedSource(
+    std::filesystem::path const& path,std::uint64_t epoch,int dimension){
+    if(!gRegionSourceCache)return {};
+    auto const& c=*gRegionSourceCache;
+    if(c.worldEpoch!=epoch || c.dimension!=dimension || c.path!=path ||
+       !sourceStampsCurrent(c.stamps)){
+        gRegionSourceCache.reset();
+        return {};
+    }
+    return c.source;
+}
+
+
+bool commitNormalStructureLoad(
     std::shared_ptr<LoadedStructure> loaded,
     std::string const&               pathText,
     ProjectionRequestStamp           request,
-    std::optional<std::array<int,3>> requestedAnchor = std::nullopt
+    std::optional<std::array<int,3>> requestedAnchor = std::nullopt,
+    bool                             useSourceWorldOrigin = false
 ) {
     auto& session = detail::StructureSession::getInstance();
+    // Pick the final anchor before calling replaceLoaded(). A two-step
+    // foot -> source move would build the entire large projection twice.
+    auto const anchor=detail::selectInitialLoadAnchor(
+        useSourceWorldOrigin, requestedAnchor, loaded->sourceWorldOrigin);
+    if(useSourceWorldOrigin && !anchor){
+        std::string const reason="No valid structure_world_origin in the selected structure.";
+        session.setStatus(i18n::Message{i18n::TextKey::StatusLoadFailed, {reason}});
+        logger().warn("Direct source-origin load refused for {}: {}",pathText,reason);
+        return false;
+    }
+    // A deliberate fresh load supersedes any previously cached source.
+    gRegionSourceCache.reset();
     auto const renderBlocks = loaded->renderBlocks.size();
     auto const status = makeLoadedStatusMessage(*loaded);
-
     projection::cancelNextStructureAnchorRequest();
-    // Commit the position captured at click time, never at the async parse
-    // completion time. An invalid/unavailable snapshot falls back to native.
-    if(requestedAnchor) {
-        auto const& p=*requestedAnchor;
+    if(anchor){
+        auto const& p=*anchor;
         projection::requestNextStructureAnchor(p[0],p[1],p[2]);
     }
     session.resetTransform();
     session.replaceLoaded(std::move(loaded), pathText, status, request);
     detail::invalidateMaterialList();
     saveSettings();
-    logger().info("Loaded structure {}: {} renderable blocks", pathText, renderBlocks);
+    logger().info("Loaded structure {}: {} renderable blocks at {} anchor",
+        pathText, renderBlocks, useSourceWorldOrigin?"source-origin":"current");
+    return true;
 }
 
 void commitRestoredStructureLoad(
@@ -165,6 +248,55 @@ void commitRestoredStructureLoad(
     detail::SavedProjectionSnapshot const& saved,
     ProjectionRequestStamp                request
 ) {
+    // Retain one unfiltered native source for subsequent region toggles.
+    // This avoids repeated disk/NBT decode and Minecraft block conversion.
+    // Filtered generations borrow the immutable source arrays; the effective
+    // cells continue to feed the SAME renderer, verifier and EasyPlace view.
+    if(!loaded->sourceBacking && loaded->sourceRegions.size()>1 &&
+       loaded->sourceRegions.size()==loaded->regionRenderBlocks.size()){
+        auto const view=capture::getClientViewSnapshot();
+        auto const snapshot=schematic::snapshot();
+        if(view && snapshot.worldAvailable){
+            if(auto stamps=sourceStamps(loaded->sourcePath)){
+                // For the common disjoint 25-tile composite, retain only one
+                // global block list plus a byte-per-block owner index, instead
+                // of keeping an entire duplicate set of region block vectors.
+                // Any overlap, missing cell or count mismatch keeps the exact
+                // original multi-region representation.
+                if(detail::disjointRegionBounds(loaded->sourceRegions) &&
+                   loaded->sourceRegions.size()<=255) {
+                    std::size_t sourceCells{};
+                    for(auto const& cells:loaded->regionRenderBlocks)
+                        sourceCells+=cells.size();
+                    if(sourceCells==loaded->renderBlocks.size()) {
+                        auto owners=detail::makeDisjointRegionOwners(
+                            loaded->sourceRegions,loaded->renderBlocks);
+                        if(owners.size()==loaded->renderBlocks.size()) {
+                            loaded->disjointSourceOwners=std::move(owners);
+                            std::vector<std::vector<LoadedStructure::RenderBlock>>{}
+                                .swap(loaded->regionRenderBlocks);
+                            logger().info(
+                                "Compacted disjoint region source: {} owner bytes, {} blocks",
+                                loaded->disjointSourceOwners.size(),sourceCells);
+                        }
+                    }
+                }
+                auto source=std::shared_ptr<LoadedStructure const>{loaded};
+                auto filtered=detail::makeCachedRegionView(source);
+                gRegionSourceCache=RegionSourceCache{
+                    loaded->sourcePath,view->worldEpoch,snapshot.dimension,
+                    std::move(*stamps),std::move(source)};
+                loaded=std::move(filtered);
+            }
+        }
+    }
+    auto const wasCached=static_cast<bool>(loaded->sourceBacking);
+    auto const filterStarted=std::chrono::steady_clock::now();
+    schematic::filterRegionsForActivation(*loaded,request);
+    auto const filteredMs=std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now()-filterStarted).count();
+    logger().info("Region activation source-cache={} filtered={}ms active-regions={} blocks={}",
+        wasCached,filteredMs,loaded->regions.size(),loaded->renderBlocks.size());
     auto& session = detail::StructureSession::getInstance();
     session.setRotation(saved.transform.rotation);
     session.setMirror(std::clamp(saved.transform.mirror, 0, 2));
@@ -349,7 +481,10 @@ void processCompletedStructureLoad() {
         if (mode == PendingStructureLoadMode::Restore) {
             commitRestoredStructureLoad(std::move(loaded), saved, pending.request);
         } else {
-            commitNormalStructureLoad(std::move(loaded), path, pending.request,pending.requestAnchor);
+            committed=commitNormalStructureLoad(
+                std::move(loaded), path, pending.request, pending.requestAnchor,
+                mode==PendingStructureLoadMode::NormalAtSourceOrigin);
+            return;
         }
         committed=true;
     });
@@ -665,6 +800,7 @@ void processPendingActions() {
 }
 
 void resetDimensionSession() {
+    gRegionSourceCache.reset();
     schematic::retireActiveProjection();
     uiState().cancelMenuRoutes();
     uiState().clearMaterialHud();
@@ -1023,29 +1159,27 @@ void renderMaterialHud() {
     auto const& available = snapshot.available;
 
     struct Row {
-        char const*   name;
+        std::size_t index;
         std::uint64_t missing;
-        int           stackSize;
     };
-    std::vector<Row> missing;
-    for (std::size_t index = 0; index < materials.size(); ++index) {
-        auto const need = materials[index].count;
-        auto const have = index < available.size() ? std::max(0,available[index]) : 0;
-        auto const miss = static_cast<std::uint64_t>(have) >= need
-            ? 0ULL : need - static_cast<std::uint64_t>(have);
-        if (miss > 0) {
-            missing.push_back({
-                lholo::ui::materialDisplayName(
-                    materials[index].displayName, materials[index].nameKey
-                ),
-                miss,
-                materials[index].stackSize
-            });
+    // Reuse sorted HUD rows while the immutable snapshot owner is unchanged.
+    // Keep that owner alive so row indices never reference retired storage.
+    static std::shared_ptr<detail::MaterialHudSnapshot const> cachedOwner;
+    static std::vector<Row> cachedMissing;
+    if (cachedOwner != owner) {
+        cachedOwner = owner;
+        cachedMissing.clear();
+        for (std::size_t index = 0; index < materials.size(); ++index) {
+            auto const need = materials[index].count;
+            auto const have = index < available.size() ? std::max(0,available[index]) : 0;
+            auto const miss = static_cast<std::uint64_t>(have) >= need
+                ? 0ULL : need - static_cast<std::uint64_t>(have);
+            if (miss > 0) cachedMissing.push_back({index, miss});
         }
+        std::sort(cachedMissing.begin(), cachedMissing.end(),
+            [](Row const& a, Row const& b) { return a.missing > b.missing; });
     }
-    std::sort(missing.begin(), missing.end(), [](Row const& a, Row const& b) {
-        return a.missing > b.missing;
-    });
+    auto const& missing = cachedMissing;
 
     auto const displaySize = ImGui::GetIO().DisplaySize;
     float uiScale = hud.uiScale;
@@ -1118,8 +1252,8 @@ void renderMaterialHud() {
                 // stacks, e.g. "白色玻璃  111 (1 x 64 + 47)".
                 ImGui::TextColored(
                     ImVec4(1.0f, 0.62f, 0.20f, 1.0f), "%s  %s",
-                    row.name,
-                    lholo::ui::formatStackCount(row.missing, row.stackSize).c_str()
+                    lholo::ui::materialDisplayName(materials[row.index].displayName, materials[row.index].nameKey),
+                    lholo::ui::formatStackCount(row.missing, materials[row.index].stackSize).c_str()
                 );
             }
             if (missing.size() > kMaxRows) {
@@ -1150,6 +1284,7 @@ void loadSettings() {
         // One-time migration: explicit JSON preference always takes
         // precedence over the obsolete marker (including explicit OFF).
         bool const needsMigration=!settings.clientOnlyGrabConfigured;
+        detail::setClientOnlyGrabModifiers(settings.clientOnlyGrabModifiers);
         detail::setClientOnlyGrabEnabled(
             needsMigration ? detail::hasLegacyClientOnlyGrabMarker()
                            : settings.clientOnlyGrabEnabled);
@@ -1168,6 +1303,7 @@ void loadSettings() {
         projection::setComparisonStrength(settings.comparisonStrength);
         projection::setCorrectionOutlineWidth(settings.correctionOutlineWidth);
         projection::setStructureBoundsEnabled(settings.structureBoundsEnabled);
+        projection::setRegionBoundsEnabled(settings.regionBoundsEnabled);
         projection::setCorrectionSeeThrough(settings.correctionSeeThrough);
         projection::setMissingSeeThrough(settings.missingSeeThrough);
         setExperimentalConsentGiven(settings.experimentalConsent);
@@ -1288,10 +1424,12 @@ void saveSettings() {
         settings.comparisonStrength = projection::getComparisonStrength();
         settings.correctionOutlineWidth = projection::getCorrectionOutlineWidth();
         settings.structureBoundsEnabled = projection::getStructureBoundsEnabled();
+        settings.regionBoundsEnabled = projection::getRegionBoundsEnabled();
         settings.correctionSeeThrough = projection::getCorrectionSeeThrough();
         settings.missingSeeThrough = projection::getMissingSeeThrough();
         settings.experimentalConsent = experimentalConsentGiven();
         settings.clientOnlyGrabEnabled = detail::clientOnlyGrabEnabled();
+        settings.clientOnlyGrabModifiers = detail::clientOnlyGrabModifiers();
         settings.materialHudEnabled = materialHudEnabled();
         settings.materialHudPosition = materialHudPosition();
         settings.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
@@ -1401,7 +1539,7 @@ bool scrollLockActive() {
     return getLoaded() != nullptr && uiState().altWheelOffsetEnabled() && uiState().altHeld();
 }
 
-void requestStructureFileLoad(std::string pathText) {
+void requestStructureFileLoad(std::string pathText, bool useSourceWorldOrigin) {
     auto& session = detail::StructureSession::getInstance();
     if (pathText.empty()) {
         session.setStatus(i18n::Message{i18n::TextKey::StatusPathEmpty});
@@ -1418,7 +1556,8 @@ void requestStructureFileLoad(std::string pathText) {
     gQueuedStructureLoad.reset();
     if (detail::supportsAsyncStructurePreparation(path)) {
         handedOff=startPreparedStructureLoad(
-            PendingStructureLoadMode::Normal,
+            useSourceWorldOrigin ? PendingStructureLoadMode::NormalAtSourceOrigin
+                                 : PendingStructureLoadMode::Normal,
             std::move(pathText),
             ticket,
             {},
@@ -1436,8 +1575,10 @@ void requestStructureFileLoad(std::string pathText) {
         logger().error("Could not load structure {}: {}", pathText, error);
         return;
     }
-    gLoadIntent.applyIfCurrent(ticket, [&] { commitNormalStructureLoad(
-        std::move(loaded), pathText, request,requestedAnchor);handedOff=true; });
+    gLoadIntent.applyIfCurrent(ticket, [&] {
+        handedOff=commitNormalStructureLoad(
+            std::move(loaded),pathText,request,requestedAnchor,useSourceWorldOrigin);
+    });
 }
 
 void restoreSavedProjection(std::uint64_t placementId) {
@@ -1451,6 +1592,19 @@ void restoreSavedProjection(std::uint64_t placementId) {
     app::ScopeExit retireFailed([&]() noexcept {if(!handedOff)schematic::failProjectionRequest(request);});
     auto const ticket = gLoadIntent.begin();
     gQueuedStructureLoad.reset();
+    if(auto const view=capture::getClientViewSnapshot()) {
+        auto const snap=schematic::snapshot();
+        if(snap.worldAvailable){
+            if(auto source=lookupCachedSource(path,view->worldEpoch,snap.dimension)){
+                auto loaded=detail::makeCachedRegionView(std::move(source));
+                gLoadIntent.applyIfCurrent(ticket,[&]{
+                    commitRestoredStructureLoad(std::move(loaded),saved,request);
+                    handedOff=true;
+                });
+                return;
+            }
+        }
+    }
     if (detail::supportsAsyncStructurePreparation(path)) {
         handedOff=startPreparedStructureLoad(
             PendingStructureLoadMode::Restore,
@@ -1495,12 +1649,14 @@ void clearProjectionSession(i18n::Message status) {
 } // namespace
 
 void resetWorldSession() {
+    gRegionSourceCache.reset();
     clearProjectionSession(i18n::Message{i18n::TextKey::StatusWorldExited});
     uiState().resetWorldSession();
     schematic::reset();
 }
 
 void shutdownPendingStructureLoad() {
+    gRegionSourceCache.reset();
     gLoadIntent.begin();
     gQueuedStructureLoad.reset();
     if (!gPendingStructureLoad) return;

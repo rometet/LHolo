@@ -23,6 +23,7 @@
 #include <Windows.h>
 
 #include "mc/world/level/BlockSource.h"
+#include "mc/world/level/BlockPos.h"
 #include "mc/world/level/BlockSourceListener.h"
 #include "mc/world/level/Level.h"
 #include "mc/world/level/LevelListener.h"
@@ -37,7 +38,7 @@ namespace {
 
 std::mutex                gPendingEventsMutex;
 std::recursive_mutex      gWorldLifecycleMutex;
-CoalescedEventQueue<SubChunkKey, PendingBlockChange, SubChunkKeyHash> gIncomingBlockChanges;
+CorrectionEventQueue gIncomingBlockChanges;
 CoalescedEventQueue<SubChunkKey, SubChunkKey, SubChunkKeyHash> gIncomingLoadedSubChunks;
 ChunkAvailabilityQueue gIncomingChunkAvailability;
 std::atomic<BlockSource*> gAttachedBlockSource{};
@@ -98,11 +99,7 @@ public:
         if (&source != gAttachedBlockSource.load(std::memory_order_acquire)
             || epoch != gWorldEventFailure.token()) return;
         if (!gWorldInterest.contains({pos.x, pos.y, pos.z})) return;
-        gIncomingBlockChanges.push(std::tuple{pos.x, pos.y, pos.z}, PendingBlockChange{
-            pos, destroyed ? GetTickCount64() : 0,
-        }, [](auto& previous, auto const& latest) noexcept {
-            previous.destroyedAt = (std::max)(previous.destroyedAt, latest.destroyedAt);
-        });
+        gIncomingBlockChanges.push({pos.x, pos.y, pos.z}, destroyed ? GetTickCount64() : 0);
         }, [epoch](char const* reason) noexcept {
             gWorldEventFailure.mark(epoch);
             app::reportNativeCallbackFailure("world block notification; reload projection to retry", reason);
@@ -281,17 +278,21 @@ bool projectionDimensionSourceDestroyed() {
 bool projectionWorldEventsFailed() { return gWorldEventFailure.failed(); }
 void markProjectionWorldEventsFailed() noexcept { gWorldEventFailure.mark(gWorldEventFailure.token()); }
 
-std::vector<PendingBlockChange> takePendingBlockChanges(std::size_t limit) {
-    std::vector<PendingBlockChange> changes;
-    {
-        std::lock_guard lock(gPendingEventsMutex);
-        changes = gIncomingBlockChanges.take(limit);
+std::vector<CorrectionEventBatch> takePendingBlockChangeSections(std::size_t limit) {
+    std::vector<CorrectionEventBatch> changes;
+    changes.reserve(limit);
+    std::lock_guard lock(gPendingEventsMutex);
+    for (std::size_t index = 0; index < limit; ++index) {
+        auto event = gIncomingBlockChanges.takeSection();
+        if (!event) break;
+        changes.push_back(std::move(*event));
     }
-    std::sort(changes.begin(), changes.end(), [](auto const& lhs, auto const& rhs) {
-        return std::tie(lhs.position.x, lhs.position.y, lhs.position.z)
-            < std::tie(rhs.position.x, rhs.position.y, rhs.position.z);
-    });
     return changes;
+}
+
+ProjectionPendingEventCounts pendingProjectionEventCounts() {
+    std::lock_guard lock(gPendingEventsMutex);
+    return {gIncomingBlockChanges.size(), gIncomingBlockChanges.sections(), gIncomingLoadedSubChunks.size()};
 }
 
 std::vector<SubChunkKey> takePendingLoadedSubChunks(std::size_t limit) {

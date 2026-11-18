@@ -159,6 +159,26 @@ inline void runLatencyChecks(Player& player) {
     check(sent.size()==1 && sent[0].slot==0,
         "R19 after observed inventory swap places on next eligible tick");
 
+    // A spare, non-selected hotbar slot is selected while its server swap
+    // is in flight. This overlaps the two network round trips, without
+    // placing anything before the inventory update is observed.
+    reset(player);state.setEnabled(true);
+    player.selected=4;
+    player.inventory.items[4]={2,0,64}; // user's currently selected material
+    player.inventory.items[12]={1,0,64}; // required stone in backpack
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    tickEasyPlaceImpl(player);
+    check(swaps==1 && sent.empty() && player.selected==0 && player.setSlotCalls==1,
+        "spare hotbar selection starts alongside real inventory swap");
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(sent.empty(),"unconfirmed empty slot never places a ghost block");
+    player.inventory.items[0]=player.inventory.items[12];
+    player.inventory.items[12]={};
+    fixtureTime=1100;tickEasyPlaceImpl(player);
+    check(sent.size()==1 && sent.back().slot==0 && player.setSlotCalls==1,
+        "confirmed swap can place without a later selected-slot change");
+
     // A queued native rotation is NOT a failed plan and must stop this
     // tick. Otherwise a later legacy placement changes the held slot
     // and the queued AuthInput fails its strict stack/net-id validation.
