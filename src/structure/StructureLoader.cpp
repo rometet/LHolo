@@ -1274,6 +1274,10 @@ void renderGui() {
 void loadSettings() {
     auto const path = settingsPath();
     try {
+        // A bundled default config is only installed on the very first run.
+        // Existing user settings take precedence on all subsequent updates.
+        auto const templatePath = LHolo::getInstance().getSelf().getModDir() / "config.default.json";
+        (void)lholo::settings::installDefaultSettingsIfMissing(path, templatePath);
         auto& session = detail::StructureSession::getInstance();
         lholo::settings::Settings settings;
         if (!lholo::settings::loadSettingsFile(path, settings)) {
@@ -1331,6 +1335,8 @@ void loadSettings() {
         place::setRangeEnabled(false);
         place::setManualPlacementAllowedItems(settings.manualPlacementAllowedItems);
         place::setPlacementRadius(std::clamp(settings.placementRadius, 1, 4));
+        place::setEasyPlaceColumnDepth(std::clamp(settings.easyPlaceColumnDepth, 1, 4));
+        place::setEasyPlaceMaxPerTick(std::clamp(settings.easyPlaceMaxPerTick, 1, 4));
         place::setAutoPlacementBreakCooldownSeconds(
             std::clamp(settings.autoPlacementBreakCooldownSeconds, 0, 60)
         );
@@ -1434,6 +1440,8 @@ void saveSettings() {
         settings.materialHudPosition = materialHudPosition();
         settings.manualPlacementAllowedItems = place::getManualPlacementAllowedItems();
         settings.placementRadius = place::getPlacementRadius();
+        settings.easyPlaceColumnDepth = place::getEasyPlaceColumnDepth();
+        settings.easyPlaceMaxPerTick = place::getEasyPlaceMaxPerTick();
         settings.autoPlacementBreakCooldownSeconds
             = place::getAutoPlacementBreakCooldownSeconds();
         settings.hudEnabled = hud.enabled;

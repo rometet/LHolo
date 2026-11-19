@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cctype>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <future>
 #include <limits>
 #include <span>
@@ -37,6 +38,8 @@
 #include "i18n/Translator.h"
 #include "input/ViewMoveBasis.h"
 #include "place/PlacementState.h"
+#include "place/EasyPlaceBurstPolicy.h"
+#include "place/FloorBandGeometry.h"
 #include "projection/core/ProjectionLiquidCompatColor.h"
 #include "projection/core/ProjectionLiquidAppearance.h"
 #include "projection/core/ProjectionTransparentOrder.h"
@@ -45,6 +48,7 @@
 #include "projection/core/LiquidReplayRules.h"
 #include "projection/core/ProjectionRules.h"
 #include "projection/core/ProjectionCoordinateBounds.h"
+#include "projection/world/ProjectionWorldLookup.h"
 #include "render/RenderCameraPosition.h"
 #include "projection/runtime/ProjectionProgress.h"
 #include "projection/runtime/ProjectionActivationRequests.h"
@@ -66,6 +70,7 @@
 #include "projection/runtime/MeshDiagnosticGate.h"
 #include "projection/runtime/EpochFailure.h"
 #include "settings/SettingsStore.h"
+#include "structure/SharedPlacementOrigin.h"
 #include "structure/StructureSession.h"
 #include "structure/ClientViewState.h"
 #include "structure/MaterialTypePresence.h"
@@ -112,6 +117,126 @@ using lholo::structure::LoadedStructure;
 
 bool expectBlockPos(BlockPos const& pos, int x, int y, int z) {
     return pos.x == x && pos.y == y && pos.z == z;
+}
+
+void testEasyPlaceBurstPolicy() {
+    using lholo::place::detail::burstPacketStackCount;
+    using lholo::place::detail::burstCanContinue;
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 0) == 64);
+    LHOLO_CHECK(burstPacketStackCount(64, 64, 1) == 63);
+    LHOLO_CHECK(burstPacketStackCount(64, 62, 1) == 62);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 3) == 1);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, 4) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 0, 1) == 0);
+    LHOLO_CHECK(burstPacketStackCount(0, 4, 0) == 0);
+    LHOLO_CHECK(burstPacketStackCount(4, 4, -1) == 0);
+    LHOLO_CHECK(burstCanContinue(0, false, false, false, true));
+    LHOLO_CHECK(burstCanContinue(1, true, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, false, true, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, false, true, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, false, false));
+    LHOLO_CHECK(!burstCanContinue(1, true, true, true, true));
+    using lholo::place::detail::firstEligibleBottomUpColumnOffset;
+    std::vector<int> order;
+    auto const lowest=firstEligibleBottomUpColumnOffset(4,[&](int offset){
+        order.push_back(offset);return offset==2;
+    });
+    LHOLO_CHECK(lowest==2 && order==std::vector<int>({3,2}));
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==3;})==3);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(4,[](int){return false;})==-1);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(1,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(0,[](int o){return o==0;})==0);
+    LHOLO_CHECK(firstEligibleBottomUpColumnOffset(999,[](int o){return o==4;})==-1);
+}
+
+void testEasyPlaceFloorBandGeometry() {
+    using lholo::place::detail::FloorBandCell;
+    using lholo::place::detail::floorBandCell;
+    using lholo::place::detail::kFloorBandOffsets;
+    FloorBandCell const anchor{12, 70, -3};
+    LHOLO_CHECK((kFloorBandOffsets == std::array<int, 4>{0, 1, 2, 3}));
+    // The first block is ALWAYS the aimed cell.
+    LHOLO_CHECK(floorBandCell(anchor, 0.0f, 1.0f, 0)
+        == (FloorBandCell{12, 70, -3}));
+    // Looking toward +Z means go forward +Z (NOT to the left along X).
+    LHOLO_CHECK(floorBandCell(anchor, 0.0f, 1.0f, 1)
+        == (FloorBandCell{12, 70, -2}));
+    LHOLO_CHECK(floorBandCell(anchor, 0.0f, 1.0f, 3)
+        == (FloorBandCell{12, 70, 0}));
+    // Looking toward -Z means -Z; turn around and the stripe reverses.
+    LHOLO_CHECK(floorBandCell(anchor, 0.0f, -1.0f, 2)
+        == (FloorBandCell{12, 70, -5}));
+    // Looking toward X means that the X coordinate, not Z, advances.
+    LHOLO_CHECK(floorBandCell(anchor, 1.0f, 0.0f, 2)
+        == (FloorBandCell{14, 70, -3}));
+    LHOLO_CHECK(floorBandCell(anchor, -1.0f, 0.0f, 2)
+        == (FloorBandCell{10, 70, -3}));
+    LHOLO_CHECK(floorBandCell(anchor, 0.8f, 0.3f, 3)
+        == (FloorBandCell{15, 70, -3}));
+    LHOLO_CHECK(floorBandCell(anchor, -0.2f, -0.8f, 3)
+        == (FloorBandCell{12, 70, -6}));
+    LHOLO_CHECK(floorBandCell({12, -60, -3}, 0, 1, 2)
+        == (FloorBandCell{12, -60, -1}));
+    // Never walk backwards or sideways at vertical pitch / invalid heading.
+    LHOLO_CHECK(!floorBandCell(anchor, 0.0f, 1.0f, -1));
+    LHOLO_CHECK(!floorBandCell(anchor, 0.0f, 1.0f, 4));
+    LHOLO_CHECK(!floorBandCell(anchor, 0.0f, 0.0f, 1));
+    LHOLO_CHECK(!floorBandCell(anchor,
+        (std::numeric_limits<float>::quiet_NaN)(), 0.0f, 1));
+    LHOLO_CHECK(!floorBandCell({(std::numeric_limits<int>::max)(), 70, 0},
+        1.0f, 0.0f, 2));
+    LHOLO_CHECK(!floorBandCell({0, 70, (std::numeric_limits<int>::min)()},
+        0.0f, -1.0f, 1));
+
+    using lholo::place::detail::floorNativeVerticalDeepslate;
+    LHOLO_CHECK(floorNativeVerticalDeepslate("minecraft:deepslate", "y", 1, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:deepslate", "x", 1, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:deepslate", "z", 1, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:deepslate", "y", 2, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:deepslate", "y", 1, false));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:oak_log", "y", 1, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:stone", "", 1, true));
+    LHOLO_CHECK(!floorNativeVerticalDeepslate("minecraft:deepslate", "", 1, true));
+}
+
+void testEasyPlaceColumnLookup() {
+    // Rendering remains restricted to the chosen Y layer. Only the
+    // explicitly opt-in Easy Place downward scan may query hidden layers.
+    auto loaded = std::make_shared<LoadedStructure>();
+    loaded->sizeX = 1;
+    loaded->sizeY = 4;
+    loaded->sizeZ = 1;
+    for (int y = 0; y < 4; ++y) {
+        LoadedStructure::RenderBlock block;
+        block.x = 0;
+        block.y = y;
+        block.z = 0;
+        loaded->renderBlocks.push_back(block);
+    }
+    ProjectionWorldLookup const lookup(
+        loaded, {0, 0, 0}, 0, 0,
+        lholo::structure::LayerAxis::Y,
+        lholo::structure::LayerDisplayMode::Single, 3, {}
+    );
+    LHOLO_CHECK(lookup.indexAt({0, 3, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAt({0, 2, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAt({0, 1, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 2, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 1, 0}).has_value());
+    LHOLO_CHECK(lookup.indexAtAnyLayer({0, 0, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAtAnyLayer({1, 2, 0}).has_value());
+    LHOLO_CHECK(!lookup.indexAtAnyLayer({0, -1, 0}).has_value());
+
+    auto& state = lholo::place::detail::PlacementState::getInstance();
+    auto const original = state.easyPlaceColumnDepth();
+    state.setEasyPlaceColumnDepth(4);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 4);
+    state.setEasyPlaceColumnDepth(0);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 1);
+    state.setEasyPlaceColumnDepth(100);
+    LHOLO_CHECK(state.easyPlaceColumnDepth() == 4);
+    state.setEasyPlaceColumnDepth(original);
 }
 
 void testTransparentQuadSort() {
@@ -1319,6 +1444,91 @@ void testComparisonSettings() {
     }
     std::error_code error;
     std::filesystem::remove(path, error);
+}
+
+void testSharedPlacementOrigin() {
+    using namespace lholo::structure;
+    // This is the recorded position from the upload, intentionally far from
+    // any possible local player feet. It must survive persistence unchanged.
+    Cell const uploadedOrigin{12345, 72, -8142};
+    auto const atUpload = schematic::makePlacementAt(
+        7, "example.litematic", uploadedOrigin, 1, 3, 2);
+    LHOLO_CHECK(atUpload.has_value());
+    if (!atUpload) return;
+    LHOLO_CHECK(atUpload->origin.x == 12345);
+    LHOLO_CHECK(atUpload->origin.y == 72);
+    LHOLO_CHECK(atUpload->origin.z == -8142);
+    LHOLO_CHECK(atUpload->dimension == 1);
+    LHOLO_CHECK(atUpload->rotation == 3 && atUpload->mirror == 2);
+    PlacementDocument document;
+    document.placements.push_back(*atUpload);
+    document.selected = 7;
+    auto const restored = decodePlacements(encodePlacements(document));
+    auto const* selected = selectedPlacement(restored);
+    LHOLO_CHECK(selected != nullptr);
+    if (selected) LHOLO_CHECK(*selected == *atUpload);
+    LHOLO_CHECK(!schematic::makePlacementAt(1, "a.mcstructure", Cell{30000001, 64, 0}, 0, 0, 0));
+    LHOLO_CHECK(!schematic::makePlacementAt(1, "a.mcstructure", uploadedOrigin, 0, 4, 0));
+    LHOLO_CHECK(!schematic::makePlacementAt(1, "a.mcstructure", uploadedOrigin, 0, 0, 3));
+    LHOLO_CHECK(!schematic::makePlacementAt(0, "a.mcstructure", uploadedOrigin, 0, 0, 0));
+}
+
+void testBundledDefaultConfig() {
+    auto const bundled = std::filesystem::path{"config.default.json"};
+    std::ifstream input(bundled, std::ios::binary);
+    LHOLO_CHECK(input.good());
+    if (!input) return;
+
+    std::string const original{
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}};
+    auto const expected = nlohmann::json::parse(original);
+    LHOLO_CHECK(expected.is_object() && expected.size() == 80);
+    LHOLO_CHECK(expected.value("version", 0) == 13);
+    LHOLO_CHECK(expected.value("lastStructurePath", std::string{"not-empty"}).empty());
+    LHOLO_CHECK(expected.value("savedStructurePath", std::string{"not-empty"}).empty());
+
+    wchar_t temporaryPath[MAX_PATH]{};
+    if (!GetTempFileNameW(std::filesystem::temp_directory_path().c_str(),
+                          L"LHD", 0, temporaryPath)) {
+        LHOLO_CHECK(false);
+        return;
+    }
+    std::filesystem::path const destination{temporaryPath};
+    std::error_code cleanupError;
+    std::filesystem::remove(destination, cleanupError);
+    LHOLO_CHECK(lholo::settings::installDefaultSettingsIfMissing(destination, bundled));
+    std::ifstream installed(destination, std::ios::binary);
+    std::string const installedBytes{
+        std::istreambuf_iterator<char>(installed), std::istreambuf_iterator<char>{}};
+    installed.close();
+    LHOLO_CHECK(installedBytes == original);
+
+    // Never overwrite a player's existing or custom preferences.
+    LHOLO_CHECK(!lholo::settings::installDefaultSettingsIfMissing(destination, bundled));
+    std::ifstream preserved(destination, std::ios::binary);
+    std::string const preservedBytes{
+        std::istreambuf_iterator<char>(preserved), std::istreambuf_iterator<char>{}};
+    preserved.close();
+    LHOLO_CHECK(preservedBytes == original);
+    std::filesystem::remove(destination, cleanupError);
+
+    // With no shipped template, the original Settings{} fallback remains.
+    LHOLO_CHECK(!lholo::settings::installDefaultSettingsIfMissing(
+        destination, bundled.parent_path() / "missing-LHolo-default.json"));
+    LHOLO_CHECK(!std::filesystem::exists(destination));
+
+    // The freshly generated fallback must still agree with every setting
+    // explicitly supplied in the bundled template; schema additions are okay.
+    lholo::settings::saveSettingsFile(destination, lholo::settings::Settings{});
+    std::ifstream fallbackInput(destination);
+    auto const generated = nlohmann::json::parse(fallbackInput);
+    fallbackInput.close();
+    for (auto it = expected.begin(); it != expected.end(); ++it) {
+        bool const present = generated.contains(it.key());
+        LHOLO_CHECK(present);
+        if (present) LHOLO_CHECK(generated[it.key()] == it.value());
+    }
+    std::filesystem::remove(destination, cleanupError);
 }
 
 void testSettingsStore() {
@@ -2575,6 +2785,9 @@ int main() {
     LHOLO_CHECK(runOverlayRenderingTests()==0);
     lholo::tests::runSchematicChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runActiveProjectionChecks([](bool ok) { LHOLO_CHECK(ok); });
+    testEasyPlaceBurstPolicy();
+    testEasyPlaceFloorBandGeometry();
+    testEasyPlaceColumnLookup();
     testTransparentQuadSort();
     lholo::tests::runProjectedMeshSortChecks([](bool ok) { LHOLO_CHECK(ok); });
     lholo::tests::runCorrectionBatchPolicyChecks([](bool ok) { LHOLO_CHECK(ok); });
@@ -2619,6 +2832,8 @@ int main() {
     testNativeLiquidInternalFaceCull();
     testLayoutRules();
     testProgress();
+    testSharedPlacementOrigin();
+    testBundledDefaultConfig();
     testSettingsStore();
     testComparisonSettings();
     testSettingsCurrentKeyPriority();

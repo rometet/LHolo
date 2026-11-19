@@ -1,6 +1,10 @@
 # Let Git detect text files while preserving binary resources.
 * text=auto
 
+# The user-supplied initial client config is a byte-for-byte release template.
+# Do not let Windows checkout rewrite its line endings.
+config.default.json -text whitespace=cr-at-eol
+
 *.ttf binary
 *.otf binary
 *.png binary

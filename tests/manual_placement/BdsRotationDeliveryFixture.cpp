@@ -41,7 +41,7 @@ template<class T> struct Field {T value{};Field()=default;Field(T v):value(std::
 template<class T> struct Field<std::unique_ptr<T>>:std::unique_ptr<T> {using std::unique_ptr<T>::operator=;};
 enum class HandSlot {Mainhand,Offhand};
 struct Block;
-class ItemStack {public:int key{},mCount{},net{};Block* mBlock{};std::string getTypeName()const{return "minecraft:oak_trapdoor";}bool isNull() const{return mCount==0;}int getId()const{return key;}int getIdAux() const{return key;}bool matchesNetIdVariant(ItemStack const& other) const{return net==other.net;} };
+class ItemStack {public:int key{},mCount{},net{};Block* mBlock{};Field<int> mNetIdVariant{};std::string getTypeName()const{return "minecraft:oak_trapdoor";}bool isNull() const{return mCount==0;}int getId()const{return key;}int getIdAux() const{return key;}bool matchesNetIdVariant(ItemStack const& other) const{return net==other.net;} };
 struct Block {unsigned mNetworkId{};bool air=true;bool isAir()const{return air;}struct Type{bool mIsOpaqueFullBlock{true};bool isSlabBlock()const{return false;};};Type type{};Type const& getBlockType()const{return type;} };
 struct Region {std::map<BlockPos,Block> cells;Block empty{};Block const& getBlock(BlockPos const& p)const {auto it=cells.find(p);return it==cells.end()?empty:it->second;} };
 struct Inventory {std::array<ItemStack,9> items{};ItemStack const& getItem(int slot)const{return items.at(slot);} };
@@ -170,35 +170,42 @@ int main(){
  reset();state.setEnabled(true);
  check(queueRotationPlacement(player,BlockPos{0,0,0},42,20,0,player.inventory.items[0],17,180,
      std::make_unique<ItemUseInventoryTransaction>(),true),"EasyPlace off-axis admission");
- send(20);check(!forwarded.back().attached && pending && pending->warmup.primes==1,
-     "EasyPlace first native tick primes only");
- send(21);check(!forwarded.back().attached && pending && pending->warmup.primes==2,
-     "EasyPlace second native tick primes only");
- send(22);check(forwarded.back().attached && !pending && internalRotationReceipts==1,
-     "EasyPlace attaches one use and guards singleplayer facing");
- for(auto const&f:forwarded)check(f.main==Vec2{17,180}&&f.rotation==Vec2{17,180}&&f.head==180,
-     "EasyPlace network rotation stays coherent");
+ send(20);check(forwarded.back().attached && !pending && internalRotationReceipts==1
+     && !rotationPlacementBusy(player),
+     "off-axis observer places on FIRST native input with server rotation receipt");
+ send(21);check(!forwarded.back().attached,
+     "observer native use is not replayed on the next tick");
+ check(forwarded.front().attached && forwarded.front().main==Vec2{17,180}
+     &&forwarded.front().rotation==Vec2{17,180}&&forwarded.front().head==180,
+     "single AuthInput item-use carries coherent main/interaction/head rotations");
  reset();state.setEnabled(true);
  check(queueRotationPlacement(player,BlockPos{0,0,0},43,20,0,player.inventory.items[0],17,90,
      std::make_unique<ItemUseInventoryTransaction>(),true),"EasyPlace aligned admission");
- send(30);check(forwarded.back().attached&&!pending&&internalRotationReceipts==1,
-     "EasyPlace aligned native placement avoids warmup");
- // Stairs must send two fresh native input ticks even if yaw looks aligned.
+ check(rotationPlacementBusy(player),"aligned observer queue owns selected item");
+ check(!queueRotationPlacement(player,BlockPos{1,0,0},46,20,0,player.inventory.items[0],17,0,
+     std::make_unique<ItemUseInventoryTransaction>(),true),
+     "distinct observer cannot be silently admitted while first request is pending");
+ send(30);check(forwarded.back().attached&&!pending&&internalRotationReceipts==1
+     &&!rotationPlacementBusy(player),
+     "aligned observer attaches immediately without pre-roll");
+ send(31);check(!forwarded.back().attached,
+     "already aligned observer never repeats item use");
+ // LHolo stairs also use one real native input with the exact planned state.
  reset();state.setEnabled(true);
  check(queueRotationPlacement(player,BlockPos{0,0,0},44,20,0,player.inventory.items[0],17,90,
      std::make_unique<ItemUseInventoryTransaction>(),true,true),"aligned stair queue");
  check(pending && pending->strictStair,"stair flag retained");
- send(40);check(!forwarded.back().attached && pending && pending->warmup.primes==1,"stair first tick primes");
- send(41);check(!forwarded.back().attached && pending && pending->warmup.primes==2,"stair second tick primes");
- send(42);check(forwarded.back().attached && !pending && internalRotationReceipts==1,"stair aligned third tick applies");
+ send(40);check(forwarded.back().attached && !pending && internalRotationReceipts==1,
+     "aligned stair attaches on first available native input");
+ send(41);check(!forwarded.back().attached,"stair request does not replay");
  reset();state.setEnabled(true);
  check(queueRotationPlacement(player,BlockPos{0,0,0},45,20,0,player.inventory.items[0],17,180,
      std::make_unique<ItemUseInventoryTransaction>(),true,true),"off-axis stair queue");
- send(50);send(51);
- {PlayerAuthInputPacket p;p.mClientTick.get().mValue=52;
+ {PlayerAuthInputPacket p;p.mClientTick.get().mValue=50;
  p.mInputData.get().insert(PlayerAuthInputPacketPayload::InputData::PerformBlockActions);hook.run(p);}
- check(pending && pending->warmup.primes==0 && !forwarded.back().attached,"native action resets stair primes");
- send(53);send(54);send(55);
- check(forwarded.back().attached && !pending && internalRotationReceipts==1,"stair sends after reset");
+ check(pending && !forwarded.back().attached,
+     "native block action owns the conflicting tick without losing pending stair");
+ send(51);check(forwarded.back().attached && !pending && internalRotationReceipts==1,
+     "stair attaches to the next free input, never spends two prime ticks");
  std::printf("ACTUAL_DELIVERY_BODY checks=%d failures=%d; SDK/network boundary doubles, real BDS test separate\n",checks,failures);return failures?1:0;
 }

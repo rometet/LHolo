@@ -49,6 +49,9 @@ Snapshot snapshot();
 std::optional<VerificationTally> completedVerifierTallyForHud();
 void refreshFiles();
 bool place(std::string const& file);
+// Atomic remote/shared placement: create at the supplied original world origin
+// before starting any projection, never place at the player's feet first.
+bool placeAt(std::string const& file, Cell const& origin, int dimension, int rotation, int mirror);
 bool importSavedProjection();
 bool select(std::uint64_t id);
 bool erase(std::uint64_t id);

@@ -10,7 +10,7 @@ start=s.index(',Packet& packet) {')+len(',Packet& packet) {');end=s.index('\n}\n
 exportstart=s.index('extern "C" __declspec(dllexport)',end);exportend=s.index('bool queueRotationPlacement',exportstart)
 parts={'Decls':s[s.index('struct PendingRotation'):s.index('LL_TYPE_INSTANCE_HOOK')],'Hook':s[start:end],'Queue':s[exportend:s.rindex('\n}')],'Exports':s[exportstart:exportend]}
 for name,text in parts.items():(out/('RotationDelivery'+name+'.inc')).write_text(text,encoding='utf-8')
-cl=Path(r'E:\rufu client\.tools\llvm-22.1.8\bin\clang-cl.exe')
+cl=Path(os.environ.get('LHOLO_CLANG_CL', r'E:\LHolo-Toolchain-20261102\clang+llvm-22.1.8-x86_64-pc-windows-msvc\bin\clang-cl.exe'))
 vc=Path(r'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207')
 sdk=Path(r'C:\Program Files (x86)\Windows Kits\10');v='10.0.26100.0'
 env=dict(os.environ);env['INCLUDE']=';'.join(map(str,[vc/'include']+[sdk/'Include'/v/n for n in ['ucrt','shared','um','winrt']]))

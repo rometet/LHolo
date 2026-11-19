@@ -43,6 +43,8 @@ struct Settings {
     // Per-client preference; modes remain session-only. Empty means no exceptions.
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
+    int easyPlaceColumnDepth{1}; // 1 = unchanged single-layer placement
+    int easyPlaceMaxPerTick{1};  // 1 = legacy single send; 2-4 = experimental burst
     int autoPlacementBreakCooldownSeconds{10};
     bool hudEnabled{true};
     bool hudShowFileName{true};
@@ -95,6 +97,12 @@ struct Settings {
     bool savedVisible{true}, savedCountExtras{true};
     std::string savedStructurePath;
 };
+
+// Installs the bundled initial config only on first launch. Never replaces an
+// existing user's config.json; returns false if the template is unavailable or
+// the destination already exists. Throws on other filesystem errors.
+bool installDefaultSettingsIfMissing(std::filesystem::path const& path,
+                                     std::filesystem::path const& templatePath);
 
 // Returns false when the file does not exist. Throws on read or parse errors.
 bool loadSettingsFile(std::filesystem::path const& path, Settings& out);

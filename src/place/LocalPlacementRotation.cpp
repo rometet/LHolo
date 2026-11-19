@@ -30,6 +30,7 @@ struct LocalReceipt {
     unsigned char face{};
     Vec3 hit{}, from{};
     float pitch{}, yaw{};
+    std::uint32_t expectedGhostId{}; // optional exact projection state, not item ID
 };
 std::mutex receiptMutex;
 std::array<std::optional<LocalReceipt>, 8> receipts;
@@ -97,8 +98,17 @@ LL_TYPE_INSTANCE_HOOK(LocalPlacementUseRotationHook,ll::memory::HookPriority::Hi
                 GetTickCount64(),previous.y,request->yaw,isSenderAuthority,static_cast<int>(result),
                 request->destination.x,request->destination.y,request->destination.z);
             try {
-                auto const state=player.getDimensionBlockSource().getBlock(request->destination).toDebugString();
+                // Observe the actual integrated-server block AFTER vanilla's
+                // authoritative transaction. Never force the expected state;
+                // a mismatch is diagnostic, not permission to rewrite blocks.
+                auto const& placed=player.getDimensionBlockSource().getBlock(request->destination);
+                auto const state=placed.toDebugString();
                 std::fprintf(f,"  authoritative-block=%s\n",state.c_str());
+                if(request->expectedGhostId!=0)
+                    std::fprintf(f,"  LHOLO_BLOCK_STATE_%s expectedRuntime=%u observedRuntime=%u cell=%d,%d,%d\n",
+                        placed.mNetworkId==request->expectedGhostId?"MATCH":"MISMATCH",
+                        request->expectedGhostId,placed.mNetworkId,
+                        request->destination.x,request->destination.y,request->destination.z);
             } catch (...) {}
             std::fclose(f);
         }
@@ -109,7 +119,8 @@ LL_TYPE_INSTANCE_HOOK(LocalPlacementUseRotationHook,ll::memory::HookPriority::Hi
 
 bool rememberLocalPlacementRotation(LocalPlayer const& player,BlockPos const& destination,
     ItemUseInventoryTransaction const& tx,float pitch,float yaw,
-    std::uint64_t ownerToken,std::uint64_t ownerEpoch) noexcept {
+    std::uint64_t ownerToken,std::uint64_t ownerEpoch,
+    std::uint32_t expectedGhostId) noexcept {
     try {
         if(!receiverAvailable.load(std::memory_order_acquire) || !std::isfinite(pitch)
             || !std::isfinite(yaw) || std::fabs(pitch)>90.F || !ownerToken || !ownerEpoch) return false;
@@ -125,7 +136,8 @@ bool rememberLocalPlacementRotation(LocalPlayer const& player,BlockPos const& de
             entry=LocalReceipt{static_cast<std::uint64_t>(player.getRuntimeID()),now+250,
                 ownerToken,ownerEpoch,&player,tx.mPos.get(),destination,tx.mTargetBlockId,
                 static_cast<int>(player.getDimensionId()),slot,item.getId(),item.getIdAux(),item.mCount,
-                tx.mFace,tx.mClickPos.get(),tx.mFromPos.get(),pitch,yaw};
+                tx.mFace,tx.mClickPos.get(),tx.mFromPos.get(),pitch,yaw,
+                expectedGhostId};
             return true;
         }
     } catch (...) {}

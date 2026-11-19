@@ -79,6 +79,9 @@ ProjectionQuery queryProjection(LocalPlayer& player, BlockPos const& worldPos);
 // allow an expected schematic block whose actual world cell is already air.
 // Never make a filled world cell a placement target.
 ProjectionQuery queryPlacementProjection(LocalPlayer& player, BlockPos const& worldPos);
+// Explicit Easy Place column mode only: read a structural block even when
+// its Y layer is hidden. The actual world cell must be air before placement.
+ProjectionQuery queryEasyPlaceColumnCell(LocalPlayer& player, BlockPos const& worldPos);
 
 std::vector<RangeCandidate> queryMissingCellsInRange(LocalPlayer& player, Vec3 const& center, float radius);
 

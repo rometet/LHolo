@@ -9,7 +9,8 @@ namespace lholo::place::detail {
 // placement-time rotation may be borrowed while vanilla handles that receipt.
 bool rememberLocalPlacementRotation(LocalPlayer const&, BlockPos const& destination,
     ItemUseInventoryTransaction const&, float pitch, float yaw,
-    std::uint64_t ownerToken, std::uint64_t ownerEpoch) noexcept;
+    std::uint64_t ownerToken, std::uint64_t ownerEpoch,
+    std::uint32_t expectedGhostId=0) noexcept;
 void cancelLocalPlacementRotations(std::uint64_t ownerToken=0, std::uint64_t ownerEpoch=0) noexcept;
 bool installLocalPlacementRotationHook();
 bool uninstallLocalPlacementRotationHook();

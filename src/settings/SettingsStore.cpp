@@ -6,6 +6,7 @@
 #include "projection/core/ComparisonStyle.h"
 #include "place/ManualPlacementRules.h"
 
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <atomic>
@@ -85,6 +86,27 @@ void writeAtomically(std::filesystem::path const& path, std::string const& conte
 
 } // namespace
 
+bool installDefaultSettingsIfMissing(
+    std::filesystem::path const& path,
+    std::filesystem::path const& templatePath
+) {
+    // The original user's config always wins, including on upgrades.
+    // copy_options::none explicitly rejects an existing destination even if
+    // another actor creates it after our existence check.
+    if (std::filesystem::exists(path) || !std::filesystem::is_regular_file(templatePath)) {
+        return false;
+    }
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
+    std::error_code error;
+    bool const copied = std::filesystem::copy_file(
+        templatePath, path, std::filesystem::copy_options::none, error);
+    if (error && error != std::errc::file_exists) {
+        throw std::filesystem::filesystem_error(
+            "install default LHolo settings", templatePath, path, error);
+    }
+    return copied;
+}
+
 bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
     if (!std::filesystem::exists(path)) return false;
     std::ifstream input(path, std::ios::binary);
@@ -148,6 +170,16 @@ bool loadSettingsFile(std::filesystem::path const& path, Settings& out) {
         }
     }
     parsed.placementRadius = json.value("placementRadius", parsed.placementRadius);
+    if (auto const count = json.find("easyPlaceMaxPerTick");
+        count != json.end() && count->is_number_integer()) {
+        parsed.easyPlaceMaxPerTick = static_cast<int>(
+            std::clamp(count->get<double>(), 1.0, 4.0));
+    }
+    if (auto const depth = json.find("easyPlaceColumnDepth");
+        depth != json.end() && depth->is_number_integer()) {
+        parsed.easyPlaceColumnDepth = static_cast<int>(
+            std::clamp(depth->get<double>(), 1.0, 4.0));
+    }
     parsed.autoPlacementBreakCooldownSeconds = json.value(
         "autoPlacementBreakCooldownSeconds",
         parsed.autoPlacementBreakCooldownSeconds
@@ -304,6 +336,8 @@ void saveSettingsFile(std::filesystem::path const& path, Settings const& setting
         {"manualPlacementAllowedItems", place::detail::normalizeManualPlacementAllowedItems(
             settings.manualPlacementAllowedItems).value_or(std::vector<std::string>{})},
         {"placementRadius", settings.placementRadius},
+        {"easyPlaceColumnDepth", std::clamp(settings.easyPlaceColumnDepth, 1, 4)},
+        {"easyPlaceMaxPerTick", std::clamp(settings.easyPlaceMaxPerTick, 1, 4)},
         {"autoPlacementBreakCooldownSeconds", settings.autoPlacementBreakCooldownSeconds},
         {"hudEnabled", settings.hudEnabled},
         {"hudShowFileName", settings.hudShowFileName},

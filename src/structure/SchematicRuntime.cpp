@@ -1,4 +1,5 @@
 #include "structure/SchematicRuntime.h"
+#include "structure/SharedPlacementOrigin.h"
 #include "structure/InventoryContents.h"
 #include "structure/PlacementMigration.h"
 #include "structure/TransientPlacementCache.h"
@@ -456,6 +457,38 @@ bool place(std::string const& file) {
     d.placements.push_back(std::move(p)); d.selected=id;
     if (!change(snap,std::move(d))) return false;
     gProjection.invalidate(true);gActivate=true; return true;
+}
+bool placeAt(std::string const& file, Cell const& origin, int dimension, int rotation, int mirror) {
+    std::lock_guard lock(gMutex);
+    // Unlike local place(), shared placement must never pass through gFeet.
+    // Initialize the authoritative origin/transform in the placement document
+    // before the renderer's first activation tick.
+    if (!contextValid() || !safeSchematicPath(file) || dimension != gDimension
+        || rotation < 0 || rotation > 3 || mirror < 0 || mirror > 2
+        || origin.x < -30000000 || origin.x > 30000000
+        || origin.z < -30000000 || origin.z > 30000000
+        || origin.y < -1000000 || origin.y > 1000000) return false;
+    auto snap = gSession.snapshot();
+    if (!snap.writable) return false;
+    auto d = snap.document;
+    if (d.placements.size() >= kMaxPlacements) return false;
+    try {
+        if (!std::filesystem::is_regular_file(resolveSchematicPath(library(), file))) return false;
+    } catch (std::exception const& e) {
+        gStatus = e.what();
+        return false;
+    }
+    std::uint64_t id = 1;
+    while (std::any_of(d.placements.begin(), d.placements.end(),
+            [&](auto const& p) { return p.id == id; })) ++id;
+    auto p = makePlacementAt(id, file, origin, dimension, rotation, mirror);
+    if (!p) return false;
+    d.placements.push_back(std::move(*p));
+    d.selected = id;
+    if (!change(snap, std::move(d))) return false;
+    gProjection.invalidate(true);
+    gActivate = true;
+    return true;
 }
 bool select(std::uint64_t id) {
     std::lock_guard lock(gMutex);if(!contextValid())return false; auto snap=gSession.snapshot(); auto d=snap.document;

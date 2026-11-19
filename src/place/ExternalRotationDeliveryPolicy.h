@@ -18,7 +18,9 @@ struct ExternalRotationWarmup {
 // Native player facing and the schematic direction are not guaranteed to
 // reach the server together on the first input packet. When they differ,
 // prime genuine input ticks before the item-use transaction (Praxis pattern).
-// A native packet already facing the requested direction needs no extra delay.
+// This helper retains the conservative legacy/external policy. LHolo's own
+// projected placement instead attaches the predicted block state and matching
+// rotation to the next genuine AuthInput in one packet, with no pre-roll.
 inline bool needsOrientationWarmup(bool external, bool requireSync,
     float packetPitch, float packetYaw, float requestedPitch, float requestedYaw) noexcept {
     if (!requireSync) return false;

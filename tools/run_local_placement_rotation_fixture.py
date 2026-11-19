@@ -1,5 +1,5 @@
 from pathlib import Path
-import subprocess,json,hashlib
+import subprocess,json,hashlib,os
 import argparse
 parser=argparse.ArgumentParser(description='Compile and exercise the actual local placement receiver body against SDK boundary doubles.')
 parser.add_argument('--out', type=Path, required=True)
@@ -26,7 +26,7 @@ struct BlockPos{int x{},y{},z{};bool operator==(BlockPos const&)const=default;};
 template<class T>struct Field{T v{};T const& get()const{return v;}T& get(){return v;}Field& operator=(T const& n){v=n;return *this;}};
 struct ItemStack{int id=2,aux=2,mCount=64;bool isNull()const{return !mCount;}int getId()const{return id;}int getIdAux()const{return aux;}};
 struct Inventory{ItemStack item;ItemStack const& getItem(int)const{return item;}};
-struct Block{std::string toDebugString()const{return "fixture";}};struct BlockSource{Block getBlock(BlockPos)const{return {};}};
+struct Block{unsigned mNetworkId=99;std::string toDebugString()const{return "fixture";}};struct BlockSource{unsigned observedId=99;Block getBlock(BlockPos)const{return Block{observedId};}};
 struct Player{bool client{};std::uint64_t rid=88;int slot=0,dim=0;Vec2 rot{3,7};Inventory inv;BlockSource region;
  bool isClientSide()const{return client;}std::uint64_t getRuntimeID()const{return rid;}int getSelectedItemSlot()const{return slot;}int getDimensionId()const{return dim;}
  Inventory const& getInventory()const{return inv;}Vec2 const& getRotation()const{return rot;}BlockSource const& getDimensionBlockSource()const{return region;}};
@@ -47,7 +47,7 @@ int checks=0,failures=0;void ck(bool yes,char const* name){++checks;if(!yes){++f
 int main(){
  LocalPlayer client;Player server;LocalPlacementUseRotationHook tx;
  auto reset=[&]{cancelLocalPlacementRotations();clockMs=1000;client=LocalPlayer{};server=Player{};tx=LocalPlacementUseRotationHook{};calls=0;seen=0;throwOrigin=false;installLocalPlacementRotationHook();};
- auto publish=[&](float yaw){return rememberLocalPlacementRotation(client,{0,0,0},tx,20,yaw,44,6);};
+ auto publish=[&](float yaw){return rememberLocalPlacementRotation(client,{0,0,0},tx,20,yaw,44,6,99);};
  for(float yaw:{0.F,90.F,180.F,-90.F}){reset();ck(publish(yaw),"queue receipt");tx.run(server,false);ck(calls==1&&seen==yaw,"vanilla receiver sees requested orientation");ck(server.rot==Vec2{3,7},"server rotation restored");ck(client.rot==Vec2{3,7},"client camera unchanged");tx.run(server,false);ck(calls==2&&seen==7,"receipt consumed once; unrelated replay not transformed");}
  reset();publish(90);tx.run(client,false);ck(seen==7&&client.rot==Vec2{3,7},"client actor never transformed");tx.run(server,false);ck(seen==90,"client callback does not consume server receipt");
  reset();publish(90);server.rid=99;tx.run(server,false);ck(seen==7,"different player unchanged");server.rid=88;tx.run(server,false);ck(seen==90,"wrong player did not consume receipt");
@@ -60,6 +60,8 @@ int main(){
  reset();publish(90);tx.mClickPos.v.y=.75;tx.run(server,false);ck(seen==7,"different click unchanged");
  reset();publish(90);server.inv.item.mCount=63;tx.run(server,false);ck(seen==7,"changed stack unchanged");
  reset();publish(90);server.inv.item.id=3;tx.run(server,false);ck(seen==7,"different item unchanged");
+ reset();server.region.observedId=100;publish(90);tx.run(server,false);
+ ck(calls==1&&server.rot==Vec2{3,7},"observed wrong orientation never rewrites authoritative block");
  reset();publish(90);clockMs=1250;tx.run(server,false);ck(seen==7,"expired receipt rejected");
  reset();publish(90);cancelLocalPlacementRotations(44,6);tx.run(server,false);ck(seen==7,"matching cancel prevents transform");
  reset();publish(90);cancelLocalPlacementRotations(45,6);tx.run(server,false);ck(seen==90,"other owner cannot cancel");
@@ -70,17 +72,23 @@ int main(){
 }
 '''
 (out/'test.cpp').write_text(prefix+body+main,encoding='utf-8')
+clangExe=os.environ.get('LHOLO_CLANG_CL',r'E:\LHolo-Toolchain-20261102\clang+llvm-22.1.8-x86_64-pc-windows-msvc\bin\clang-cl.exe')
 cmd=f'''@echo off
 call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul
 cd /d "{out}"
-"E:\\rufu client\\.tools\\llvm-22.1.8\\bin\\clang-cl.exe" /nologo /std:c++20 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS test.cpp /Fetest.exe
+"{clangExe}" /nologo /std:c++20 /EHsc /utf-8 /D_CRT_SECURE_NO_WARNINGS test.cpp /Fetest.exe
 if errorlevel 1 exit /b 2
 test.exe
 exit /b %errorlevel%
 '''
 (out/'run.cmd').write_text(cmd)
+trace_dir=out/'mods'/'LHolo';trace_dir.mkdir(parents=True,exist_ok=True)
+trace_file=trace_dir/'flexible-placement-trace.log';trace_file.unlink(missing_ok=True)
 r=subprocess.run(['cmd','/c',str(out/'run.cmd')],capture_output=True,cwd=out)
 (out/'result.log').write_bytes(r.stdout+r.stderr)
+trace=trace_file.read_text(errors='replace') if trace_file.exists() else ''
+if r.returncode==0 and not ('LHOLO_BLOCK_STATE_MATCH' in trace and 'LHOLO_BLOCK_STATE_MISMATCH' in trace):
+    r=subprocess.CompletedProcess(r.args,3,r.stdout, r.stderr+b'\nmissing positive/negative authoritative-state trace\n')
 print((r.stdout+r.stderr).decode('utf-8',errors='replace'))
 (out/'result.json').write_text(json.dumps({'exit':r.returncode,'source_sha256':hashlib.sha256(s.encode()).hexdigest(),'scope':'actual server hook body; native boundaries stubbed'},indent=2))
 raise SystemExit(r.returncode)

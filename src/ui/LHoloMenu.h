@@ -10,6 +10,9 @@
 #include "ui/VerifierViewState.h"
 #include "ui/MaterialsViewState.h"
 #include "io/MaterialExport.h"
+#include "sync/common/SharedTypes.h"
+#include "ui/SharedEditViewState.h"
+#include "ui/SharedMutationGuard.h"
 
 #include <array>
 #include <cstddef>
@@ -119,6 +122,8 @@ struct MenuModel {
     int clientOnlyGrabModifiers{2};
     std::vector<std::string> manualPlacementAllowedItems;
     int placementRadius{4};
+    int easyPlaceColumnDepth{1};
+    int easyPlaceMaxPerTick{1};
     int autoPlacementBreakCooldownSeconds{10};
     int offsetX{};
     int offsetY{};
@@ -166,6 +171,23 @@ struct MenuModel {
     std::vector<RegionRow> regionRows;
     bool regionSupportsCustom{};
     std::shared_ptr<VerifierViewState> verifierView;
+
+    // LHolo Integrated Sync (shared tab). Kept as plain data so the menu pages
+    // stay independent of the sync client / network layer.
+    int schematicsTab{};                 // 0 = local, 1 = shared
+    bool syncAvailable{};
+    int syncRole{};                      // sync::Role as int
+    std::string syncServerVersion;
+    std::vector<sync::SharedPlacementDto> sharedItems;
+
+    // Shared-placement edit (section 4.5). The draft lives in sharedEditView
+    // (owned by the controller) so it survives the per-frame model rebuild; the
+    // phase and message mirror the sync client so the page can gate and explain.
+    std::shared_ptr<SharedEditViewState> sharedEditView;
+    std::shared_ptr<SharedMutationGuard> sharedMutationGuard;
+    int syncEditPhase{};                  // sync::EditPhase as int
+    std::string syncEditPlacementId;      // edited placement, canonical string
+    std::string syncEditMessage;
 };
 
 struct MenuActions {
@@ -195,6 +217,11 @@ struct MenuActions {
     std::function<void(structure::MistakeFilter)> setMistakeFilter;
     std::function<void(structure::schematic::ReportStamp const&, std::size_t)> selectMistake;
     std::function<void()> clearMistakeTarget;
+    std::function<void()> refreshShared;
+    std::function<void(sync::Uuid const&)> loadShared, downloadShared, editShared, deleteShared;
+    // Apply or abandon the draft for the shared placement being edited.
+    std::function<void(sync::Uuid const&)> commitSharedEdit, cancelSharedEdit;
+    std::function<void()> shareLocalPlacement;
 };
 
 void renderMenu(MenuModel& model, MenuActions const& actions, UiMetrics const& metrics);

@@ -185,6 +185,10 @@
     LHOLO_TEXT_KEY("hint.assistedDisabledByConsent", HintAssistedDisabledByConsent, "")                  \
     LHOLO_TEXT_KEY("hint.assistedDisabled", HintAssistedDisabled, "")                                    \
     LHOLO_TEXT_KEY("label.placementRadius", LabelPlacementRadius, "")                                    \
+    LHOLO_TEXT_KEY("label.easyPlaceColumnDepth", LabelEasyPlaceColumnDepth, "")                        \
+    LHOLO_TEXT_KEY("label.easyPlaceMaxPerTick", LabelEasyPlaceMaxPerTick, "")                          \
+    LHOLO_TEXT_KEY("hint.easyPlaceMaxPerTick", HintEasyPlaceMaxPerTick, "")                            \
+    LHOLO_TEXT_KEY("hint.easyPlaceColumnDepth", HintEasyPlaceColumnDepth, "")                          \
     LHOLO_TEXT_KEY("label.autoPlacementCooldown", LabelAutoPlacementCooldown, "")                        \
                                                                                                          \
     /* Interface settings page */                                                                        \
@@ -419,7 +423,43 @@
     LHOLO_TEXT_KEY("materials.placementTitle", MaterialsPlacementTitle, "") \
     LHOLO_TEXT_KEY("materials.placementHint", MaterialsPlacementHint, "") \
     LHOLO_TEXT_KEY("materials.help", MaterialsHelp, "") \
-    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "")
+    LHOLO_TEXT_KEY("blockIcon.hint", BlockIconHint, "") \
+    LHOLO_TEXT_KEY("shared.tab.local", SharedTabLocal, "") \
+    LHOLO_TEXT_KEY("shared.tab.shared", SharedTabShared, "") \
+    LHOLO_TEXT_KEY("shared.status", SharedStatus, "") \
+    LHOLO_TEXT_KEY("shared.refresh", SharedRefresh, "") \
+    LHOLO_TEXT_KEY("shared.load", SharedLoad, "") \
+    LHOLO_TEXT_KEY("shared.download", SharedDownload, "") \
+    LHOLO_TEXT_KEY("shared.share", SharedShare, "") \
+    LHOLO_TEXT_KEY("shared.edit", SharedEdit, "") \
+    LHOLO_TEXT_KEY("shared.delete", SharedDelete, "") \
+    LHOLO_TEXT_KEY("shared.empty", SharedEmpty, "") \
+    LHOLO_TEXT_KEY("shared.notConnected", SharedNotConnected, "") \
+    LHOLO_TEXT_KEY("shared.notCached", SharedNotCached, "") \
+    LHOLO_TEXT_KEY("shared.downloading", SharedDownloading, "") \
+    LHOLO_TEXT_KEY("shared.cached", SharedCached, "") \
+    LHOLO_TEXT_KEY("shared.permissionDenied", SharedPermissionDenied, "") \
+    LHOLO_TEXT_KEY("shared.hint", SharedHint, "") \
+    LHOLO_TEXT_KEY("shared.editTitle", SharedEditTitle, "") \
+    LHOLO_TEXT_KEY("shared.editHint", SharedEditHint, "") \
+    LHOLO_TEXT_KEY("shared.editState", SharedEditState, "") \
+    LHOLO_TEXT_KEY("shared.editCommit", SharedEditCommit, "") \
+    LHOLO_TEXT_KEY("shared.editCancel", SharedEditCancel, "") \
+    LHOLO_TEXT_KEY("shared.editPending", SharedEditPending, "") \
+    LHOLO_TEXT_KEY("shared.editGranted", SharedEditGranted, "") \
+    LHOLO_TEXT_KEY("shared.editCommitting", SharedEditCommitting, "") \
+    LHOLO_TEXT_KEY("shared.editApplied", SharedEditApplied, "") \
+    LHOLO_TEXT_KEY("shared.editFailed", SharedEditFailed, "") \
+    LHOLO_TEXT_KEY("shared.protection.lock", SharedProtectionLock, "") \
+    LHOLO_TEXT_KEY("shared.protection.unlock", SharedProtectionUnlock, "") \
+    LHOLO_TEXT_KEY("shared.protection.protected", SharedProtectionProtected, "") \
+    LHOLO_TEXT_KEY("shared.protection.unprotected", SharedProtectionUnprotected, "") \
+    LHOLO_TEXT_KEY("shared.deleteConfirm.message", SharedDeleteConfirmMessage, "") \
+    LHOLO_TEXT_KEY("shared.deleteConfirm.apply", SharedDeleteConfirmApply, "") \
+    LHOLO_TEXT_KEY("shared.deleteConfirm.cancel", SharedDeleteConfirmCancel, "") \
+    LHOLO_TEXT_KEY("shared.editReview", SharedEditReview, "") \
+    LHOLO_TEXT_KEY("shared.editConfirm", SharedEditConfirm, "") \
+    LHOLO_TEXT_KEY("shared.editConfirmHint", SharedEditConfirmHint, "")
 
 namespace lholo::i18n {
 

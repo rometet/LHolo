@@ -8,6 +8,9 @@
 #include "place/PlacementRotation.h"
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementDispatchResult.h"
+#include "place/EasyPlaceBurstPolicy.h"
+#include "place/VoxelRayAxis.h"
+#include "place/FloorBandGeometry.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -25,16 +28,46 @@
 
 using uchar = unsigned char;
 using uint = unsigned int;
+struct LHolo {
+    struct Logger { template<class... Args> void debug(char const*, Args&&...) {} };
+    struct Self { Logger logger; Logger& getLogger() { return logger; } } self;
+    static LHolo& getInstance() { static LHolo instance; return instance; }
+    Self& getSelf() { return self; }
+};
 struct Vec3 { float x{},y{},z{}; };
 struct Vec2 { float x{},y{};bool operator==(Vec2 const&) const=default; };
 bool orientationProbe{},throwOnOverride{};
+bool fixtureObserverNeedsSelectedItem{};
+int fixtureHeldSlot{};
+bool fixtureLegacySlotSetterNoop{};
+int fixtureSuppliesSelectCalls{};
+std::vector<std::pair<std::string,int>> fixtureWireOrder;
 struct BlockPos {
     int x{},y{},z{};
     bool operator==(BlockPos const&) const = default;
     bool operator<(BlockPos const& p) const { return std::tie(x,y,z)<std::tie(p.x,p.y,p.z); }
     BlockPos operator+(BlockPos const& p) const { return {x+p.x,y+p.y,z+p.z}; }
 };
+struct ActorRuntimeID { std::uint64_t rawID{}; bool operator==(ActorRuntimeID const&) const=default; };
+struct Level {};
 struct Player;
+enum class ContainerID;
+struct MockSupplies {
+    Player* owner{};
+    bool selectSlot(int slot, ContainerID container);
+};
+struct MockSuppliesStorage {
+    std::shared_ptr<MockSupplies> ptr=std::make_shared<MockSupplies>();
+    std::shared_ptr<MockSupplies>& get() { return ptr; }
+};
+enum class HandSlot : int;
+struct GameMode {
+    bool buildBlock(BlockPos const& pos, uchar face, HandSlot hand, bool isSimTick);
+};
+struct MockNativeModeStorage {
+    std::shared_ptr<GameMode> value = std::make_shared<GameMode>();
+    std::shared_ptr<GameMode>& get() { return value; }
+};
 enum class BlockProperty { Door };
 struct Facing {
     enum class Name { Down=0,Up=1,North=2,South=3,West=4,East=5 };
@@ -48,10 +81,12 @@ struct Facing {
 struct ItemStack {
     int key{}, aux{}, count{};
     int netId{};
+    std::string itemName{};
     bool operator==(ItemStack const&) const = default;
     bool isNull() const { return count==0; }
     int getIdAux() const { return key; }
     int getAuxValue() const { return aux; }
+    std::string getTypeName() const { return itemName; }
 };
 struct Block {
     std::string name{"minecraft:stone"};
@@ -82,14 +117,22 @@ struct BlockSource {
 struct Inventory { std::array<ItemStack,36> items{}; ItemStack const& getItem(int i) const { return items.at(i); } };
 struct Player {
     Vec2 rotation{17,0};
+    Vec3 eye{}, view{1,0,0}; float reach=4;
     Inventory inventory; int selected{}, setSlotCalls{}; BlockSource region;
+    MockNativeModeStorage mGameMode;
+    MockSuppliesStorage mInventory;
     Inventory& getInventory() { return inventory; }
     int getSelectedItemSlot() const { return selected; }
-    void setSelectedSlot(int i) { ++setSlotCalls; selected=i; }
+    void setSelectedSlot(int i) {
+        ++setSlotCalls;
+        if (!fixtureLegacySlotSetterNoop) { selected=i; fixtureHeldSlot=i; }
+    }
     Vec3 getPosition() const { return {}; }
-    Vec3 getEyePos() const { return {}; }
-    Vec3 getViewVector(float) const { return {1,0,0}; }
-    float getPickRange() const { return 4; }
+    Vec3 getEyePos() const { return eye; }
+    Vec3 getViewVector(float) const { return view; }
+    float getPickRange() const { return reach; }
+    ActorRuntimeID getRuntimeID() const { return {555}; }
+    Level& getLevel() const { static Level testLevel; return testLevel; }
     Vec2 const& getRotation() const { return rotation; }
     BlockSource& getDimensionBlockSource() { return region; }
 };
@@ -151,6 +194,9 @@ Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,
             predicted.states["orientation"]=std::string(axis)+"_"+std::to_string(quadrant);
         } else {
             predicted.states["facing_direction"]=std::to_string(facing);
+            if (fixtureObserverNeedsSelectedItem && name == "minecraft:observer"
+                && p.getInventory().getItem(p.getSelectedItemSlot()).key != material)
+                predicted.states["facing_direction"]="invalid-held-item";
         }
         return predicted;
     }
@@ -158,6 +204,14 @@ Block const& Block::getPlacementBlock(Player& p,BlockPos const& cell,uchar face,
 }
 template<class T> struct Field { T value{}; T& get() { return value; } };
 enum class ContainerID { Inventory };
+bool MockSupplies::selectSlot(int slot,ContainerID container) {
+    ++fixtureSuppliesSelectCalls;
+    if(!owner || container!=ContainerID::Inventory || slot<0 || slot>=9)
+        return false;
+    owner->selected=slot;fixtureHeldSlot=slot;
+    ++owner->setSlotCalls;
+    return true;
+}
 enum class InventorySourceType { ContainerInventory };
 struct InventorySource {
     enum class InventorySourceFlags { NoFlag };
@@ -193,9 +247,30 @@ struct InventoryTransactionPacketPayload {
     std::unique_ptr<ComplexInventoryTransaction> tx;
     InventoryTransactionPacketPayload(std::unique_ptr<ComplexInventoryTransaction> p,bool):tx(std::move(p)) {}
 };
+enum class PlayerActionType { StartItemUseOn=28, StopItemUseOn=29 };
+struct PlayerActionPacket {
+    Field<ActorRuntimeID> mRuntimeId;
+    PlayerActionType mAction{};
+    Field<BlockPos> mPos,mResultPos;
+    int mFace{};
+    bool mIsFromServerPlayerMovementSystem{};
+};
 struct InventoryTransactionPacket {
     InventoryTransactionPacketPayload payload;
     explicit InventoryTransactionPacket(InventoryTransactionPacketPayload p):payload(std::move(p)) {}
+};
+struct MobEquipmentPacketPayload {
+    ActorRuntimeID actor;
+    ItemStack item;
+    int slot,selectedSlot;
+    ContainerID container;
+    MobEquipmentPacketPayload(ActorRuntimeID actorId,ItemStack const& held,
+        int targetSlot,int selected,ContainerID source)
+        :actor(actorId),item(held),slot(targetSlot),selectedSlot(selected),container(source){}
+};
+struct MobEquipmentPacket {
+    MobEquipmentPacketPayload payload;
+    explicit MobEquipmentPacket(MobEquipmentPacketPayload p):payload(std::move(p)){}
 };
 struct Sent {
     BlockPos pos;Vec3 click;int slot;bool netIds;
@@ -207,14 +282,35 @@ std::uint64_t GetTickCount64() { return fixtureTime; }
 bool factoryAvailable=true, clientAvailable=true, fixtureGui{}, heldExempt{};
 bool normalFactoryAvailable=true;
 int normalFactoryCalls{};
+struct SentAction {PlayerActionType action;BlockPos pos;std::uint64_t time;};
+std::vector<SentAction> sentActions;
 std::vector<Sent> sent;
+struct NativeBuildSent { BlockPos pos; uchar face; HandSlot hand; std::uint64_t time; bool isSimTick; };
+std::vector<NativeBuildSent> nativeSent;
+bool nativeBuildSucceeds = true;
+bool GameMode::buildBlock(BlockPos const& pos, uchar face, HandSlot hand, bool isSimTick) {
+    fixtureWireOrder.emplace_back("build",fixtureHeldSlot);
+    nativeSent.push_back({pos,face,hand,fixtureTime,isSimTick});
+    return nativeBuildSucceeds;
+}
 std::vector<SwapSent> swapSent;
 int swaps{}, planned{};
 std::vector<int> plannedCells;
 std::map<int,bool> planOutcomes;
 bool useActualPlanner{};
+bool fixtureRealSupportForNative{};
 bool queueRotationOnPlan{};
 struct PacketSender {
+    void sendToServer(MobEquipmentPacket const& packet) {
+        fixtureWireOrder.emplace_back("equip",packet.payload.selectedSlot);
+        if (packet.payload.item.isNull()
+            || packet.payload.slot!=packet.payload.selectedSlot
+            || packet.payload.container!=ContainerID::Inventory)
+            throw std::runtime_error("Malformed selected-equipment packet");
+    }
+    void sendToServer(PlayerActionPacket const& packet) {
+        sentActions.push_back({packet.mAction,packet.mPos.value,fixtureTime});
+    }
     void sendToServer(InventoryTransactionPacket const& packet) {
         if(packet.payload.tx->fixtureType==ComplexInventoryTransaction::Type::NormalTransaction) {
             ++swaps;swapSent.push_back({packet.payload.tx->mTransaction.value.actions,fixtureTime});return;
@@ -250,6 +346,7 @@ struct PlacementContext { Vec3 eye; float reachSquared; std::int64_t eyeX{},eyeY
 namespace projection {
 struct Candidate { int x{},y{},z{};Block const* block{};bool missing=true; };
 std::vector<Candidate> candidates;
+std::map<BlockPos,Block const*> columnBlocks;
 int rangeQueries{};
 std::vector<Candidate> queryMissingCellsInRange(Player&,Vec3 const&,float) {
     ++rangeQueries;return candidates;
@@ -261,8 +358,20 @@ Candidate queryProjection(Player&,BlockPos const& p) {
 Candidate queryPlacementProjection(Player& player,BlockPos const& p) {
     return queryProjection(player,p);
 }
+Candidate queryEasyPlaceColumnCell(Player& player,BlockPos const& p) {
+    auto it=columnBlocks.find(p);
+    if (it==columnBlocks.end()) return {};
+    return {p.x,p.y,p.z,it->second,player.region.getBlock(p).isAir()};
+}
 namespace detail {
-bool checkedVoxelRayOrigin(std::array<float,3>,std::array<float,3>,float) { return true; }
+std::optional<std::array<int,3>> checkedVoxelRayOrigin(
+    std::array<float,3> origin,std::array<float,3> dir,float reach
+) {
+    if (!(reach > 0) || !(std::isfinite(origin[0]) && std::isfinite(origin[1]) && std::isfinite(origin[2]))
+        || !(std::isfinite(dir[0]) && std::isfinite(dir[1]) && std::isfinite(dir[2]))) return {};
+    return std::array<int,3>{static_cast<int>(std::floor(origin[0])),
+        static_cast<int>(std::floor(origin[1])),static_cast<int>(std::floor(origin[2]))};
+}
 }
 }
 namespace structure {
@@ -286,6 +395,8 @@ void showActionHint(i18n::Message const& m) { hints.push_back(m.key); }
 }
 namespace detail {
 int rotatedQueueCalls{};float rotatedQueuePitch{},rotatedQueueYaw{};bool rotatedQueueStrict{};bool rotatedQueueStair{};
+bool fixtureRotationBusy{};
+bool rotationPlacementBusy(Player const&) noexcept { return fixtureRotationBusy; }
 bool queueRotationPlacement(Player&,BlockPos const&,std::int64_t,unsigned,int,
     ItemStack const&,float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,
     bool mustMatchNative,bool mustPrimeStair) {
@@ -302,8 +413,11 @@ using detail::FailedPlanKey;using detail::FailedPlanKeyHash;using detail::Placem
 auto& placementState() { return detail::PlacementState::getInstance(); }
 #include "ConstantsBody.inc"
 struct ProjectionTarget { BlockPos cell,at;uchar face{};Block const* block{};Vec3 clickPos{};std::optional<detail::PlacementInteractionAngles> interactionRotation{};
-    bool requireNativeRotationSync{}; };
+    bool requireNativeRotationSync{}; bool floorBand{}; };
 std::optional<ProjectionTarget> aimed;
+std::vector<ProjectionTarget> aimedSequence;
+std::size_t aimedSequenceIndex{};
+bool useActualRay{};
 bool validFace(uchar f) { return f<6; }
 BlockPos neighborOf(BlockPos const& p,uchar f) { return p+Facing::DIRECTION().at(f); }
 uchar oppositeFace(uchar f) { return Facing::OPPOSITE_FACING().at(f); }
@@ -331,7 +445,15 @@ bool isDoubleSlab(Block const& b) { return b.doubleSlab; }
 bool manualSerializedPlacementMatches(Block const& p,Block const& g) {
     return detail::manualPlacementStateMapsMatch(g.name,g.states,p.states);
 }
-bool isFastOpaquePlacementCandidate(Block const& b) { return b.name=="minecraft:stone"; }
+bool isFastOpaquePlacementCandidate(Block const& b) { return b.name=="minecraft:stone" || b.name=="minecraft:polished_blackstone_bricks" || b.name=="minecraft:cobbled_deepslate" || b.name=="minecraft:stone_bricks"; }
+bool canNativeBurstPlace(ProjectionTarget const& target) {
+    return target.block && (isFastOpaquePlacementCandidate(*target.block)
+        || (target.floorBand && !target.interactionRotation && !target.requireNativeRotationSync
+            && detail::floorNativeVerticalDeepslate(target.block->name,
+                serializedState(*target.block,"pillar_axis"),target.face,
+                target.at.x==target.cell.x && target.at.z==target.cell.z
+                    && target.at.y+1==target.cell.y)));
+}
 bool isViewSensitivePlan(Block const& b) { return !isFastOpaquePlacementCandidate(b); }
 std::optional<uchar> deterministicSupportDirection(Block const& b) {
     auto facing=serializedState(b,"facing_direction");
@@ -348,6 +470,12 @@ bool placementPredictionMatches(Block const&,Block const&,Block const*);
 #define resolveOrientedPlacement resolveOrientedPlacementActual
 #include "PlannerBody.inc"
 #undef resolveOrientedPlacement
+// Include unchanged production Voxel DDA/column chooser, not a handwritten mock.
+// Its recent-placement guard is defined in the extracted ExecutorBodies section.
+bool recentlyPlaced(BlockPos const& cell,std::uint64_t now);
+#define findProjectionTarget findProjectionTargetActual
+#include "RaycastBody.inc"
+#undef findProjectionTarget
 #include "SwapBody.inc"
 bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContext const& context,BlockPos const& cell,
     Block const& b,int aux,ProjectionTarget& target) {
@@ -355,6 +483,12 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
     if(useActualPlanner) return resolveOrientedPlacementActual(player,region,context,cell,b,aux,target);
     if(!planOutcomes[cell.x]) return false;
     target={cell,cell,1,&b,{static_cast<float>(cell.x)+0.5f,0.25f,0.5f}};
+    if (fixtureRealSupportForNative) {
+        BlockPos const support{cell.x,cell.y,cell.z+1};
+        region.cells[support]=b;
+        target.at=support;
+        target.face=static_cast<uchar>(Facing::Name::North);
+    }
     if (queueRotationOnPlan && b.name=="minecraft:piston")
         target.interactionRotation=detail::PlacementInteractionAngles{17.F,90.F};
     return true;
@@ -362,7 +496,15 @@ bool resolveOrientedPlacement(Player& player,BlockSource& region,PlacementContex
 PlacementContext makePlacementContext(Vec3 const& eye,Vec3 const&,float range) { return {eye,range*range}; }
 void consumeBrokenProjectionCells(Player&,std::uint64_t) {}
 void updateAimedProjectedBlockName(Block const*) {}
-std::optional<ProjectionTarget> findProjectionTarget(Player&,Vec3 const&,Vec3 const&,float) { return aimed; }
+std::optional<ProjectionTarget> findProjectionTarget(Player& player,Vec3 const& origin,Vec3 const& dir,float distance,int depth = 1,
+    bool floorBandEnabled = false, std::vector<BlockPos> const* skippedFloorCells = nullptr) {
+    if (useActualRay) return findProjectionTargetActual(player,origin,dir,distance,depth,floorBandEnabled,skippedFloorCells);
+    if (!aimedSequence.empty()) {
+        if (aimedSequenceIndex >= aimedSequence.size()) return aimedSequence.back();
+        return aimedSequence[aimedSequenceIndex++];
+    }
+    return aimed;
+}
 bool isManualPlacementHeldItemAllowed(Player&) { return heldExempt; }
 #include "ExecutorBodies.inc"
 struct FixtureGameMode;
@@ -389,12 +531,16 @@ void check(bool ok,char const* message) {
 }
 using namespace lholo::place;
 void reset(Player& p) {
-    placementState().resetWorldSession();p=Player{};fixtureClient.player=&p;fixtureClient.inputEnabled=true;
+    placementState().resetWorldSession();placementState().setEasyPlaceMaxPerTick(1);
+    p=Player{};p.mInventory.get()->owner=&p;
+    fixtureClient.player=&p;fixtureClient.inputEnabled=true;
+    fixtureHeldSlot=0;fixtureLegacySlotSetterNoop=false;
+    fixtureSuppliesSelectCalls=0;fixtureWireOrder.clear();
     fixtureTime=1000;factoryAvailable=true;clientAvailable=true;fixtureGui=false;heldExempt=false;
-    sent.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::rangeQueries=0;aimed.reset();
+    sent.clear();sentActions.clear();nativeSent.clear();nativeBuildSucceeds=true;gPendingBdsStops.clear();swaps=0;planned=0;plannedCells.clear();planOutcomes.clear();projection::candidates.clear();projection::columnBlocks.clear();projection::rangeQueries=0;aimed.reset();aimedSequence.clear();aimedSequenceIndex=0;useActualRay=false;
     predictionInputs.clear();suppliedPrediction=nullptr;
-    useActualPlanner=false;queueRotationOnPlan=false;
-    orientationProbe=false;throwOnOverride=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
+    useActualPlanner=false;fixtureRealSupportForNative=false;queueRotationOnPlan=false;
+    orientationProbe=false;throwOnOverride=false;fixtureObserverNeedsSelectedItem=false;detail::fixtureRotationBusy=false;detail::rotatedQueueCalls=0;detail::rotatedQueuePitch=0;
     detail::rotatedQueueYaw=0;detail::rotatedQueueStrict=false;detail::rotatedQueueStair=false;
     normalFactoryAvailable=true;normalFactoryCalls=0;swapSent.clear();structure::hints.clear();detail::fixtureTargetStatus=detail::ManualTargetStatus::None;
 }
@@ -449,6 +595,68 @@ int main() {
     projection::candidates={{0,0,0,&stone}};planOutcomes[0]=true;
     tickRangePlaceImpl(player,makePlacementContext({}, {}, 4));
     check(sent.size()==1&&swaps==0,"range sends available hotbar item without a swap");
+
+    // Regression: an actual vanilla sticky-piston stack may differ from the
+    // block-derived combined item/aux key. Its canonical item name is unique;
+    // a normal piston must never satisfy a sticky-piston projection.
+    {
+        reset(player);
+        Block sticky{.name="minecraft:sticky_piston",
+            .states={{"facing_direction","3"}},.mNetworkId=80,.material=2};
+        Block ordinary{.name="minecraft:piston",
+            .states={{"facing_direction","3"}},.mNetworkId=81,.material=3};
+        Block observer{.name="minecraft:observer",
+            .states={{"facing_direction","3"}},.mNetworkId=82,.material=4};
+        player.inventory.items[1]={3,0,64};
+        player.inventory.items[1].itemName="minecraft:piston";
+        player.inventory.items[4]={999,9,64}; // deliberately different getIdAux
+        player.inventory.items[4].itemName="minecraft:sticky_piston";
+        check(findItemSlot(player,sticky).slot==4,
+            "sticky piston fallback finds canonical item despite ID/aux mismatch");
+        check(findItemSlot(snapshotInventory(player),sticky).slot==4,
+            "range snapshot finds sticky piston despite ID/aux mismatch");
+        check(findItemSlot(player,ordinary).slot==1,
+            "vanilla piston remains distinct inventory material");
+        Block stickyIdCollision=sticky;
+        stickyIdCollision.material=3; // bogus block conversion aliases plain piston
+        check(findItemSlot(player,stickyIdCollision).slot==4
+            && findItemSlot(snapshotInventory(player),stickyIdCollision).slot==4,
+            "a colliding block-derived piston ID cannot shadow the sticky item");
+        check(findItemSlot(player,observer).slot<0,
+            "observer does not inherit sticky-piston name fallback");
+        player.selected=4;
+        check(findItemSlot(player,sticky).slot==4
+            && findItemSlot(snapshotInventory(player),sticky,{4,&player.inventory.items[4]}).slot==4,
+            "selected sticky piston stays preferred despite ID/aux mismatch");
+        placementState().setManualMode(true);
+        check(findItemSlot(player,sticky).slot==4,
+            "manual sticky piston uses same canonical fallback");
+        reset(player);
+        player.inventory.items[1]={3,0,64};
+        player.inventory.items[1].itemName="minecraft:piston";
+        check(findItemSlot(player,sticky).slot<0
+            && findItemSlot(snapshotInventory(player),sticky).slot<0,
+            "plain piston never satisfies missing sticky piston");
+    }
+
+    // A queued observer owns the currently selected inventory stack while
+    // AuthInput completes its native facing warmup. No second plan/equipment
+    // may run until the queue is consumed, canceled or expired.
+    {
+        reset(player);placementState().setEnabled(true);
+        player.inventory.items[1]={1,0,64};
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+        planOutcomes[0]=true;
+        detail::fixtureRotationBusy=true;
+        tickEasyPlaceImpl(player);
+        check(planned==0 && fixtureSuppliesSelectCalls==0 && sent.empty()
+            && detail::rotatedQueueCalls==0,
+            "pending rotation blocks any speculative planning or slot changes");
+        detail::fixtureRotationBusy=false;
+        tickEasyPlaceImpl(player);
+        check(planned>=1,
+            "after rotation completion, normal placement planning can resume");
+    }
 
     // Permanently impossible prefix exceeds 16 * (250/50) candidates.
     reset(player);Block oriented{.name="minecraft:piston",.states={},.mNetworkId=2};
@@ -527,6 +735,394 @@ int main() {
     check(state.beginManualPress(1000,state.manualInputEpoch()),"quick tap admitted");state.releaseManualPress();
     tickEasyPlaceImpl(player);fixtureTime=1050;tickEasyPlaceImpl(player);
     check(sent.size()==1&&!state.manualPlaceRequested(),"quick tap sends once after release");
+
+    // The production raycaster (not the test's aimedSequence double) must
+    // translate a top Y-layer crosshair hit into bottom->top column cells.
+    // A solid support wall is present one block behind the hidden projection.
+    {
+        reset(player);
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            auto target=findProjectionTargetActual(player,player.eye,player.view,5,4);
+            check(target.has_value() && target->cell==BlockPos{2,y,4},
+                "production ray picks same column bottom to top, even before server confirmation");
+            if(target) markPlaced(target->cell,fixtureTime);
+        }
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "production ray does not resubmit four in-flight column cells");
+        // ACK of the bottom two cells never changes the ordering of later cells.
+        reset(player);
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        player.region.cells[{2,64,4}]=stone;
+        player.region.cells[{2,65,4}]=stone;
+        auto partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,66,4},
+            "server-acknowledged bottom cells skip to the next higher cell");
+        // Complete upper anchor (non-air) may still uncover unfinished lower cells.
+        player.region.cells[{2,67,4}]=stone;
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,66,4},
+            "placed upper block remains a valid column anchor");
+        Block wrong{.name="minecraft:dirt",.states={},.mNetworkId=777};
+        player.region.cells[{2,67,4}]=wrong;
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "unrelated solid at upper position cannot unlock hidden-column placement");
+        player.region.cells.erase({2,67,4});
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,1);
+        check(partial.has_value() && partial->cell==BlockPos{2,67,4},
+            "depth one preserves top-only placement");
+        // No hidden-column lookup in wrong Y/X/Z or different XZ columns.
+        projection::columnBlocks.clear();
+        partial=findProjectionTargetActual(player,player.eye,player.view,5,4);
+        check(partial.has_value() && partial->cell==BlockPos{2,67,4},
+            "disabled hidden-cell lookup cannot escape visible top layer");
+        projection::candidates.clear();
+        check(!findProjectionTargetActual(player,player.eye,player.view,5,4),
+            "unrelated wall cannot anchor an invisible column");
+    }
+
+    // End-to-end offline scheduler: production ray returns lower Y each time,
+    // producer marks it in-flight, and all four use transactions retain X/Z.
+    // Server acceptance is still a separate live BDS measurement.
+    {
+        reset(player);state.setEnabled(true);state.setEasyPlaceColumnDepth(4);
+        state.setEasyPlaceMaxPerTick(4);useActualRay=true;
+        player.inventory.items[0]={1,0,4};
+        player.eye={2.5f,67.5f,1.5f};player.view={0,0,1};player.reach=5;
+        projection::candidates={{2,67,4,&stone}};
+        for(int y=64;y<=67;++y) {
+            projection::columnBlocks[{2,y,4}]=&stone;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        planOutcomes[2]=true;
+        fixtureRealSupportForNative=true;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==4 && sent.empty(),
+            "source ray + native build submit exactly four real-game actions");
+        if(nativeSent.size()==4) {
+            bool correct=true;
+            for(int i=0;i<4;++i)
+                correct=correct && nativeSent[i].pos==BlockPos{2,64+i,5}
+                    && nativeSent[i].time==1000 && !nativeSent[i].isSimTick;
+            check(correct,"native build preserves bottom-to-top Y64..Y67 in one tick");
+        }
+    }
+
+    // Experimental opaque full blocks delegate to the REAL client GameMode
+    // rather than handwritten inventory transactions. This tests actual
+    // source scheduling and stubbed virtual dispatch, not a real BDS ACK.
+    reset(player);
+    state.setEnabled(true);
+    state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,4};
+    fixtureRealSupportForNative=true;
+    for (int x=0; x<4; ++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(nativeSent.size()==4 && sent.empty() && sentActions.empty(),
+        "four distinct opaque cells dispatch through native GameMode");
+    if(nativeSent.size()==4) {
+        bool distinct=true,sameTick=true;
+        for(int i=0;i<4;++i) {
+            distinct=distinct && nativeSent[i].pos==BlockPos{i,0,1}
+                && nativeSent[i].hand==HandSlot::Mainhand && nativeSent[i].face==2;
+            sameTick=sameTick && nativeSent[i].time==1000
+                && !nativeSent[i].isSimTick;
+        }
+        check(distinct,"native call preserves position/face/hand for every cell");
+        check(sameTick,"four native build attempts occur in one game tick");
+    }
+    fixtureTime=1050;
+    aimedSequenceIndex=0;
+    tickEasyPlaceImpl(player);
+    check(nativeSent.size()==4,"native placement duplicate lock survives next tick");
+    fixtureTime=1150;tickEasyPlaceImpl(player);
+    check(sentActions.empty(),"native placement emits no synthetic BDS stop actions");
+
+    // No invented inventory mutation; prevent oversubscribing the hotbar.
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
+    player.inventory.items[0]={1,0,1};
+    for(int x=0;x<4;++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(nativeSent.size()==1,"one remaining item allows one native placement");
+
+    // A failed native virtual call NEVER falls through to the manual legacy
+    // packet (otherwise failed attempts could double-place).
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;nativeBuildSucceeds=false;
+    tickEasyPlaceImpl(player);
+    check(nativeSent.size()==1 && sent.empty() && sentActions.empty(),
+        "failed native build does not send synthetic packet");
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(nativeSent.size()==2,"false native result does not permanently lock the cell");
+
+    // Missing GameMode is fail-closed; neither dereference nor fallback.
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    player.mGameMode.value.reset();
+    tickEasyPlaceImpl(player);
+    check(nativeSent.empty() && sent.empty(),"missing GameMode is fail-closed");
+
+    // Floating opaque placement cannot use GameMode::buildBlock against
+    // an air support; keep the legacy synthetic click path for this case.
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    player.inventory.items[0]={1,0,5};
+    aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+    planOutcomes[0]=true;
+    tickEasyPlaceImpl(player);
+    check(nativeSent.empty() && sent.size()==1,
+        "floating ordinary block falls back to legacy transaction");
+
+    // 2026-11-13 LIVE BUG: Player::setSelectedSlot can be ineffective on
+    // the client, while Player::getSelectedItemSlot reads the supplies field.
+    // Verify the REAL production helper bypasses the faulty setter and changes
+    // the exact field GameMode::buildBlock uses, even in the same tick.
+    {
+        reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+        fixtureLegacySlotSetterNoop=true;
+        fixtureRealSupportForNative=true;
+        player.inventory.items[1]={1,0,4};
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+        planOutcomes[0]=true;
+        tickEasyPlaceImpl(player);
+        check(player.selected==1 && fixtureSuppliesSelectCalls==1,
+            "real supplies selectSlot fixes broken Player setter");
+        check(nativeSent.size()==1 && sent.empty(),
+            "real supplies selection permits same-tick native build");
+        check(fixtureWireOrder==
+            std::vector<std::pair<std::string,int>>({{"equip",1},{"build",1}}),
+            "real selection precedes equipment then native build");
+    }
+
+    // A nonnative/floating target must still send a real equipment change
+    // and then attempt legacy placement on the following tick. Previously
+    // the automatic mode changed the slot locally but returned with no
+    // equipment packet; BDS could keep the old (stone) item indefinitely.
+    {
+        reset(player);
+        state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+        player.inventory.items[1]={1,0,4};
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}};
+        planOutcomes[0]=true;
+        tickEasyPlaceImpl(player);
+        check(sent.empty() && nativeSent.empty()
+            && fixtureWireOrder==std::vector<std::pair<std::string,int>>(
+                 {{"equip",1}}),
+            "nonnative automatic slot change sends equipment before deferring");
+        fixtureTime=1050;
+        tickEasyPlaceImpl(player);
+        check(sent.size()==1 && nativeSent.empty() && player.selected==1,
+            "nonnative deferred cell is sent with correct selected item next tick");
+    }
+
+    // Default 1/tick retains historical legacy transaction behaviour.
+    reset(player);
+    state.setEnabled(true);state.setEasyPlaceMaxPerTick(1);
+    player.inventory.items[0]={1,0,64};
+    for(int x=0;x<4;++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&stone,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==1 && nativeSent.empty(),
+        "default one/tick retains server ItemUse transaction");
+
+    // Fast mixed-material wall: four DIFFERENT hotbar selections must
+    // submit in the SAME client tick, each equipment message immediately
+    // before its corresponding native GameMode::buildBlock call.
+    {
+        reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+        state.setEasyPlaceColumnDepth(4);
+        fixtureRealSupportForNative=true;useActualRay=true;
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=22,.material=2};
+        Block deepslate{.name="minecraft:cobbled_deepslate",
+            .states={},.mNetworkId=23,.material=3};
+        player.inventory.items[0]={1,0,2};
+        player.inventory.items[1]={2,0,1};
+        player.inventory.items[2]={3,0,1};
+        player.eye={2.5f,67.5f,1.5f};
+        player.view={0,0,1};player.reach=5;
+        for (int y=64;y<=67;++y) {
+            Block const* b=(y==65?&blackstone:(y==67?&deepslate:&stone));
+            projection::columnBlocks[{2,y,4}]=b;
+            player.region.cells[{2,y,5}]=stone;
+        }
+        projection::candidates={{2,67,4,&deepslate}};
+        planOutcomes[2]=true;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==4 && sent.empty(),
+            "mixed wall sends four native builds in one client tick");
+        if(nativeSent.size()==4) {
+            bool correct=true;
+            for(int i=0;i<4;++i)
+                correct &= nativeSent[i].pos==BlockPos{2,64+i,5}
+                    && nativeSent[i].time==1000;
+            check(correct,"mixed wall native targets stay bottom-up in same tick");
+        }
+        auto const expected=std::vector<std::pair<std::string,int>>{
+            {"build",0},{"equip",1},{"build",1},
+            {"equip",0},{"build",0},{"equip",2},{"build",2}};
+        check(fixtureWireOrder==expected,
+            "wire order alternates equipment and native placement per material");
+        check(player.selected==2 && player.setSlotCalls==3,
+            "hotbar changes are bounded and match final selected material");
+    }
+
+    // Observer regression: the native predictor sees the actual held item.
+    // The observer is present in slot 1 but stone is selected in slot 0.
+    // Simulate the held-item-sensitive native boundary; never equate this
+    // fixture with proof of server placement in a real Minecraft world.
+    for (bool manual : {false, true}) {
+        reset(player);
+        if (manual) state.setManualMode(true); else state.setEnabled(true);
+        Block observer{.name="minecraft:observer",
+            .states={{"facing_direction","3"},{"powered_bit","0"}},
+            .mNetworkId=24,.material=2};
+        player.inventory.items[0]={1,0,64};
+        player.inventory.items[1]={2,0,64};
+        player.region.cells[{0,-1,0}]=stone;
+        aimed=ProjectionTarget{{0,0,0},{0,-1,0},1,&observer,{.5f,0.f,.5f}};
+        orientationProbe=true;
+        fixtureObserverNeedsSelectedItem=true;
+        useActualPlanner=true;
+        if (manual) check(state.beginManualPress(fixtureTime,state.manualInputEpoch()),
+            "manual observer starts with nonselected material");
+        tickEasyPlaceImpl(player);
+        check(player.selected==1 && fixtureSuppliesSelectCalls==1,
+            "observer prediction selects real inventory slot before native predictor");
+        check(fixtureWireOrder==std::vector<std::pair<std::string,int>>({{"equip",1}})
+            && detail::rotatedQueueCalls==0,
+            "observer initial selection sends equipment and defers rotated use");
+        fixtureTime=1050;
+        tickEasyPlaceImpl(player);
+        check(detail::rotatedQueueCalls==1 && detail::rotatedQueueStrict,
+            "observer rotated placement queues on next tick after equipment sync");
+    }
+    {
+        reset(player);state.setEnabled(true);
+        Block impossible{.name="minecraft:observer",
+            .states={{"facing_direction","99"}},.mNetworkId=25,.material=2};
+        player.inventory.items[0]={1,0,64};
+        player.inventory.items[1]={2,0,64};
+        player.region.cells[{0,-1,0}]=stone;
+        aimed=ProjectionTarget{{0,0,0},{0,-1,0},1,&impossible,{.5f,0.f,.5f}};
+        orientationProbe=true;fixtureObserverNeedsSelectedItem=true;
+        useActualPlanner=true;
+        tickEasyPlaceImpl(player);
+        check(player.selected==0 && fixtureSuppliesSelectCalls==2
+            && fixtureWireOrder.empty() && detail::rotatedQueueCalls==0,
+            "failed observer prediction restores original held slot without equipment");
+    }
+
+    // A one-item stack cannot be spent twice even if selected away and back
+    // to it within a burst. No speculative inventory count mutation.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceMaxPerTick(4);
+        fixtureRealSupportForNative=true;
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=22,.material=2};
+        player.inventory.items[0]={1,0,1};
+        player.inventory.items[1]={2,0,2};
+        for(auto const& [x,b]:std::vector<std::pair<int,Block const*>>{
+            {0,&stone},{1,&blackstone},{2,&stone},{3,&blackstone}}) {
+            planOutcomes[x]=true;
+            aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,b,
+                {static_cast<float>(x)+.5f,.25f,.5f}});
+        }
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==2,
+            "per-slot budget refuses second use of a 1-item stone stack");
+        check(player.inventory.items[0].count==1
+            && player.inventory.items[1].count==2,
+            "fixture inventory is never speculatively decremented");
+    }
+
+    // Non-full or orientation-sensitive blocks must not be mixed into a
+    // prior opaque native burst, even if their material is in the hotbar.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
+        Block stair{.name="minecraft:stone_stairs",
+            .states={{"weirdo_direction","0"}},.mNetworkId=33,.material=2};
+        player.inventory.items[0]={1,0,4};player.inventory.items[1]={2,0,4};
+        aimedSequence.push_back(ProjectionTarget{{0,0,0},{0,0,0},1,&stone,{.5f,.25f,.5f}});
+        aimedSequence.push_back(ProjectionTarget{{1,0,0},{1,0,0},1,&stair,{1.5f,.25f,.5f}});
+        planOutcomes[0]=planOutcomes[1]=true;
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==1 && sent.empty() && player.selected==0,
+            "opaque then stair does not attempt mixed native/legacy burst");
+    }
+
+    // A different initial selected item must switch before the first native
+    // build too, not just during slot changes later in the burst.
+    {
+        reset(player);state.setEnabled(true);
+        state.setEasyPlaceMaxPerTick(4);fixtureRealSupportForNative=true;
+        Block blackstone{.name="minecraft:polished_blackstone_bricks",
+            .states={},.mNetworkId=22,.material=2};
+        player.inventory.items[1]={2,0,4};
+        planOutcomes[0]=true;
+        aimed=ProjectionTarget{{0,0,0},{0,0,0},1,&blackstone,{.5f,.25f,.5f}};
+        tickEasyPlaceImpl(player);
+        check(nativeSent.size()==1 && fixtureWireOrder==
+            std::vector<std::pair<std::string,int>>({{"equip",1},{"build",1}}),
+            "initial nonselected item is equipped before same-tick native build");
+    }
+
+    // Connectivity blocks still use the existing start/transaction/stop
+    // path rather than imposing GameMode builds on view-sensitive material.
+    reset(player);state.setEnabled(true);state.setEasyPlaceMaxPerTick(4);
+    Block wall{.name="minecraft:cobblestone_wall",.states={},.mNetworkId=5,.material=1};
+    player.inventory.items[0]={1,0,4};
+    for(int x=0;x<4;++x) {
+        planOutcomes[x]=true;
+        aimedSequence.push_back(ProjectionTarget{{x,0,0},{x,0,0},1,&wall,
+            {static_cast<float>(x)+.5f,.25f,.5f}});
+    }
+    tickEasyPlaceImpl(player);
+    check(sent.size()==4 && sentActions.size()==4 && nativeSent.empty(),
+        "connectivity wall retains staged BDS ItemUse path");
+    if(sent.size()==4) {
+        bool counts=true;
+        for(int i=0;i<4;++i)
+            counts=counts && sent[i].item.count==4-i && sent[i].time==1000;
+        check(counts,"legacy connectivity burst retains predicted stack limits");
+    }
+    fixtureTime=1050;tickEasyPlaceImpl(player);
+    check(sentActions.size()==4,"BDS stop actions remain delayed at 50ms");
+    fixtureTime=1150;tickEasyPlaceImpl(player);
+    check(sentActions.size()==8,"BDS legacy stops are emitted at 150ms");
+    if(sentActions.size()==8) for(int i=0;i<4;++i) {
+        check(sentActions[4+i].action==PlayerActionType::StopItemUseOn,
+            "legacy use lifecycle finishes each placement");
+    }
 
     // Real send guard + unchanged 500ms window, next tick inventory boundary.
     reset(player);player.inventory.items[19]={1,0,64};projection::candidates={{0,0,0,&stone}};planOutcomes[0]=true;

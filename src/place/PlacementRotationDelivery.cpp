@@ -285,17 +285,29 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         traceFlexibleDelivery("validate=%d face=%u requestedYaw=%.2f nativeYaw=%.2f cell=%d,%d,%d",
             valid,unsigned(request->face),request->yaw,input.mRot.get().y,
             request->cell.x,request->cell.y,request->cell.z);
-    if (!valid) { origin(packet);return; }
-    // Both Praxis FlexiblePlacement and LHolo EasyPlace/Manual/Range use the
-    // same server-authoritative rotation protocol. The first two native input
-    // ticks establish a different facing before a real item-use is attached.
-    // Already-aligned LHolo placements use the current native tick directly.
-    // A just-turned camera can already match the desired yaw on THIS native
-    // packet while the server still has the previous yaw. Always pre-roll
-    // stairs, including when the local packet's rotations appear aligned.
-    bool const needsWarmup=request->strictStair || needsOrientationWarmup(request->external,
-        request->requireNativeRotationSync,input.mRot.get().x,input.mRot.get().y,
-        request->pitch,request->yaw);
+    if (!valid) {
+        // Capture a bounded diagnostic for live failures. A queued placement
+        // can be canceled by an inventory change, world update, UI transition
+        // or epoch change before the native input arrives; no placement is sent.
+        if (!request->external)
+            traceFlexibleDelivery("LHOLO_ROTATION_DROP cell=%d,%d,%d slot=%d selected=%d epoch=%llu currentEpoch=%llu expiresIn=%lld",
+                request->cell.x,request->cell.y,request->cell.z,request->slot,
+                client->getLocalPlayer()
+                    ? client->getLocalPlayer()->getSelectedItemSlot() : -1,
+                static_cast<unsigned long long>(request->epoch),
+                static_cast<unsigned long long>(PlacementState::getInstance().manualInputEpoch()),
+                static_cast<long long>(request->expires)-static_cast<long long>(GetTickCount64()));
+        origin(packet);return;
+    }
+    // LHolo's native planner already proved the full target block state for
+    // the requested pitch/yaw. Deliver its item-use on the FIRST available
+    // genuine AuthInput with mRot, interact rotation, head and camera aligned
+    // in that same packet (the integrated-server receiver additionally
+    // borrows the verified facing for the one matching transaction). There is
+    // no 2-tick prime on LHolo Easy Place, Manual or Range, including stairs.
+    // External Praxis requests retain their separate tested BDS pre-roll
+    // protocol; do not change another feature's owner/authority contract.
+    bool const needsWarmup=request->external && request->requireNativeRotationSync;
     std::optional<ScopedExternalInputRotation> externalRotation;
     if (request->requireNativeRotationSync) {
         auto const tick=static_cast<std::uint64_t>(input.mClientTick.get().mValue);
@@ -332,7 +344,7 @@ LL_TYPE_INSTANCE_HOOK(RotationAuthInputHook,ll::memory::HookPriority::Normal,
         if (!request->external && request->requireNativeRotationSync) {
             rememberLocalPlacementRotation(*request->player,request->cell,*tx,
                 request->pitch,request->yaw,0x4C486F6C6F455059ULL,
-                request->epoch+1U);
+                request->epoch+1U,request->ghostId);
         }
         if (request->external && request->requireNativeRotationSync)
             traceFlexibleDelivery("BDS_PROTOCOL_ONLY local-receiver-override=0 primes=%u",request->warmup.primes);
@@ -548,7 +560,9 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
     if (pending && pending->external) return false;
     // An existing pending AuthInput placement owns this tick; a second
     // legacy placement would change the selected stack and invalidate it.
-    if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return true;
+    // Never report a NEW request as queued while another request owns the
+    // AuthInput pipeline. The old behavior silently discarded the new cell.
+    if (pending && pending->expires>now && pending->epoch==state.manualInputEpoch()) return false;
     pending.reset();
     auto payload=std::make_unique<InventoryTransactionPacketPayload>(std::move(tx),true);
     pending.emplace(PendingRotation{&player,std::this_thread::get_id(),state.manualInputEpoch(),now+500,
@@ -556,6 +570,21 @@ bool queueRotationPlacement(LocalPlayer& player,BlockPos const& cell,std::int64_
         std::move(payload)});
     pending->strictStair=requireStairWarmup && requireNativeRotationSync;
     return true;
+}
+
+bool rotationPlacementBusy(LocalPlayer const& player) noexcept {
+    // An admitted facing-sensitive transaction owns the selected slot while
+    // native AuthInput ticks synchronize BDS orientation. Avoid hotbar changes
+    // or new placement requests until forwarding, expiration or cancellation.
+    std::lock_guard lock(pendingMutex);
+    if (!pending) return false;
+    auto const now=GetTickCount64();
+    auto const epoch=PlacementState::getInstance().manualInputEpoch();
+    if (pending->expires<=now || pending->epoch!=epoch) {
+        pending.reset();
+        return false;
+    }
+    return pending->player==&player;
 }
 
 bool queueExternalRotationPlacement(LocalPlayer& player, BlockPos const& cell,

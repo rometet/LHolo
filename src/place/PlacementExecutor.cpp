@@ -23,6 +23,9 @@
 #include "place/PlacementRotationCandidates.h"
 #include "place/PlacementRotationDelivery.h"
 #include "place/PlacementDispatchResult.h"
+#include "place/EasyPlaceBurstPolicy.h"
+#include "place/FloorBandGeometry.h"
+#include "plugin/LHolo.h"
 #include "place/EasyPlaceTelemetry.h"
 #include "app/NativeCallbackBoundary.h"
 #include "place/VoxelRayAxis.h"
@@ -43,11 +46,14 @@
 #include "mc/deps/core/math/Vec3.h"
 #include "mc/network/PacketSender.h"
 #include "mc/network/packet/InventoryTransactionPacket.h"
+#include "mc/network/packet/MobEquipmentPacket.h"
+#include "mc/network/packet/PlayerActionPacket.h"
 #include "mc/world/Facing.h"
 #include "mc/world/gamemode/GameMode.h"
 #include "mc/world/ContainerID.h"
 #include "mc/world/actor/player/Inventory.h"
 #include "mc/world/actor/player/Player.h"
+#include "mc/world/actor/player/PlayerInventory.h"
 #include "mc/world/inventory/transaction/ComplexInventoryTransaction.h"
 #include "mc/world/inventory/transaction/InventoryAction.h"
 #include "mc/world/inventory/transaction/InventorySource.h"
@@ -73,6 +79,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -81,6 +88,7 @@
 #include <mutex>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 namespace lholo::place {
 
@@ -177,11 +185,24 @@ struct ItemFind {
     ItemStack const* item;
 };
 
-// Reuse a material already held in the active hotbar before searching other
-// stacks. Both item and aux must match the existing official conversion;
-// orientation state is still verified separately by getPlacementBlock.
-bool matchesPlacementItem(ItemStack const& held,
+// Bedrock has one vanilla sticky-piston inventory item (the block's facing,
+// extended and powered states are not item variants). A block-derived stack
+// may have a different combined ID/aux than the actual held stack. For this
+// one block, require the canonical item name instead of trusting ID/aux;
+// never match an ordinary piston or relax identity for other families.
+bool matchesStickyPistonInventoryName(ItemStack const& held, Block const& ghost) {
+    return !held.isNull()
+        && ghost.getTypeName() == "minecraft:sticky_piston"
+        && held.getTypeName() == "minecraft:sticky_piston";
+}
+
+// Reuse material already held in the active hotbar before searching other
+// stacks. Other materials retain the existing combined item/aux identity;
+// piston facing is always verified separately by native placement prediction.
+bool matchesPlacementItem(ItemStack const& held, Block const& ghost,
     ItemStack const& exactWant, ItemStack const& neutralWant) {
+    if (ghost.getTypeName() == "minecraft:sticky_piston")
+        return matchesStickyPistonInventoryName(held, ghost);
     return !held.isNull() &&
         ((!exactWant.isNull() && held.getIdAux() == exactWant.getIdAux()) ||
          (!neutralWant.isNull() && held.getIdAux() == neutralWant.getIdAux()));
@@ -258,10 +279,20 @@ ItemFind findItemSlot(Player& player, Block const& block) {
     auto const selected = player.getSelectedItemSlot();
     if (selected >= 0 && selected < kHotbarSlots) {
         auto const& held = inventory.getItem(selected);
-        if (matchesPlacementItem(held, exactWant, neutralWant))
+        if (matchesPlacementItem(held, block, exactWant, neutralWant))
             return {selected, &held};
     }
 
+    // Sticky pistons must not accidentally match an ordinary piston through a
+    // runtime combined-ID collision or a bad block->item conversion. Resolve
+    // the one exact canonical vanilla name and return without an ID fallback.
+    if (block.getTypeName() == "minecraft:sticky_piston") {
+        for (int slot = 0; slot < kInventorySlots; ++slot) {
+            auto const& item = inventory.getItem(slot);
+            if (matchesStickyPistonInventoryName(item, block)) return {slot, &item};
+        }
+        return {-1, nullptr};
+    }
     // First preserve the exact native Block -> Item conversion used by manual
     // placement, including any true material aux value.
     if (!exactWant.isNull()) {
@@ -308,8 +339,20 @@ ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block,
     ItemStack const neutralWant = block::makePlacementItem(block);
     if (selectedItem.slot >= 0 && selectedItem.slot < kHotbarSlots
         && selectedItem.item
-        && matchesPlacementItem(*selectedItem.item, exactWant, neutralWant)) {
+        && matchesPlacementItem(*selectedItem.item, block, exactWant, neutralWant)) {
         return selectedItem;
+    }
+
+    // Range placement uses the same canonical sticky-piston identity as
+    // single-cell Easy Place. Do not accept an ordinary piston by ID accident.
+    if (block.getTypeName() == "minecraft:sticky_piston") {
+        ItemFind best{-1, nullptr};
+        for (auto const& [key, candidate] : snapshot) {
+            (void)key;
+            if (candidate.item && matchesStickyPistonInventoryName(*candidate.item, block)
+                && (best.slot < 0 || candidate.slot < best.slot)) best = candidate;
+        }
+        return best;
     }
 
     auto findByIdAux = [&](ItemStack const& want) -> ItemFind {
@@ -323,11 +366,12 @@ ItemFind findItemSlot(InventorySnapshot const& snapshot, Block const& block,
 
     auto exact = findByIdAux(exactWant);
     if (exact.slot >= 0) return exact;
-    if (neutralWant.isNull()
-        || (!exactWant.isNull() && neutralWant.getIdAux() == exactWant.getIdAux())) {
-        return {-1, nullptr};
+    if (!neutralWant.isNull()
+        && (exactWant.isNull() || neutralWant.getIdAux() != exactWant.getIdAux())) {
+        auto neutral = findByIdAux(neutralWant);
+        if (neutral.slot >= 0) return neutral;
     }
-    return findByIdAux(neutralWant);
+    return {-1, nullptr};
 }
 
 // Server-synced slot exchange expressed as a legacy NormalTransaction: both
@@ -359,7 +403,7 @@ bool sendInventorySwap(int fromSlot, int toSlot, ItemStack const& fromItem, Item
 
 // Pick which hotbar slot a backpack item should swap into. Prefer an empty slot
 // so the player's held items are never evicted, and so two materials never
-// thrash through a single slot — each lands in its own empty slot and stays
+// thrash through a single slot 窶・each lands in its own empty slot and stays
 // there (next tick it is already in the bar, no further swap). Only when the
 // hotbar is completely full do we fall back to the currently selected slot.
 int chooseHotbarSwapTarget(Player& player) {
@@ -387,6 +431,36 @@ void preselectPendingEmptyHotbarSlot(Player& player,int hotbarSlot) {
     player.setSelectedSlot(hotbarSlot);
 }
 
+// The canonical selected-slot field is PlayerInventory::mSelected (the
+// implementation of Player::getSelectedItemSlot() reads that field). On a
+// native client, Player::setSelectedSlot() can return without changing it;
+// the 2026-11-13 live probe counted selectMismatch=55/55. Use the actual
+// PlayerInventory::selectSlot API, then verify its result before any network
+// notification or placement. Never attempt a build using a stale item.
+bool selectActualHotbarSlot(LocalPlayer& player, int slot) {
+    if (slot<0 || slot>=kHotbarSlots) return false;
+    if (player.getSelectedItemSlot()==slot) return true;
+    auto const& supplies=player.mInventory.get();
+    if (!supplies || !supplies->selectSlot(slot,ContainerID::Inventory))
+        return false;
+    return player.getSelectedItemSlot()==slot;
+}
+
+// The Bedrock client sends MobEquipment (not PlayerHotbar) when the hotbar
+// selection changes. Explicitly publish the selected item BEFORE the native
+// build call for this experimental mixed-material same-tick sequence. The
+// server remains authoritative; this is a transmission, not an acceptance.
+bool sendEquipmentBeforeNativeBuild(LocalPlayer& player, int slot, ItemStack const& item) {
+    auto client=ll::service::getClientInstance();
+    if (!client || client->getLocalPlayer()!=&player
+        || slot<0 || slot>=kHotbarSlots || item.isNull()) return false;
+    MobEquipmentPacket packet(MobEquipmentPacketPayload(
+        player.getRuntimeID(),item,slot,slot,ContainerID::Inventory
+    ));
+    client->getPacketSender().sendToServer(packet);
+    return true;
+}
+
 // Inventory acknowledgements are observed through both local slot images. A
 // completed swap may unlock the next material immediately rather than waiting
 // out the former unconditional 200ms throttle. A missing/rejected response
@@ -396,6 +470,16 @@ int swapCount(Stack const& stack) {
     if (stack.isNull()) return 0;
     if constexpr (requires { stack.mCount; }) return static_cast<int>(stack.mCount);
     else return stack.count; // Portable fixture stack.
+}
+// Only the serialized item copy is adjusted. Never mutate the player's real
+// inventory; server reconciliation remains authoritative.
+template <class Stack>
+void setBurstPacketItemCount(Stack& stack, int count) {
+    if constexpr (requires { stack.mCount; }) {
+        stack.mCount = static_cast<decltype(stack.mCount)>(count);
+    } else {
+        stack.count = count; // Portable fixture stack.
+    }
 }
 int swapAux(ItemStack const& stack) {
     return stack.isNull() ? -1 : stack.getIdAux();
@@ -434,6 +518,7 @@ struct ProjectionTarget {
     Vec3         clickPos{};  // Exact click point; chosen to reproduce the ghost.
     std::optional<detail::PlacementInteractionAngles> interactionRotation{};
     bool requireNativeRotationSync{}; // fail-closed stairs; never spoof movement/head
+    bool floorBand{}; // geometry only; the same executor sends wall and floor cells
 };
 
 // Which face of a cell points most along the given (unit) direction.
@@ -479,6 +564,10 @@ ProjectionTarget selectPlacementTarget(BlockSource& region, BlockPos const& cell
     return ProjectionTarget{cell, neighborOf(cell, bestFace), oppositeFace(bestFace), block};
 }
 
+// Shared by the full placement predictor below. For a placed top cell, its
+// non-connection states must still match before it can anchor a column.
+bool manualSerializedPlacementMatches(Block const& predicted, Block const& ghost);
+
 // Voxel raycast (Amanatides & Woo) against the real world plus the projection's
 // virtual grid. The vanilla crosshair hit result never sees LHolo's drawn ghost
 // blocks, so the ray is traced manually: real blocks block it, projected
@@ -487,12 +576,94 @@ std::optional<ProjectionTarget> findProjectionTarget(
     LocalPlayer& player,
     Vec3 const&  origin,
     Vec3 const&  dir,
-    float        maxDist
+    float        maxDist,
+    int          columnDepth = 1,
+    bool         floorBandEnabled = false,
+    std::vector<BlockPos> const* skippedFloorCells = nullptr
 ) {
     auto const rayOrigin = projection::detail::checkedVoxelRayOrigin(
         {origin.x, origin.y, origin.z}, {dir.x, dir.y, dir.z}, maxDist);
     if (!rayOrigin) return std::nullopt;
     auto& region = player.getDimensionBlockSource();
+
+    // A horizontal floor has projected neighbors on BOTH X and Z. A vertical
+    // 4x4 wall has only one horizontal axis; aiming at its upper face must
+    // keep the existing bottom-up wall path rather than turn into a floor.
+    auto const isFloorAnchor = [&](BlockPos const& aim) {
+        if (!projection::queryProjection(player, aim).block) return false;
+        auto const hasAxis = [&](bool alongX) {
+            int const value = alongX ? aim.x : aim.z;
+            if (value < (std::numeric_limits<int>::max)()) {
+                BlockPos const plus = alongX
+                    ? BlockPos{value + 1, aim.y, aim.z}
+                    : BlockPos{aim.x, aim.y, value + 1};
+                if (projection::queryProjection(player, plus).block) return true;
+            }
+            if (value > (std::numeric_limits<int>::min)()) {
+                BlockPos const minus = alongX
+                    ? BlockPos{value - 1, aim.y, aim.z}
+                    : BlockPos{aim.x, aim.y, value - 1};
+                if (projection::queryProjection(player, minus).block) return true;
+            }
+            return false;
+        };
+        return hasAxis(true) && hasAxis(false);
+    };
+
+    // Only an explicitly aimed top face of a projected cell can open the
+    // horizontal strip. Never scan arbitrary nearby rows, or change the Y
+    // layer just because a player is standing at a different elevation.
+    auto const selectFloorBand = [&](BlockPos const& aim) -> std::optional<ProjectionTarget> {
+        auto const anchor = projection::queryProjection(player, aim);
+        if (!anchor.block) return std::nullopt;
+        detail::FloorBandCell const originCell{aim.x, aim.y, aim.z};
+        // The aimed cell is offset zero. Each additional candidate advances
+        // one cell along the horizontal viewing direction, never sideways.
+        static std::optional<detail::FloorBandCell> lastLoggedAim;
+        if (!lastLoggedAim || *lastLoggedAim != originCell) {
+            lastLoggedAim = originCell;
+            LHolo::getInstance().getSelf().getLogger().debug(
+                "EasyPlace floor forward aim=({},{},{}) view=({},{}) offsets=[0,1,2,3]",
+                aim.x, aim.y, aim.z, dir.x, dir.z
+            );
+        }
+        for (int offset : detail::kFloorBandOffsets) {
+            auto const pos = detail::floorBandCell(originCell, dir.x, dir.z, offset);
+            if (!pos) continue;
+            BlockPos const cell{pos->x, pos->y, pos->z};
+            if (skippedFloorCells && std::find(skippedFloorCells->begin(),
+                    skippedFloorCells->end(), cell) != skippedFloorCells->end()) continue;
+            if (recentlyPlaced(cell, GetTickCount64()) || !region.getBlock(cell).isAir()) continue;
+            auto const query = projection::queryPlacementProjection(player, cell);
+            if (!query.block || !query.missing) continue;
+            auto selected = selectPlacementTarget(region, cell, dir, query.block);
+            selected.floorBand = true;
+            return selected;
+        }
+        return std::nullopt;
+    };
+
+    // An aimed upper ghost (or an already built upper anchor) identifies ONE
+    // X/Z column.  Unlike the previous top-first implementation, scan the
+    // eligible 1..4 cells from BOTTOM TO TOP.  Never retarget other columns:
+    // only the exact visible aimed cell can open this hidden-layer lookup.
+    // Recently transmitted cells are pending, not server acknowledgements;
+    // skip those to allow a bounded same-tick burst without duplicate sends.
+    auto const selectColumnBottomUp = [&](BlockPos const& upper)
+        -> std::optional<ProjectionTarget> {
+        if (columnDepth <= 1) return std::nullopt;
+        std::optional<ProjectionTarget> selected;
+        int const chosenOffset = detail::firstEligibleBottomUpColumnOffset(columnDepth, [&](int offset) {
+            if (upper.y < (std::numeric_limits<int>::min)() + offset) return false;
+            BlockPos const cell{upper.x, upper.y - offset, upper.z};
+            if (recentlyPlaced(cell, GetTickCount64())) return false;
+            auto const query = projection::queryEasyPlaceColumnCell(player, cell);
+            if (!query.block || !query.missing) return false;
+            selected = selectPlacementTarget(region, cell, dir, query.block);
+            return true;
+        });
+        return chosenOffset >= 0 ? selected : std::nullopt;
+    };
 
     auto const axisX = detail::voxelRayAxis(origin.x, (*rayOrigin)[0], dir.x);
     auto const axisY = detail::voxelRayAxis(origin.y, (*rayOrigin)[1], dir.y);
@@ -535,18 +706,100 @@ std::optional<ProjectionTarget> findProjectionTarget(
             BlockPos const neighbor = neighborOf(cell, entryFace);
             auto const query = projection::queryPlacementProjection(player, neighbor);
             if (neighbor != originCell && query.block && query.missing) {
-                return ProjectionTarget{neighbor, cell, entryFace, query.block};
+                if (floorBandEnabled
+                    && (entryFace == static_cast<uchar>(Facing::Name::Up) || dir.y < -0.2f)
+                    && isFloorAnchor(neighbor))
+                    return selectFloorBand(neighbor);
+                if (auto lower = selectColumnBottomUp(neighbor)) return lower;
+                if (!recentlyPlaced(neighbor, GetTickCount64()))
+                    return ProjectionTarget{neighbor, cell, entryFace, query.block};
+            }
+            // A completed floor cell stays a valid strip anchor while adjacent
+            // projected floor cells remain missing. Do not treat an unrelated
+            // solid wall as a horizontal anchor.
+            if (floorBandEnabled
+                && (entryFace == static_cast<uchar>(Facing::Name::Up) || dir.y < -0.2f)
+                && isFloorAnchor(cell)) {
+                auto const anchor = projection::queryProjection(player, cell);
+                if (anchor.block && anchor.block->mNetworkId == region.getBlock(cell).mNetworkId)
+                    return selectFloorBand(cell);
+            }
+            // A completed upper layer may physically occlude the missing
+            // blocks beneath it.  Only an exact matching projection block
+            // may be used as a column anchor (not an arbitrary solid wall).
+            if (columnDepth > 1) {
+                auto const top = projection::queryProjection(player, cell);
+                auto const& placedTop = region.getBlock(cell);
+                if (top.block && (top.block->mNetworkId == placedTop.mNetworkId
+                    || (detail::isVanillaConnectivityPlacementBlock(top.block->getTypeName())
+                        && placedTop.getTypeName() == top.block->getTypeName()
+                        && manualSerializedPlacementMatches(placedTop, *top.block)))) {
+                    if (auto lower = selectColumnBottomUp(cell)) return lower;
+                }
             }
             break;
         }
         auto const query = projection::queryPlacementProjection(player, cell);
         if (!query.block || !query.missing) continue;
+        if (floorBandEnabled
+            && (entryFace == static_cast<uchar>(Facing::Name::Up) || dir.y < -0.2f)
+            && isFloorAnchor(cell))
+            return selectFloorBand(cell);
 
-        // The ghost itself is the target; reuse the shared support selection
-        // (real neighbor preferred, air-mPos fallback when floating).
-        return selectPlacementTarget(region, cell, dir, query.block);
+        // An aimed upper ghost stays the anchor even after sending the lower
+        // cells.  The next burst slot advances bottom-up instead of treating
+        // the freshly sent top cell as the only reachable target.
+        if (auto lower = selectColumnBottomUp(cell)) return lower;
+        if (!recentlyPlaced(cell, GetTickCount64()))
+            return selectPlacementTarget(region, cell, dir, query.block);
     }
     return std::nullopt;
+}
+
+// Predeclared: fast opaque classification is defined below the send path.
+bool isFastOpaquePlacementCandidate(Block const& block);
+bool canNativeBurstPlace(ProjectionTarget const& target);
+
+// BDS item-use lifecycle staging. Vanilla 1.26.51 captures pair a
+// StartItemUseOn action with ItemUse and send StopItemUseOn ~150ms later.
+// The older direct inventory transaction remains the default for 1/tick.
+// Only the explicitly experimental multi-send Easy Place path uses this.
+// Running exclusively on the local player's game tick avoids new hooks/threads.
+struct PendingBdsItemUseStop {
+    BlockPos target;
+    ActorRuntimeID runtimeId;
+    LocalPlayer* player;
+    Level* level;
+    std::uint64_t stopAt;
+};
+std::vector<PendingBdsItemUseStop> gPendingBdsStops;
+constexpr std::uint64_t kBdsItemUseStopDelayMs = 150;
+void sendBdsUseAction(PacketSender& sender, ActorRuntimeID id,
+                      PlayerActionType action, BlockPos const& pos,
+                      BlockPos const& resultPos, int face) {
+    PlayerActionPacket packet;
+    packet.mRuntimeId.get() = id;
+    packet.mAction = action;
+    packet.mPos.get() = pos;
+    packet.mResultPos.get() = resultPos;
+    packet.mFace = face;
+    packet.mIsFromServerPlayerMovementSystem = false;
+    sender.sendToServer(packet);
+}
+void flushPendingBdsUseStops(LocalPlayer& player, PacketSender& sender) {
+    auto const now = GetTickCount64();
+    auto const id = player.getRuntimeID();
+    for (auto it = gPendingBdsStops.begin(); it != gPendingBdsStops.end();) {
+        // Never send an old world's stop action to the new world/session.
+        if (it->player != &player || it->level != &player.getLevel()
+            || it->runtimeId != id) {
+            it = gPendingBdsStops.erase(it);
+        } else if (now >= it->stopAt) {
+            sendBdsUseAction(sender,id,PlayerActionType::StopItemUseOn,
+                it->target,BlockPos{0,0,0},0);
+            it = gPendingBdsStops.erase(it);
+        } else ++it;
+    }
 }
 
 detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget const& target, int slot, ItemStack const& item) {
@@ -559,6 +812,40 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     }
     auto& region = player.getDimensionBlockSource();
     if (!region.getBlock(target.cell).isAir()) return detail::PlacementDispatchResult::Rejected;
+
+    // Prefer the 26.60 native client placement path for experimental opaque
+    // Easy Place bursts. The previous handwritten multi-use ItemUse packets
+    // reported four submissions but BDS accepted only one, then waited for
+    // 500ms retry locks. GameMode::buildBlock is the same in-game placement
+    // entry point used by the Bedrock Baritone builder. It owns the selected
+    // item / inventory authority and wire serialization; never emit a second
+    // synthetic transaction as fallback after a native attempt.
+    // Manual, Range, oriented blocks and default 1/tick keep the old path.
+    bool const useNativeBuild = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && placementState().easyPlaceMaxPerTick() > 1
+        && !target.interactionRotation
+        && target.at != target.cell
+        && !region.getBlock(target.at).isAir()
+        && canNativeBurstPlace(target);
+    if (useNativeBuild) {
+        auto const& gameMode = player.mGameMode.get();
+        if (!gameMode) {
+            telemetry::count(telemetry::Event::NativeNoGameMode);
+            return detail::PlacementDispatchResult::Rejected;
+        }
+        telemetry::count(telemetry::Event::NativeAttempt);
+        // The actual 26.60 LeviLamina virtual signature is
+        // (clicked support, face, HandSlot, isSimTick). No raw ABI casts.
+        bool const submitted = gameMode->buildBlock(
+            target.at, target.face, HandSlot::Mainhand, false
+        );
+        telemetry::count(submitted ? telemetry::Event::NativeReturnedTrue
+                                   : telemetry::Event::NativeReturnedFalse);
+        if (!submitted) return detail::PlacementDispatchResult::Rejected;
+        placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
+        return detail::PlacementDispatchResult::Sent; // NOT a BDS acknowledgment
+    }
 
     // Server-authoritative placement: build an ItemUseInventoryTransaction and
     // deliver it through the client's packet sender (LoopbackPacketSender in
@@ -625,7 +912,27 @@ detail::PlacementDispatchResult placeBlock(LocalPlayer& player, ProjectionTarget
     );
     auto client = ll::service::getClientInstance();
     if (!client) return detail::PlacementDispatchResult::Rejected;
-    client->getPacketSender().sendToServer(packet);
+    auto& sender = client->getPacketSender();
+    // Only the experimental 2..4/tick path changes the wire protocol.
+    // A true vanilla start/use/stop action is more likely to be recognized by
+    // BDS than extra independent ItemUse packets with no use lifecycle.
+    bool const bdsLifecycle = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && placementState().easyPlaceMaxPerTick() > 1
+        && (isFastOpaquePlacementCandidate(*target.block)
+            || detail::isVanillaConnectivityPlacementBlock(target.block->getTypeName()));
+    if (bdsLifecycle) {
+        auto const id = player.getRuntimeID();
+        // Reserve first so allocation cannot fail after Start reaches BDS.
+        if (gPendingBdsStops.size() >= 32) return detail::PlacementDispatchResult::Rejected;
+        gPendingBdsStops.reserve((std::max)(gPendingBdsStops.capacity(), std::size_t{32}));
+        sendBdsUseAction(sender,id,PlayerActionType::StartItemUseOn,
+            target.at,target.cell,static_cast<int>(target.face));
+        // Keep the matching Stop even if forwarding the transaction raises.
+        gPendingBdsStops.push_back({target.cell,id,&player,&player.getLevel(),
+            GetTickCount64()+kBdsItemUseStopDelayMs});
+    }
+    sender.sendToServer(packet);
     telemetry::count(telemetry::Event::PacketSent);
     placementState().setNextPlaceAt(GetTickCount64() + kMinSendIntervalMs);
     return detail::PlacementDispatchResult::Sent;
@@ -747,6 +1054,26 @@ bool isFastOpaquePlacementCandidate(Block const& ghost) {
     return true;
 }
 
+// A plain opaque cube is always allowed through the proven fast path.
+// Canonical vertical deepslate is also safe when the native planner has
+// already matched its full block state using the actual top support face.
+// Other pillars, directional blocks, walls, slabs, etc. remain unchanged.
+bool canNativeBurstPlace(ProjectionTarget const& target) {
+    if (!target.block) return false;
+    if (isFastOpaquePlacementCandidate(*target.block)) return true;
+    if (!target.floorBand || !target.block->getBlockType().mIsOpaqueFullBlock
+        || target.interactionRotation || target.requireNativeRotationSync) return false;
+    // The support must be the exact block directly beneath the target.
+    bool const below = target.at.x == target.cell.x
+        && target.at.z == target.cell.z
+        && static_cast<std::int64_t>(target.at.y) + 1 == target.cell.y;
+    return detail::floorNativeVerticalDeepslate(
+        target.block->getTypeName(),
+        serializedState(*target.block, "pillar_axis"),
+        static_cast<int>(target.face), below
+    );
+}
+
 bool isViewSensitivePlan(Block const& ghost) {
     if (detail::isEnvironmentOnlyPlacementBlock(ghost.getTypeName())) return false;
     return !isFastOpaquePlacementCandidate(ghost);
@@ -806,7 +1133,7 @@ bool placementPredictionMatches(
             && sameSerializedState(predicted, ghost, "upside_down_bit");
     }
     // A slab's top/bottom half is chosen by the click face and hit height, so it
-    // must be matched explicitly — otherwise a bottom-slab prediction (the first
+    // must be matched explicitly 窶・otherwise a bottom-slab prediction (the first
     // click candidate) can satisfy a top-slab ghost and place the wrong half.
     // Newer versions store the half as minecraft:vertical_half, older ones as
     // top_slot_bit; a double slab has neither and stays on the strict compare.
@@ -907,7 +1234,7 @@ bool resolveOrientedPlacement(
         if (!region.getBlock(upperCell).isAir()) return false;
         // When the upper half is visible we use its hinge to verify the placement
         // exactly. When a layer cut hides it, the cell is not in the query-able
-        // virtual world (hasBlock=false) — we still place the door and let the
+        // virtual world (hasBlock=false) 窶・we still place the door and let the
         // hinge be best-effort, since one DoorItem use creates both halves anyway.
         auto const upper = projection::queryPlacementProjection(player, upperCell);
         if (upper.block && upper.missing && upper.block->getTypeName() == ghost.getTypeName()
@@ -1035,7 +1362,7 @@ bool resolveOrientedPlacement(
         // upper half itself; never use the floating/air-mPos fallback for doors.
         if (isDoor) return false;
         // A slab's half follows the click height, but this air-mPos fallback
-        // predicts from the clicked face — the two diverge (a low click for a top
+        // predicts from the clicked face 窶・the two diverge (a low click for a top
         // slab passes the predictor yet the server places the bottom half). Slabs
         // place through a real support above/beside (handled above); skip the
         // fallback so a wrong-half slab is never sent.
@@ -1308,6 +1635,9 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
     auto const tickNow = GetTickCount64();
+    // Finish prior vanilla action lifecycles even after the user closes the
+    // placement UI or changes mode, provided the same local world is active.
+    flushPendingBdsUseStops(*player, client->getPacketSender());
     consumeBrokenProjectionCells(*player, tickNow);
     // Only act during gameplay: menus, pause screens and the LHolo GUI itself
     // disable in-game input.
@@ -1349,10 +1679,18 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         updateAimedProjectedBlockName(nullptr);
         return;
     }
+    // Keep column depth stable for this entire game tick/burst.
+    bool const floorBandEnabled = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled();
+    int const columnDepth = floorBandEnabled ? placementState().easyPlaceColumnDepth() : 1;
+    // These temporary rejections apply only to this tick and only to the
+    // anchored floor strip. They never alter wall or range placement state.
+    std::vector<BlockPos> skippedFloorCells;
     std::optional<ProjectionTarget> target;
     {
         telemetry::ScopedTimer rayTimer(telemetry::Stage::Ray);
-        target = findProjectionTarget(*player, origin, dir, pickRange);
+        target = findProjectionTarget(*player, origin, dir, pickRange,
+            columnDepth, floorBandEnabled, &skippedFloorCells);
     }
     updateAimedProjectedBlockName(
         showProjectedBlockName && target ? target->block : nullptr
@@ -1364,6 +1702,10 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         placementState().cancelManualPress();
         return;
     }
+    // While a projected rotated placement waits for real AuthInput, hold the
+    // selected stack stable. A second Easy Place attempt may otherwise switch
+    // slots and make the queued observer/piston fail validation before BDS.
+    if (detail::rotationPlacementBusy(*player)) return;
     PlacementContext const placementContext = makePlacementContext(origin, dir, pickRange);
     if (tickNow < placementState().nextPlaceAt()) {
         telemetry::count(telemetry::Event::GlobalInterval);
@@ -1376,7 +1718,7 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
 
-    // Single-crosshair placement: auto (轻松放置) or manual (手动放置), which are
+    // Single-crosshair placement: auto (霓ｻ譚ｾ謾ｾ鄂ｮ) or manual (謇句勘謾ｾ鄂ｮ), which are
     // mutually exclusive in the UI. Manual mode accepts the first block from
     // the press request, then repeats after the hold delay; the buildBlock hook
     // cancels vanilla placement so nothing is placed twice.
@@ -1411,6 +1753,37 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         return;
     }
 
+    // The aimed Y column is rescanned after each accepted native submission.
+    // Mixed full-block hotbar slots may switch within the SAME client tick via
+    // ordered MobEquipment -> GameMode::buildBlock transmissions. Inventory
+    // backpack swaps and native rotation queues remain single-send only.
+    int const maxPerTick = manualPlacement ? 1 : placementState().easyPlaceMaxPerTick();
+    int sentInTick = 0;
+    int burstSlot = -1;
+    int burstAux = -1;
+    bool nativeBurst = false;
+    std::array<int,kHotbarSlots> countAtStart;
+    std::array<int,kHotbarSlots> auxAtStart;
+    std::array<int,kHotbarSlots> sentPerSlot{};
+    countAtStart.fill(-1);
+    auxAtStart.fill(-1);
+    for (int attempt = 0; attempt < maxPerTick; ++attempt) {
+        if (attempt != 0) {
+            // Packet sending can dispatch callbacks/reentrant state changes.
+            // Never continue after the session/mode/input has been retired.
+            if (!placementState().enabled() || placementState().manualMode()
+                || placementState().rangeEnabled() || !client->isInGameInputEnabled()
+                || structure::isGuiVisible() || client->getLocalPlayer() != player) return;
+            if (sentInTick == 0 && skippedFloorCells.empty()) return;
+            // A legacy connection-block burst cannot interleave hotbar items
+            // or transaction families. Native full cubes can, after explicit
+            // selected-equipment notifications and per-slot budgeting.
+            if (sentInTick > 0 && !nativeBurst && player->getSelectedItemSlot() != burstSlot) return;
+            target = findProjectionTarget(*player, origin, dir, pickRange,
+                columnDepth, floorBandEnabled, &skippedFloorCells);
+            if (!target) return;
+        }
+
     // Skip cells placed a moment ago until the server applies them; new cells
     // place immediately.
     auto const now = GetTickCount64();
@@ -1430,8 +1803,23 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
         telemetry::count(telemetry::Event::InventorySwapResolved);
     if (found.slot < 0) {
         telemetry::count(telemetry::Event::NoMaterial);
+        if (target->floorBand) { skippedFloorCells.push_back(target->cell); continue; }
         return;
     }
+    // A previous *native* full-block send permits a new hotbar material; a
+    // legacy connection/shape send retains the original single-stack rule.
+    bool simpleBurstTarget = isFastOpaquePlacementCandidate(*target->block)
+        || detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName());
+    // Floor deepslate is allowed only when its resolved placement is a
+    // validated Y-axis use from the support directly below. Defer the
+    // eligibility decision until AFTER resolveOrientedPlacement.
+    if (sentInTick>0 && nativeBurst
+        && !isFastOpaquePlacementCandidate(*target->block)
+        && !(target->floorBand && target->block->getTypeName() == "minecraft:deepslate")) return;
+    if (sentInTick>0 && !nativeBurst
+        && !detail::burstCanContinue(
+            sentInTick, found.slot==burstSlot,
+            found.item->getIdAux()==burstAux, simpleBurstTarget, false)) return;
     // R19: start the server-synchronized inventory exchange at the FIRST
     // eligible aimed game tick. The old path spent time on full native-facing
     // planning first, then swapped, discarded the plan and waited another
@@ -1473,9 +1861,23 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
     );
     if (expensivePlan && isFailedPlanCached(failedKey,now)) {
         telemetry::count(telemetry::Event::FailedPlanCached);
+        if (target->floorBand) { skippedFloorCells.push_back(target->cell); continue; }
         return;
     }
 
+    // Directional native prediction may inspect the player's REAL selected
+    // item, not just the passed aux. Predict with the projected material held;
+    // otherwise an observer in a different hotbar slot can be rejected before
+    // the later equipment switch ever runs. Only do this for rotation-search
+    // families, not ordinary blocks (which keep their cheap planning path).
+    int const originalSelectedSlot = player->getSelectedItemSlot();
+    bool const selectedForPrediction = found.slot != originalSelectedSlot
+        && detail::placementRotationSearch(target->block->getTypeName(),
+            isTwoBlockDoor(*target->block)) != detail::PlacementRotationSearch::None;
+    if (selectedForPrediction && !selectActualHotbarSlot(*player, found.slot)) {
+        telemetry::count(telemetry::Event::SelectedSlotMismatch);
+        return;
+    }
     // Only send a placement whose full predicted state and official placement
     // checks match the projection, using the real stack's aux value.
     auto& region = player->getDimensionBlockSource();
@@ -1489,6 +1891,14 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
             found.item->getAuxValue(),
             placement
         )) {
+        // No placement was accepted; do not leave the user's item changed by
+        // a speculative orientation probe. Revert via the verified inventory
+        // selector (Player::setSelectedSlot can silently do nothing on 26.60).
+        if (selectedForPrediction
+            && !selectActualHotbarSlot(*player, originalSelectedSlot)) {
+            telemetry::count(telemetry::Event::SelectedSlotMismatch);
+            return;
+        }
         if (expensivePlan) {
             placementState().cacheFailedPlan(
                 failedKey, now, now + kAimedOrientedFailureCacheMs);
@@ -1498,26 +1908,115 @@ void tickEasyPlaceImpl(LocalPlayer& activePlayer) {
             telemetry::count(telemetry::Event::StairPlanRejected);
         if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
             telemetry::count(telemetry::Event::ConnectivityRejected);
+        if (target->floorBand) { skippedFloorCells.push_back(target->cell); continue; }
         return;
     }
+    // Resolve builds a fresh ProjectionTarget; preserve the floor context
+    // only after its full native placement-state prediction has succeeded.
+    placement.floorBand = target->floorBand;
     if(detail::isVanillaConnectivityPlacementBlock(target->block->getTypeName()))
         telemetry::count(telemetry::Event::ConnectivityAccepted);
+    telemetry::count(telemetry::Event::PlanAccepted);
 
-    if (player->getSelectedItemSlot() != found.slot) {
-        player->setSelectedSlot(found.slot);
-        // Let the native selected-slot update propagate before queuing the
-        // stair use transaction; never assume immediate remote synchronization.
-        if (placement.requireNativeRotationSync) return;
+    // Resolve the EXACT native-eligible path before changing the held item.
+    // Never mix native builds with synthetic inventory transactions in a tick.
+    bool const nativeCandidate = placementState().enabled()
+        && !placementState().manualMode() && !placementState().rangeEnabled()
+        && maxPerTick>1 && !placement.interactionRotation
+        && placement.at!=placement.cell
+        && !region.getBlock(placement.at).isAir()
+        && canNativeBurstPlace(placement);
+    // Keep legacy non-opaque sends at one per tick; only proven native
+    // floor deepslate joins the multi-placement burst.
+    if (nativeCandidate) simpleBurstTarget = true;
+    if (!nativeCandidate) {
+        telemetry::count(telemetry::Event::CandidateLegacy);
+        if (placement.at==placement.cell
+            || region.getBlock(placement.at).isAir())
+            telemetry::count(telemetry::Event::CandidateNoSupport);
+        if (!isFastOpaquePlacementCandidate(*placement.block)) {
+            telemetry::count(telemetry::Event::CandidateNonOpaque);
+        }
     }
-    auto const submit = placeBlock(*player, placement, found.slot, *found.item);
+    if (sentInTick>0 && nativeBurst!=nativeCandidate) return;
+    if (sentInTick>0 && !nativeCandidate
+        && (found.slot!=burstSlot || found.item->getIdAux()!=burstAux)) return;
+
+    // Observe a starting quantity/identity for EACH hotbar stack. A stone ->
+    // deepslate -> stone batch cannot spend the same 1-item stack twice.
+    // Local inventory is never modified to simulate placement.
+    if (countAtStart[found.slot]<0) {
+        countAtStart[found.slot]=swapCount(*found.item);
+        auxAtStart[found.slot]=found.item->getIdAux();
+    }
+    if (auxAtStart[found.slot]!=found.item->getIdAux()) {
+        telemetry::count(telemetry::Event::AuxChanged);
+        return;
+    }
+    int const predictedCount=detail::burstPacketStackCount(
+        countAtStart[found.slot],swapCount(*found.item),
+        sentPerSlot[found.slot]);
+    if (predictedCount==0) {
+        telemetry::count(telemetry::Event::CountBudgetZero);
+        return;
+    }
+
+    if (player->getSelectedItemSlot()!=found.slot || selectedForPrediction) {
+        // An oriented prediction may have selected the right stack already.
+        // Still announce that pre-selection to BDS before any use packet.
+        telemetry::count(telemetry::Event::SelectedSlotChanged);
+        if (player->getSelectedItemSlot()!=found.slot
+            && !selectActualHotbarSlot(*player,found.slot)) {
+            telemetry::count(telemetry::Event::SelectedSlotMismatch);
+            return;
+        }
+        // Keep manual, automatic and native paths server-synchronized. A
+        // pending rotated transaction must not use a server-side stale slot.
+        if (!sendEquipmentBeforeNativeBuild(*player,found.slot,*found.item)) {
+            telemetry::count(telemetry::Event::EquipmentFailed);
+            return;
+        }
+        telemetry::count(telemetry::Event::EquipmentSent);
+        if (client->getLocalPlayer()!=player
+            || player->getSelectedItemSlot()!=found.slot) {
+            telemetry::count(telemetry::Event::SelectedSlotMismatch);
+            return;
+        }
+        if (!nativeCandidate && (!manualPlacement
+            || placement.requireNativeRotationSync)) {
+            telemetry::count(telemetry::Event::LegacySlotDeferred);
+            return;
+        }
+    }
+    if (sentInTick>0 && placement.requireNativeRotationSync) return;
+
+    ItemStack packetItem=*found.item;
+    if (!nativeCandidate && sentPerSlot[found.slot]>0)
+        setBurstPacketItemCount(packetItem,predictedCount);
+    telemetry::count(telemetry::Event::BeforeDispatch);
+    auto const submit = placeBlock(*player, placement, found.slot, packetItem);
     // Queued rotations will mark the cell only in the actual native
     // forwarding hook; the pending manual press remains open meanwhile.
     if (!detail::isPlacementSent(submit)) return;
     markPlaced(placement.cell, now);
+    if (sentInTick==0) nativeBurst=nativeCandidate;
+    burstSlot=found.slot;
+    burstAux=found.item->getIdAux();
+    ++sentPerSlot[found.slot];
+    ++sentInTick;
+    if (sentInTick == 2) telemetry::count(telemetry::Event::BurstSecond);
+    else if (sentInTick == 3) telemetry::count(telemetry::Event::BurstThird);
+    else if (sentInTick == 4) telemetry::count(telemetry::Event::BurstFourth);
     // Manual repeat bookkeeping: record this placement and mark the current
     // press as having placed its first block (so holding then auto-repeats).
     placementState().setLastManualPlaceAt(now);
     placementState().setManualPlaceRequested(false);
+
+    // Directionally sensitive and multi-cell items (stairs, slabs, doors,
+    // etc.) stay at a single send/tick until native BDS proves safe multi-use.
+    // Normal opaque blocks and connectivity-driven walls/fences may burst.
+    if (placement.requireNativeRotationSync || !simpleBurstTarget) return;
+    }
 }
 } // namespace
 

@@ -8,6 +8,8 @@
 ![Minecraft](https://img.shields.io/badge/Minecraft-1.26.60.05-555?style=flat-square)
 ![Platform](https://img.shields.io/badge/Windows-x64-555?style=flat-square)
 [![License](https://img.shields.io/github/license/rometet/LHolo?style=flat-square)](LICENSE)
+> **Integrated Sync (26.60 preview):** This draft branch adds optional server-shared schematics. Bedrock 26.60 client and server build verification is tracked in PR #37; install LHoloSyncServer only on a compatible BDS. See [Sync guide](docs/LHoloSync.md).
+
 
 [**ダウンロード**](https://github.com/rometet/LHolo/releases) · [**導入方法**](#導入方法) · [**基本操作**](#基本操作) · [English](docs/README_EN.md) · [简体中文](docs/README_ZH_CN.md)
 

@@ -8,6 +8,9 @@ namespace lholo::place::detail {
     unsigned ghostId,int slot,ItemStack const&,float pitch,float yaw,
     std::unique_ptr<ComplexInventoryTransaction>,bool requireNativeRotationSync=false,
     bool requireStairWarmup=false);
+// A pending AuthInput placement owns the selected slot until it is forwarded,
+// canceled, or expires. Call before any speculative item switch or new plan.
+[[nodiscard]] bool rotationPlacementBusy(LocalPlayer const&) noexcept;
 [[nodiscard]] bool queueExternalRotationPlacement(LocalPlayer&,BlockPos const& cell,
     BlockPos const& support,unsigned targetBlockId,unsigned char face,int slot,ItemStack const&,
     float pitch,float yaw,std::unique_ptr<ComplexInventoryTransaction>,std::uint64_t ownerToken,
