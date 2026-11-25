@@ -1,5 +1,7 @@
 # LHolo
 
+**開発に参加 / Contribute:** [Start here](docs/START_HERE.md) · [Good first issues](https://github.com/rometet/LHolo/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+
 **Minecraft Bedrock Edition 向けの設計図投影・建築支援 Mod**
 
 `.mcstructure` と `.litematic` をゲーム内に投影し、建築の進捗確認、ブロックの検証、材料の管理を支援します。Windows 版 Minecraft と **LeviLamina Client** で動作するクライアント Mod です。

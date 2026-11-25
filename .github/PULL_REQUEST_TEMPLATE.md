@@ -15,3 +15,11 @@
 - [ ] ライセンス、著作権表示、サードパーティ通知を維持している
 
 承認後は原則squash mergeし、作業用ブランチを整理します。未統合の独自コミットを持つブランチは削除しません。
+
+
+## Scope / 関連 Issue
+
+- Issue or dependent PR:
+- Acceptance criteria:
+- Build / unit tests / in-game (mark each PASS, FAIL, BLOCKED or NOT RUN):
+- Remaining limitations:
