@@ -1,9 +1,13 @@
 #pragma once
 #include "structure/MaterialList.h"
+#include "io/MaterialExport.h"
 #include <memory>
 namespace lholo::ui {
 struct MaterialsViewState {
     structure::detail::MaterialFilter filter{};
+    // Persisted only for the session work view; the export format is a click-time
+    // choice like filter, not a saved setting.
+    io::MaterialExportFormat exportFormat{io::MaterialExportFormat::Tsv};
     std::shared_ptr<structure::detail::MaterialListSnapshot const> cached;
     structure::detail::MaterialFilter cachedFilter{};
     std::vector<std::size_t> visible;

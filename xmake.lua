@@ -386,6 +386,16 @@ target("LHoloMaterialsTests")
     add_syslinks("user32")
     add_packages("levilamina", "imgui", "zlib")
 
+-- Host-only material rule regression tests.
+target("LHoloMaterialJePortTests")
+    set_kind("binary")
+    set_languages("c++20")
+    set_default(false)
+    add_includedirs("src")
+    add_files("tests/materials_je/**.cpp")
+    add_cxflags("/utf-8", "/W4", "/WX")
+    add_defines("NOMINMAX")
+
 target("LHoloExportDialogFixture")
     set_kind("shared")
     set_languages("c++20")

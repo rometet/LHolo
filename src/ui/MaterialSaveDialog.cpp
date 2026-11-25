@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <commdlg.h>
 #include <algorithm>
+#include <cwchar>
 #include <stdexcept>
 #include <vector>
 
@@ -36,16 +37,28 @@ UINT_PTR CALLBACK cancelHook(HWND child, UINT message, WPARAM wparam, LPARAM lpa
 }
 }
 std::optional<std::filesystem::path> saveMaterialFile(std::wstring const& title,
-                                                     io::MaterialExportCancel const& cancellation) {
+                                                     io::MaterialExportCancel const& cancellation,
+                                                     io::MaterialExportFormat format) {
     if (cancellation && cancellation->cancelled()) return std::nullopt;
     DialogContext context{cancellation};
     std::vector<wchar_t> buffer(FileDialogPathCodeUnitCapacity, L'\0');
-    constexpr wchar_t name[]=L"LHolo-materials.tsv";
-    std::copy(std::begin(name),std::end(name),buffer.begin());
+    wchar_t const* name = nullptr;
+    wchar_t const* filter = nullptr;
+    wchar_t const* defExt = nullptr;
+    switch (format) {
+    case io::MaterialExportFormat::JeCsv:
+        name = L"LHolo-materials.csv";filter = L"CSV (JE)\0*.csv\0\0";defExt = L"csv";break;
+    case io::MaterialExportFormat::JeJson:
+        name = L"LHolo-materials.json";filter = L"JSON (JE)\0*.json\0\0";defExt = L"json";break;
+    case io::MaterialExportFormat::Tsv:
+    default:
+        name = L"LHolo-materials.tsv";filter = L"TSV (UTF-8)\0*.tsv\0\0";defExt = L"tsv";break;
+    }
+    std::copy(name, name + std::wcslen(name) + 1, buffer.begin());
     OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);
     dialog.lpstrFile=buffer.data();dialog.nMaxFile=static_cast<DWORD>(buffer.size());
-    dialog.lpstrTitle=title.c_str();dialog.lpstrFilter=L"TSV (UTF-8)\0*.tsv\0\0";
-    dialog.nFilterIndex=1;dialog.lpstrDefExt=L"tsv";
+    dialog.lpstrTitle=title.c_str();dialog.lpstrFilter=filter;
+    dialog.nFilterIndex=1;dialog.lpstrDefExt=defExt;
     dialog.Flags=OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | OFN_ENABLEHOOK;
     dialog.lpfnHook=cancelHook;dialog.lCustData=reinterpret_cast<LPARAM>(&context);
     if (!GetSaveFileNameW(&dialog)) {

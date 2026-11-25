@@ -1,5 +1,6 @@
 #include "io/MaterialExport.h"
 #include "io/AtomicOutput.h"
+#include "io/MaterialJeExport.h"
 #include <chrono>
 #include <fstream>
 #include <stdexcept>
@@ -25,6 +26,26 @@ bool writeMaterialTsv(std::filesystem::path const& output, MaterialExportRequest
     if (cancelled()) return false;
     auto const& snapshot = *request.snapshot;
     auto const summary = structure::detail::summarizeMaterials(snapshot);
+    // JE-compatible formats reuse this same atomic write + cancellation path; only the
+    // rendered body differs, so a failed export still cannot leave a partial file.
+    if (request.format != MaterialExportFormat::Tsv) {
+        structure::material_rules::JeExportOptions options;
+        options.multiplier = 1;
+        options.names = &request.names;
+        options.filter = request.filter;
+        std::string const body = request.format == MaterialExportFormat::JeJson
+            ? structure::material_rules::renderJeJson(snapshot, options)
+            : structure::material_rules::renderJeCsv(snapshot, options);
+        return writeOutputAtomically(output, [&](auto const& staged) {
+            if (cancelled()) return false;
+            std::ofstream stream(staged, std::ios::binary | std::ios::trunc);
+            stream.exceptions(std::ios::badbit | std::ios::failbit);
+            stream << body;
+            stream.flush();
+            stream.close();
+            return !cancelled();
+        });
+    }
     return writeOutputAtomically(output, [&](auto const& staged) {
         std::ofstream stream(staged, std::ios::binary | std::ios::trunc);
         stream.exceptions(std::ios::badbit | std::ios::failbit);

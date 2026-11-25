@@ -20,7 +20,7 @@ template<class Predicate> bool until(Predicate predicate,std::chrono::millisecon
 MaterialExportRequest request() {
     auto snapshot=std::make_shared<lholo::structure::detail::MaterialListSnapshot>();
     snapshot->source="ARTIFICIAL lifecycle fixture";snapshot->scope={1,1};
-    return {snapshot,{}, {},"fixture"};
+    return {snapshot,{},MaterialExportFormat::Tsv,{},"fixture"};
 }
 void testRetentionAndTimeout() {
     MaterialExportJob job;
@@ -80,7 +80,9 @@ struct Fixture {
     bool (*start)(int){};DWORD (*thread)(){};void (*release)(){};
     bool (*close)(unsigned){};int (*phase)(){};bool (*canUnload)(){};
     template<class F> void bind(F& function,char const* name) {
-        function=reinterpret_cast<F>(GetProcAddress(module,name));check(function!=nullptr,"fixture export exists");
+        // FARPROC -> void* -> typed pointer avoids -Wcast-function-type-mismatch
+        // on clang 19 without changing the loaded address.
+        function=reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(module,name)));check(function!=nullptr,"fixture export exists");
     }
     explicit Fixture(std::filesystem::path const& path) {
         module=LoadLibraryW(path.c_str());check(module!=nullptr,"load private dialog fixture DLL");
