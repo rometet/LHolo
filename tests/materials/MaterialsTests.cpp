@@ -138,6 +138,56 @@ void testExport(std::filesystem::path const& dir) {
     check(bytes.find("\"'=SUM(1,2)\"")!=std::string::npos,"spreadsheet formula escaped");
     check(bytes.find("\"liquid:water|item=\"\t\"minecraft:water\"\t\"\"\t8\t\t\tfalse\t8")!=std::string::npos,"unknown counts empty, not zero");
     check(bytes.find("original_total\t184")!=std::string::npos && bytes.find("generation\t103")!=std::string::npos,"original totals and generation metadata");
+    // JE-compatible bodies route through the same request.format on the real
+    // atomic writer; the body rules themselves are covered by LHoloMaterialJePortTests.
+    for (auto const format : {lholo::io::MaterialExportFormat::JeCsv,lholo::io::MaterialExportFormat::JeJson}) {
+        auto je=request();je.format=format;
+        auto const jePath=dir/(format==lholo::io::MaterialExportFormat::JeCsv?L"je-materials.csv":L"je-materials.json");
+        check(writeMaterialTsv(jePath,je),"JE export writes through the atomic path");
+        auto const jeBytes=read(jePath);
+        if(format==lholo::io::MaterialExportFormat::JeCsv) {
+            check(jeBytes.starts_with("\xEF\xBB\xBFitem,aux,label,total,missing,wrong_block,wrong_state,unknown,available,to_gather\r\n"),
+                "JE CSV header matches the upstream column set");
+            check(jeBytes.find("\"'=SUM(1,2)\"")!=std::string::npos,"JE CSV prefixes the formula label with an apostrophe inside the quoted cell");
+            check(jeBytes.find("\"日本語\t欄\n改行\"\"引用\"\"\"")!=std::string::npos,"JE CSV keeps normal Japanese text and doubles quotes without a guard");
+            check(jeBytes.ends_with("\r\n"),"JE CSV uses CRLF records");
+        } else {
+            check(jeBytes.starts_with("[\n") && jeBytes.ends_with("]\n"),"JE JSON uses the array envelope");
+            check(jeBytes.find("\"label\": \"=SUM(1,2)\"")!=std::string::npos,"JE JSON quotes the formula label");
+            check(jeBytes.find("\"label\": \"日本語欄改行\\\"引用\\\"\"")!=std::string::npos,"JE JSON keeps the original label text");
+            check(jeBytes.find("'=SUM")==std::string::npos,"JE JSON never gains the CSV apostrophe guard");
+            check(jeBytes.find("item\\t")==std::string::npos,"JE JSON leaves no TSV cells");
+        }
+    }
+    // Regression: JE bodies must honour request.filter instead of always
+    // rendering the All selection. The copied snapshot carries the fixture
+    // availability so stone/item_b are short and item_a is met.
+    for (auto const format : {lholo::io::MaterialExportFormat::JeCsv,lholo::io::MaterialExportFormat::JeJson}) {
+        auto base=request();
+        auto snapshot=std::make_shared<MaterialListSnapshot>(*base.snapshot);
+        snapshot->available={64,32,4,std::nullopt};
+        auto shortage=base;shortage.snapshot=snapshot;shortage.format=format;shortage.filter=MaterialFilter::Shortage;
+        auto const shortagePath=dir/(format==lholo::io::MaterialExportFormat::JeCsv?L"je-shortage.csv":L"je-shortage.json");
+        check(writeMaterialTsv(shortagePath,shortage),"JE shortage export writes");
+        auto const shortageBytes=read(shortagePath);
+        check(shortageBytes.find("minecraft:stone")!=std::string::npos && shortageBytes.find("item_b")!=std::string::npos,
+            "JE shortage keeps stone and item_b");
+        check(shortageBytes.find("item_a")==std::string::npos && shortageBytes.find("minecraft:water")==std::string::npos,
+            "JE shortage drops met item_a and unknown water");
+        auto ignoredSnapshot=std::make_shared<MaterialListSnapshot>(*snapshot);
+        ignoredSnapshot->ignored.insert("body:state_a|item=item_a");
+        auto ignored=base;ignored.snapshot=ignoredSnapshot;ignored.format=format;ignored.filter=MaterialFilter::Ignored;
+        auto const ignoredPath=dir/(format==lholo::io::MaterialExportFormat::JeCsv?L"je-ignored.csv":L"je-ignored.json");
+        check(writeMaterialTsv(ignoredPath,ignored),"JE ignored export writes");
+        auto const ignoredBytes=read(ignoredPath);
+        check(ignoredBytes.find("item_a")!=std::string::npos && ignoredBytes.find("minecraft:stone")==std::string::npos
+            && ignoredBytes.find("item_b")==std::string::npos && ignoredBytes.find("minecraft:water")==std::string::npos,
+            "JE ignored exports only the explicitly ignored row");
+        auto all=ignored;all.filter=MaterialFilter::All;
+        auto const allPath=dir/(format==lholo::io::MaterialExportFormat::JeCsv?L"je-all-ignored.csv":L"je-all-ignored.json");
+        check(writeMaterialTsv(allPath,all),"JE all export writes");
+        check(read(allPath).find("item_a")==std::string::npos,"JE default all still excludes ignored rows");
+    }
     MaterialExportJob job;std::atomic_bool release{};auto const owner=std::this_thread::get_id();std::thread::id worker;
     check(job.start(captured,[&](auto const&){worker=std::this_thread::get_id();while(!release.load())std::this_thread::yield();return std::optional{path};}),"start worker");
     check(job.poll().phase==MaterialExportPhase::Saving && !job.start(captured,[](auto const&){return std::optional<std::filesystem::path>{};}),"poll nonblocking and no duplicate job");

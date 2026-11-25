@@ -146,11 +146,21 @@ void renderMaterialsPage(MenuModel& model,MenuActions const& actions,UiMetrics c
     ImGui::BeginDisabled(!snapshot || snapshot->ignored.empty() || !actions.clearIgnoredMaterials);
     if(ImGui::Button(textFor(TextKey::MaterialsRestore)) && snapshot && actions.clearIgnoredMaterials)actions.clearIgnoredMaterials(snapshot->scope);
     ImGui::EndDisabled();nextIfFits(textFor(TextKey::MaterialsExport),metrics);
+    // Export body choice; shares the atomic writer with the TSV, only the body
+    // renderer differs. Labels are the technical format names in every locale.
+    constexpr std::array formatOptions{std::pair{io::MaterialExportFormat::Tsv,TextKey::MaterialsFormatTsv},
+        std::pair{io::MaterialExportFormat::JeCsv,TextKey::MaterialsFormatCsv},
+        std::pair{io::MaterialExportFormat::JeJson,TextKey::MaterialsFormatJson}};
+    for(auto const& [formatValue,formatKey] : formatOptions) {
+        if(formatValue!=io::MaterialExportFormat::Tsv)nextIfFits(textFor(formatKey),metrics,true);
+        if(ImGui::RadioButton(textFor(formatKey),view.exportFormat==formatValue))view.exportFormat=formatValue;
+    }
     bool const canExport=snapshot && model.hasLoadedStructure && actions.exportMaterials
         && model.materialExport.accepting && model.materialExport.phase!=io::MaterialExportPhase::Saving;
     ImGui::BeginDisabled(!canExport);
     if(ImGui::Button(textFor(TextKey::MaterialsExport)) && canExport) {
         io::MaterialExportRequest request;request.snapshot=snapshot;request.filter=view.filter;request.capturedAt=nowUtc();
+        request.format=view.exportFormat;
         request.names.reserve(snapshot->requirements.size());for(auto const& row:snapshot->requirements)request.names.emplace_back(nameFor(row));
         actions.exportMaterials(std::move(request));
     }

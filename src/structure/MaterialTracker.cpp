@@ -7,6 +7,7 @@
 #include "structure/PlacementTransform.h"
 #include "structure/Verification.h"
 #include "structure/MaterialTypePresence.h"
+#include "structure/MaterialBucketConverter.h"
 #include "mc/world/level/block/VanillaStates.h"
 #include "app/FutureResult.h"
 #include "app/NativeCallbackBoundary.h"
@@ -138,9 +139,19 @@ std::vector<MaterialRequirement> resolveMaterials(
         if (!blockValue || blockCount == 0) return;
 
         std::string const typeName{blockValue->getTypeName()};
-        auto const rule = requiredItemRule(typeName,
+        // JE-compatible quantity: LHolo's own door/double-slab rule, extended
+        // with the ported LeviSchematic build quantities that LHolo lacked
+        // (snow layer height, turtle egg / sea pickle / candle cluster counts).
+        auto rule = requiredItemRule(typeName,
             blockValue->getState<bool>(VanillaStates::UpperBlockBit()).value_or(false),
             blockValue->getState<bool>(VanillaStates::HeadPieceBit()).value_or(false));
+        auto const portedQuantity = material_rules::buildQuantity(typeName, {
+            {"height", blockValue->getState<int>(VanillaStates::Height()).value_or(0)},
+            {"turtle_egg_count", static_cast<int>(
+                blockValue->getState<EggCount>(VanillaStates::TurtleEggCount()).value_or(EggCount::OneEgg))},
+            {"cluster_count", blockValue->getState<int>(VanillaStates::ClusterCount()).value_or(0)},
+            {"candles", blockValue->getState<int>(VanillaStates::Candles()).value_or(0)}}).count;
+        if (portedQuantity > rule.quantity) rule.quantity = portedQuantity;
         if (!rule.quantity) return;
         blockCount = blockCount > std::numeric_limits<std::uint64_t>::max()/rule.quantity
             ? std::numeric_limits<std::uint64_t>::max() : blockCount * rule.quantity;

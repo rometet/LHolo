@@ -9,9 +9,14 @@
 #include <mutex>
 
 namespace lholo::io {
+// Output format of the materials export. Tsv is LHolo's original sheet; JeCsv and JeJson
+// use the JE/Litematica material-list column set so the file drops into the same workflow
+// as the Java tools (rules ported from LeviSchematic, LGPL-3.0 -> GPL-3.0).
+enum class MaterialExportFormat { Tsv, JeCsv, JeJson };
 struct MaterialExportRequest {
     std::shared_ptr<structure::detail::MaterialListSnapshot const> snapshot;
     structure::detail::MaterialFilter filter{};
+    MaterialExportFormat format{MaterialExportFormat::Tsv};
     // Render/localization is captured once on explicit operation; no engine
     // objects or mutable UI strings cross the worker boundary.
     std::vector<std::string> names;

@@ -46,3 +46,9 @@ pinned to 16f0f565951dbbf1161e61c798209d2a35889684; its snapshot has no root
 license file, so this notice does not assert an additional license for it.
 The LGPL/GPL SDK license texts and SymbolProvider's source-header notice are
 included. This mod's GPL license and the Chunker MIT notice above are preserved.
+
+## Ported source
+
+| Date | Source (repo@commit) | Copyright | License | Files | Changes |
+|---|---|---|---|---|---|
+| 2026-11-24 | LiteLDev/LeviSchematic@e6f803ba11f520bbfe678c13fb79523fc340225b | Copyright (c) LiteLDev and LeviSchematic contributors; LGPL-3.0 (see licenses/LeviSchematic/LICENSE) | LGPL-3.0 | src/structure/MaterialBucketConverter.h, src/io/MaterialJeExport.h, tests/materials_je/MaterialJePortTests.cpp, src/structure/MaterialTracker.cpp (quantity rule) | Ported substituteItem and buildRule from interaction/survival/inventory/MaterialRules.h and csvCell/exportReport column sets from survival/SurvivalAlgorithms.h and service/MaterialService.cpp. Adapted from engine-coupled (Block*/ItemRegistry) to an engine-free state-map API; export renders to string instead of writing files. |
